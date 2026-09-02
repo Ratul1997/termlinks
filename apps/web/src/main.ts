@@ -1142,6 +1142,7 @@ function renderDesktop(): void {
   const page = el("main", "desktop-page");
   const header = el("header", "desktop-header");
   const back = el("button", "back-button", "‹");
+  back.classList.add("terminal-back-button");
   back.type = "button";
   back.setAttribute("aria-label", "Back to sessions");
   back.addEventListener("click", renderSessions);
@@ -1891,8 +1892,10 @@ function renderTerminal(id: string): void {
   back.setAttribute("aria-label", "Back to sessions");
   back.addEventListener("click", renderSessions);
   const identity = el("div", "terminal-identity");
-  identity.append(el("strong", "terminal-name", session.name), el("span", "terminal-subtitle", shortCommand(session.command)));
-  const menu = el("button", "icon-button", "•••");
+  const title = el("div", "terminal-title-row");
+  title.append(el("strong", "terminal-name", session.name), el("span", "terminal-live-badge", "LIVE"));
+  identity.append(title, el("span", "terminal-subtitle", shortCommand(session.command)));
+  const menu = el("button", "icon-button terminal-menu-button", "•••");
   menu.type = "button";
   menu.title = "Session actions";
   menu.addEventListener("click", () => actions.classList.toggle("open"));
@@ -1927,7 +1930,11 @@ function renderTerminal(id: string): void {
 
   const connection = el("div", "connection-bar");
   connection.id = "connection-state";
-  connection.append(el("span", "connection-dot"), el("span", "connection-label", "Connecting…"));
+  connection.append(
+    el("span", "connection-dot"),
+    el("span", "connection-label", "Connecting…"),
+    el("span", "connection-security", encryptedPortal ? "E2E" : "LOCAL"),
+  );
   const frame = el("section", "terminal-frame");
   const mount = el("div", "terminal-mount");
   mount.id = "terminal";
@@ -1949,9 +1956,10 @@ function renderTerminal(id: string): void {
     // scroll container installed below.
     smoothScrollDuration: 0,
     theme: {
-      background: "#070a09", foreground: "#d8e2dc", cursor: "#9fffb9", cursorAccent: "#070a09",
-      selectionBackground: "#335c4166", black: "#111715", brightBlack: "#66716b",
-      green: "#74e497", brightGreen: "#9fffb9", cyan: "#79d7c7",
+      background: "#090d13", foreground: "#d7dee9", cursor: "#5cc8f5", cursorAccent: "#090d13",
+      selectionBackground: "#2b6f9b66", black: "#111820", brightBlack: "#637180",
+      green: "#71d99a", brightGreen: "#99edb8", cyan: "#63cce9", brightCyan: "#8eddf3",
+      blue: "#64a8ff", brightBlue: "#8fc1ff", yellow: "#e5c07b", brightYellow: "#f0d79a",
     },
   });
   const fit = new FitAddon();
@@ -1995,7 +2003,8 @@ function renderTerminalTabs(activeSessionId: string): HTMLElement {
   list.setAttribute("role", "tablist");
   list.setAttribute("aria-label", "Running terminals");
   let activeTab: HTMLButtonElement | undefined;
-  for (const session of state.sessions.filter((item) => item.running)) {
+  const runningSessions = state.sessions.filter((item) => item.running);
+  for (const [index, session] of runningSessions.entries()) {
     const tab = el("button", "terminal-tab");
     tab.type = "button";
     tab.setAttribute("role", "tab");
@@ -2004,7 +2013,11 @@ function renderTerminalTabs(activeSessionId: string): HTMLElement {
     tab.setAttribute("aria-selected", String(active));
     if (active) tab.setAttribute("aria-current", "page");
     tab.title = `${session.name} · ${shortCommand(session.command)}`;
-    tab.append(el("span", "terminal-tab-dot"), el("span", "terminal-tab-name", session.name));
+    tab.append(
+      el("span", "terminal-tab-index", String(index + 1)),
+      el("span", "terminal-tab-dot"),
+      el("span", "terminal-tab-name", session.name),
+    );
     tab.addEventListener("click", () => {
       if (!active) renderTerminal(session.id);
     });
