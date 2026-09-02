@@ -24,13 +24,14 @@ import (
 	"termlinks/backend/internal/client"
 	"termlinks/backend/internal/cloud"
 	"termlinks/backend/internal/config"
+	"termlinks/backend/internal/selfupdate"
 	"termlinks/backend/internal/server"
 	"termlinks/backend/internal/session"
 	"termlinks/backend/internal/visibleterminal"
 	"termlinks/backend/internal/windowcapture"
 )
 
-const version = "0.5.0"
+const version = "0.6.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -68,6 +69,8 @@ func run(args []string) error {
 			return runCloud(args[1:])
 		case "desktop":
 			return runDesktop(args[1:])
+		case "update":
+			return runUpdate(args[1:])
 		case "version", "--version", "-v":
 			fmt.Println("termlinks", version)
 			return nil
@@ -77,6 +80,42 @@ func run(args []string) error {
 		}
 	}
 	return runCommand(args)
+}
+
+func runUpdate(args []string) error {
+	if len(args) != 0 {
+		return errors.New("usage: termlinks update")
+	}
+	connectorWasRunning := false
+	if paths, err := config.ResolvePaths(); err == nil {
+		if pid, running := cloudProcess(paths); running && isTermlinksConnector(pid) {
+			connectorWasRunning = true
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	result, err := selfupdate.Update(ctx, selfupdate.Options{CurrentVersion: version})
+	if err != nil {
+		return fmt.Errorf("update: %w", err)
+	}
+	if !result.Updated {
+		fmt.Printf("Termlinks %s is already the newest release.\n", result.From)
+		return nil
+	}
+
+	fmt.Printf("Updated Termlinks %s -> %s using %s (SHA-256 verified).\n", result.From, result.To, result.AssetName)
+	if connectorWasRunning {
+		fmt.Println("Restarting the cloud connector; active terminal sessions will stay running...")
+		if err := stopCloud(); err != nil {
+			return fmt.Errorf("update installed, but cloud connector restart could not stop the old process: %w", err)
+		}
+		if err := startCloud(); err != nil {
+			return fmt.Errorf("update installed, but cloud connector restart failed: %w", err)
+		}
+	}
+	fmt.Println("Active terminal sessions and the running daemon were not restarted.")
+	return nil
 }
 
 func runCloud(args []string) error {
@@ -838,6 +877,7 @@ Usage:
   termlinks stop <id>               Gracefully stop a session
   termlinks token                   Print the private portal login token
   termlinks doctor                  Show safe local diagnostics
+  termlinks update                  Securely install the newest release
   termlinks cloud configure ...     Configure the Cloudflare relay
   termlinks cloud start             Connect this computer to the cloud portal
   termlinks cloud status            Show cloud connector status

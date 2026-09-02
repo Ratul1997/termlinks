@@ -28,6 +28,7 @@ Termlinks provides remote keyboard access to local processes and can optionally 
 - The connector secret and browser portal token are independent random credentials. The connector secret is stored locally in a `0600` file and as a Cloudflare Worker secret.
 - Public responses use HTTPS security headers, random AES-GCM nonces, direction/sequence/channel-bound authenticated encryption, bounded message sizes, a short unauthenticated timeout, and a Durable Object connection/viewer limit.
 - A directly tunneled portal advertises `/api/mode` so the same frontend can select its cookie-authenticated local API instead of assuming a particular hosted domain. This endpoint contains no session or user data.
+- `termlinks update` uses a fixed GitHub release API, accepts only HTTPS downloads from GitHub-controlled hosts, bounds metadata/archive/binary sizes, rejects unsafe archive entries and links, verifies the release SHA-256 entry, executes the staged binary only for an exact version check, and atomically replaces the invoking executable. It never restarts the daemon or active PTYs; only an already-running cloud connector is restarted.
 
 ## Safe deployment
 
@@ -60,6 +61,7 @@ The state directory is shown by `termlinks doctor`. On macOS it normally lives u
 - Public attackers can attempt connections or denial-of-service traffic. The 256-bit portal token makes successful guessing impractical, but timeouts and connection caps do not eliminate availability attacks.
 - The default Cloudflare relay still observes IP addresses, connection timing, ciphertext sizes, and whether the computer is online. E2E encryption does not conceal this metadata.
 - Hosted frontend JavaScript is delivered by the selected provider. If that account or deployment is compromised, altered JavaScript could capture a portal token when it is typed; E2E encryption cannot protect against a malicious client build.
+- Update checksums detect corruption and mismatched release files, but they are published in the same GitHub release as the binaries. They do not protect against compromise of the project repository, maintainer account, release workflow, GitHub, or the build dependencies. Review and build from source when that trust boundary is not acceptable.
 - Offline PWA launch provides only the cached interface. Terminal access still requires an online computer and connector, and the portal token must be entered again after a fresh app process starts.
 
 For these reasons, this MVP is appropriate for personal use on trusted devices, not shared hosts or a public SaaS service.

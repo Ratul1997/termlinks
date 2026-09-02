@@ -116,6 +116,16 @@ termlinks version
 termlinks help
 ```
 
+Update an installed copy to the newest compatible release:
+
+```sh
+termlinks update
+```
+
+That one command checks the official GitHub Releases feed, selects the build for the computer's operating system and CPU, verifies the published SHA-256 checksum, verifies the downloaded executable's reported version, and replaces the current executable atomically. If the cloud connector was online, Termlinks restarts only that connector. It deliberately does **not** restart the daemon or active terminal sessions, so work in progress stays alive; the running daemon adopts the new executable the next time it is safely restarted.
+
+The command updates the exact executable that invoked it, whether it is `~/.local/bin/termlinks`, `/usr/local/bin/termlinks`, or a standalone copy. The containing directory must be writable by the current user. An administrator-owned installation may require running the same command with appropriate privileges. Source-only or unsupported-platform installations can still update with `git pull && make install`.
+
 Control the outbound cloud connection:
 
 ```sh
@@ -264,6 +274,7 @@ For local Worker development, copy `apps/relay/.dev.vars.example` to the gitigno
 | `npm run build:backend` | Produces stripped `dist/termlinks`; macOS uses external linking and ad-hoc signs identifier `dev.termlinks.cli`. |
 | `npm run build` / `make build` | Runs web build, embed sync, and backend build in order. |
 | `make install` | Builds and installs to `$HOME/.local/bin/termlinks`. The Makefile currently has no `PREFIX` override. |
+| `termlinks update` | Installs the newest compatible GitHub release after HTTPS, host, archive, version, and SHA-256 validation. It restarts an active cloud connector but preserves the daemon and PTYs. |
 | `npm run dev --workspace @termlinks/web` | Rebuilds on change and serves static UI assets on `127.0.0.1:5173`; it does not proxy the daemon API. |
 | `npm run types:relay` | Regenerates Cloudflare Worker types using `.dev.vars.example`. |
 | `npm run deploy:relay` | Convenience deployment using the checked-in Worker name. Use the explicit commands in the Cloudflare guide for a custom name. |
@@ -271,6 +282,8 @@ For local Worker development, copy `apps/relay/.dev.vars.example` to the gitigno
 | `npm audit` | Audits npm dependencies. |
 
 Standard Go build variables such as `GOOS`, `GOARCH`, and `CGO_ENABLED` are honored by Go. The native macOS selected-window module is compiled only on Darwin with cgo; unsupported builds retain terminal features and report the window picker as unavailable.
+
+Official release archives are currently built natively for macOS ARM64/AMD64 and Linux ARM64/AMD64 by `.github/workflows/release.yml`. A maintainer creates a stable release by updating the checked-in version, committing it, and pushing a matching `vX.Y.Z` tag. The workflow refuses a mismatched tag, builds the embedded portal and native executable, creates `checksums.txt`, and publishes the artifacts to GitHub Releases.
 
 ### Optional integration-test environment variables
 

@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            platform: darwin_arm64
+          - runner: macos-15-intel
+            platform: darwin_amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux_arm64
+          - runner: ubuntu-24.04
+            platform: linux_amd64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.8
+          cache-dependency-path: apps/backend/go.sum
+      - run: npm ci
+      - run: npm run build:web && npm run sync:web
+      - name: Verify native target
+        shell: bash
+        run: |
+          actual="$(go env GOOS)_$(go env GOARCH)"
+          test "$actual" = "${{ matrix.platform }}"
+      - name: Build executable
+        shell: bash
+        run: |
+          if [ "$(go env GOOS)" = darwin ]; then
+            go -C apps/backend build -trimpath -ldflags "-linkmode=external -s -w" -o ../../dist/termlinks ./cmd/termlinks
+            codesign --force --sign - --identifier dev.termlinks.cli dist/termlinks
+          else
+            go -C apps/backend build -trimpath -ldflags "-s -w" -o ../../dist/termlinks ./cmd/termlinks
+          fi
+      - name: Package release
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          test "$(./dist/termlinks version)" = "termlinks $version"
+          mkdir release-package
+          cp dist/termlinks release-package/termlinks
+          tar -C release-package -czf "termlinks_${version}_${{ matrix.platform }}.tar.gz" termlinks
+      - uses: actions/upload-artifact@v4
+        with:
+          name: termlinks-${{ matrix.platform }}
+          path: termlinks_*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: termlinks-*
+          path: dist
+          merge-multiple: true
+      - name: Create checksums
+        run: cd dist && sha256sum termlinks_*.tar.gz > checksums.txt
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "Termlinks ${GITHUB_REF_NAME#v}"
