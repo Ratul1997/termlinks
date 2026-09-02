@@ -1034,6 +1034,12 @@ function renderTerminal(id: string): void {
   const reconnect = el("button", "menu-button", "Reconnect");
   reconnect.type = "button";
   reconnect.addEventListener("click", () => connectTerminal(session));
+  const terminalText = el("button", "menu-button", "Select, copy or paste text");
+  terminalText.type = "button";
+  terminalText.addEventListener("click", () => {
+    actions.classList.remove("open");
+    openTerminalTextPanel();
+  });
   const stop = el("button", "menu-button danger", "Stop & close session");
   stop.type = "button";
   stop.disabled = !session.running;
@@ -1049,7 +1055,7 @@ function renderTerminal(id: string): void {
       setConnectionState(caught instanceof Error ? caught.message : "Could not stop", "offline");
     }
   });
-  actions.append(reconnect, stop);
+  actions.append(reconnect, terminalText, stop);
 
   const connection = el("div", "connection-bar");
   connection.id = "connection-state";
@@ -1235,7 +1241,139 @@ function renderExtraKeys(): HTMLElement {
     });
     bar.append(button);
   }
+  const text = el("button", "key-button key-action", "Select text");
+  text.type = "button";
+  text.addEventListener("pointerdown", (event) => event.preventDefault());
+  text.addEventListener("click", () => openTerminalTextPanel());
+  const paste = el("button", "key-button key-action", "Paste");
+  paste.type = "button";
+  paste.addEventListener("pointerdown", (event) => event.preventDefault());
+  paste.addEventListener("click", () => openTerminalTextPanel(true));
+  bar.prepend(text, paste);
   return bar;
+}
+
+function openTerminalTextPanel(focusPaste = false): void {
+  const terminal = state.terminal;
+  const page = document.querySelector<HTMLElement>(".terminal-page");
+  if (!terminal || !page) return;
+  page.querySelector(".terminal-text-overlay")?.remove();
+
+  const overlay = el("section", "terminal-text-overlay");
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-label", "Terminal text and clipboard");
+  const panel = el("div", "terminal-text-panel");
+  const heading = el("div", "terminal-text-heading");
+  heading.append(el("h2", "terminal-text-title", "Terminal text & clipboard"));
+  const close = el("button", "terminal-text-close", "×");
+  close.type = "button";
+  close.setAttribute("aria-label", "Close text panel");
+  close.addEventListener("click", () => {
+    overlay.remove();
+    terminal.focus();
+  });
+  heading.append(close);
+
+  const copyLabel = el("label", "terminal-text-label", "Terminal history — select any exact text below");
+  const copyArea = el("textarea", "terminal-text-area terminal-copy-area");
+  copyArea.readOnly = true;
+  copyArea.spellcheck = false;
+  copyArea.value = terminalBufferText(terminal);
+  copyLabel.append(copyArea);
+  const copyStatus = el("p", "terminal-text-status", "Long-press inside the box for native iPhone selection handles.");
+  copyStatus.setAttribute("role", "status");
+  const copyActions = el("div", "terminal-text-actions");
+  const copySelection = el("button", "terminal-text-button", "Copy selection");
+  copySelection.type = "button";
+  copySelection.addEventListener("click", async () => {
+    const selected = copyArea.value.slice(copyArea.selectionStart, copyArea.selectionEnd);
+    if (!selected) {
+      copyStatus.textContent = "Select some text first, or use Copy visible screen.";
+      copyArea.focus();
+      return;
+    }
+    copyStatus.textContent = await copyToDeviceClipboard(selected, copyArea) ? "Selection copied." : "Use the iPhone Copy action above the selected text.";
+  });
+  const copyVisible = el("button", "terminal-text-button", "Copy visible screen");
+  copyVisible.type = "button";
+  copyVisible.addEventListener("click", async () => {
+    const visible = terminalVisibleText(terminal);
+    copyStatus.textContent = await copyToDeviceClipboard(visible, copyArea) ? "Visible terminal screen copied." : "Could not access the device clipboard.";
+  });
+  copyActions.append(copySelection, copyVisible);
+
+  const pasteLabel = el("label", "terminal-text-label", "Paste or type text to send into the terminal");
+  const pasteArea = el("textarea", "terminal-text-area terminal-paste-area");
+  pasteArea.placeholder = "Long-press here and choose Paste";
+  pasteArea.spellcheck = false;
+  pasteArea.autocapitalize = "off";
+  pasteLabel.append(pasteArea);
+  const send = el("button", "terminal-text-send", "Send to terminal");
+  send.type = "button";
+  send.addEventListener("click", () => {
+    if (!pasteArea.value) return;
+    if (state.socket?.readyState !== WebSocket.OPEN) {
+      copyStatus.textContent = "Terminal is disconnected.";
+      return;
+    }
+    state.socket.send(new TextEncoder().encode(pasteArea.value));
+    pasteArea.value = "";
+    copyStatus.textContent = "Text sent to the terminal.";
+  });
+
+  panel.append(heading, copyLabel, copyStatus, copyActions, pasteLabel, send);
+  overlay.append(panel);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) close.click();
+  });
+  page.append(overlay);
+  if (focusPaste) pasteArea.focus();
+  else copyArea.focus();
+}
+
+function terminalBufferText(terminal: Terminal, first = 0, last = terminal.buffer.active.length): string {
+  const buffer = terminal.buffer.active;
+  let value = "";
+  for (let index = Math.max(0, first); index < Math.min(last, buffer.length); index += 1) {
+    const line = buffer.getLine(index);
+    if (!line) continue;
+    if (value && !line.isWrapped) value += "\n";
+    value += line.translateToString(true);
+  }
+  return value;
+}
+
+function terminalVisibleText(terminal: Terminal): string {
+  const buffer = terminal.buffer.active;
+  return terminalBufferText(terminal, buffer.viewportY, buffer.viewportY + terminal.rows);
+}
+
+async function copyToDeviceClipboard(text: string, fallback?: HTMLTextAreaElement): Promise<boolean> {
+  if (!text) return false;
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const helper = document.createElement("textarea");
+    helper.value = text;
+    helper.readOnly = true;
+    helper.style.position = "fixed";
+    helper.style.opacity = "0";
+    helper.style.pointerEvents = "none";
+    document.body.append(helper);
+    helper.select();
+    try {
+      const copied = document.execCommand("copy");
+      helper.remove();
+      fallback?.focus();
+      return copied;
+    } catch {
+      helper.remove();
+      fallback?.focus();
+      return false;
+    }
+  }
 }
 
 function connectTerminal(session: Session): void {
