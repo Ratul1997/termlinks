@@ -53,10 +53,19 @@ await new Promise((resolveOpen, rejectOpen) => {
 async function nextMessage() {
   if (queued.length) return queued.shift();
   if (terminalError) throw terminalError;
-  return Promise.race([
-    new Promise((resolve, reject) => waiters.push({ resolve, reject })),
-    new Promise((_, reject) => setTimeout(() => reject(new Error("Encrypted response timed out")), 20_000)),
-  ]);
+  return new Promise((resolve, reject) => {
+    let timer;
+    const waiter = {
+      resolve: (value) => { clearTimeout(timer); resolve(value); },
+      reject: (error) => { clearTimeout(timer); reject(error); },
+    };
+    timer = setTimeout(() => {
+      const index = waiters.indexOf(waiter);
+      if (index !== -1) waiters.splice(index, 1);
+      reject(new Error("Encrypted response timed out"));
+    }, 20_000);
+    waiters.push(waiter);
+  });
 }
 
 const ready = JSON.parse(await nextMessage());
@@ -156,3 +165,6 @@ if (createShell) {
 }
 socket.close(1000, "Smoke test complete");
 console.log(JSON.stringify({ authenticated: true, sessions: sessions.length, terminalOutput: true, keyboardInput: Boolean(input), interactiveShell: createShell, encryption: "AES-256-GCM e2e-v1" }));
+// Node's built-in WebSocket can retain the Cloudflare close handshake handle
+// after the protocol assertions have completed successfully.
+setTimeout(() => process.exit(0), 50);

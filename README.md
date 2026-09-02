@@ -19,6 +19,8 @@ The first managed command starts the background daemon automatically. Open `http
 
 This personal deployment is also available at **https://termlinks.pages.dev** while the computer and cloud connector are online.
 
+The portal is an installable PWA. On Android/desktop, use the browser's **Install app** action (or the in-app button when available). On iPhone/iPad, open the Share menu and select **Add to Home Screen**. The installed app still asks for the portal token and still requires the computer and connector to be online for terminal access.
+
 ## Important commands
 
 Generate or display your private portal login token:
@@ -108,6 +110,7 @@ After login, the portal dashboard automatically shows every managed terminal and
 
 - Select **New terminal** to create and immediately open a normal interactive shell. Its optional starting directory may be `~`, `~/path`, or an absolute path.
 - Inside that shell, type `cd`, `ls`, `codex`, `npm run dev`, or any other command exactly as in a desktop terminal.
+- Terminal history uses native touch momentum on mobile and short smooth scrolling for mouse wheels and trackpads.
 - The header shows the number of running sessions. Finished and explicitly closed sessions are removed from the dashboard automatically.
 - Each card shows the session name, command, directory, runtime, and status.
 - Select **Open terminal** to view and type in that terminal.

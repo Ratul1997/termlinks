@@ -11,6 +11,7 @@ await mkdir(resolve(output, "assets"), { recursive: true });
 await cp(resolve(root, "index.html"), resolve(output, "index.html"));
 await cp(resolve(root, "_routes.json"), resolve(output, "_routes.json"));
 await cp(resolve(root, "_headers"), resolve(output, "_headers"));
+await cp(resolve(root, "public"), output, { recursive: true });
 
 const options = {
   entryPoints: [resolve(root, "src/main.ts")],

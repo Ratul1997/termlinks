@@ -23,6 +23,11 @@ type StatusMessage = {
   exitCode?: number;
 };
 
+type BeforeInstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
+};
+
 const app = document.querySelector<HTMLDivElement>("#app")!;
 
 type TerminalLink = {
@@ -45,12 +50,24 @@ const state: {
   socket?: TerminalLink;
   terminal?: Terminal;
   fit?: FitAddon;
+  touchCleanup?: () => void;
   polling?: number;
   closedSessions: Set<string>;
 } = { authenticated: false, sessions: [], closedSessions: new Set() };
 
 const encryptedPortal = location.hostname === "termlinks.pages.dev" || location.hostname.endsWith(".termlinks.pages.dev");
 let encryptedBridge: EncryptedBridge | undefined;
+let installPrompt: BeforeInstallPromptEvent | undefined;
+
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  installPrompt = event as BeforeInstallPromptEvent;
+  syncInstallButtons();
+});
+window.addEventListener("appinstalled", () => {
+  installPrompt = undefined;
+  syncInstallButtons();
+});
 
 class EncryptedTerminalLink implements TerminalLink {
   readyState: number = WebSocket.CONNECTING;
@@ -294,6 +311,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function createInstallButton(): HTMLButtonElement {
+  const button = el("button", "ghost-button install-button", "Install app");
+  button.type = "button";
+  button.hidden = !installPrompt;
+  button.addEventListener("click", async () => {
+    const prompt = installPrompt;
+    if (!prompt) return;
+    try {
+      await prompt.prompt();
+      await prompt.userChoice;
+    } finally {
+      installPrompt = undefined;
+      syncInstallButtons();
+    }
+  });
+  return button;
+}
+
+function syncInstallButtons(): void {
+  for (const button of document.querySelectorAll<HTMLButtonElement>(".install-button")) {
+    button.hidden = !installPrompt;
+  }
+}
+
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string): HTMLElementTagNameMap[K] => {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -419,7 +460,7 @@ function renderLogin(message = ""): void {
       input.focus();
     }
   });
-  panel.append(form, el("p", "login-hint", "On your computer: termlinks token"));
+  panel.append(form, createInstallButton(), el("p", "login-hint", "On your computer: termlinks token · Install from your browser menu on iPhone/iPad"));
   page.append(panel);
   app.append(page);
   input.focus();
@@ -455,7 +496,7 @@ function renderSessions(): void {
       renderLogin();
     }
   });
-  header.append(brand, status, logout);
+  header.append(brand, status, createInstallButton(), logout);
 
   const heading = el("div", "dashboard-heading");
   const titleGroup = el("div");
@@ -718,6 +759,9 @@ function renderTerminal(id: string): void {
     fontSize: window.innerWidth < 600 ? 13 : 14,
     lineHeight: 1.18,
     scrollback: 10_000,
+    scrollOnUserInput: true,
+    scrollSensitivity: 1.15,
+    smoothScrollDuration: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 90,
     theme: {
       background: "#070a09", foreground: "#d8e2dc", cursor: "#9fffb9", cursorAccent: "#070a09",
       selectionBackground: "#335c4166", black: "#111715", brightBlack: "#66716b",
@@ -729,6 +773,7 @@ function renderTerminal(id: string): void {
   terminal.open(mount);
   state.terminal = terminal;
   state.fit = fit;
+  state.touchCleanup = enableNativeTouchScroll(terminal);
   fitTerminal();
   terminal.focus();
   terminal.onData((data) => {
@@ -738,6 +783,16 @@ function renderTerminal(id: string): void {
   const resize = new ResizeObserver(fitTerminal);
   resize.observe(frame);
   window.addEventListener("orientationchange", fitTerminal, { once: true });
+}
+
+function enableNativeTouchScroll(terminal: Terminal): () => void {
+  const viewport = terminal.element?.querySelector<HTMLElement>(".xterm-viewport");
+  if (!viewport) return () => undefined;
+  // xterm 5.5 manually applies touch deltas and cancels the browser gesture.
+  // Stop that bubbling handler so the overflow viewport keeps native momentum.
+  const keepNativeMomentum = (event: TouchEvent): void => event.stopPropagation();
+  viewport.addEventListener("touchmove", keepNativeMomentum, { passive: true });
+  return () => viewport.removeEventListener("touchmove", keepNativeMomentum);
 }
 
 function renderExtraKeys(): HTMLElement {
@@ -846,6 +901,8 @@ function closeConnection(): void {
     state.socket.close();
   }
   state.socket = undefined;
+  state.touchCleanup?.();
+  state.touchCleanup = undefined;
   state.terminal?.dispose();
   state.terminal = undefined;
   state.fit = undefined;
@@ -871,6 +928,12 @@ function ageLabel(session: Session): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ${minutes % 60}m`;
   return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    void navigator.serviceWorker.register("/sw.js", { scope: "/", updateViaCache: "none" });
+  }, { once: true });
 }
 
 void boot();

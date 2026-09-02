@@ -19,6 +19,8 @@ The daemon exposes two deliberately separate surfaces:
 
 The portal is a mobile-first static TypeScript application embedded into the Go binary. xterm.js interprets ANSI terminal output and captures keyboard input. Extra mobile keys provide Escape, Tab, Ctrl-C, Ctrl-D, arrows, and Enter.
 
+The same app is installable as a PWA from the HTTPS Pages deployment or a trusted loopback origin. Its service worker uses network-first app-shell caching and explicitly bypasses API and WebSocket paths, so terminal/authentication data is never stored in Cache Storage. Native touch overflow provides mobile momentum scrolling; xterm's short animation handles wheel and trackpad scroll events.
+
 ### Cloud bridge
 
 The optional public path consists of Cloudflare Pages, a Pages Function, a Worker with one Durable Object, and an outbound connector inside the same Go executable. The browser and connector derive the same AES-256-GCM key from the 256-bit portal token. The Worker routes ciphertext by a random channel ID but never receives the key or plaintext.

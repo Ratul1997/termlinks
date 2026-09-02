@@ -13,6 +13,7 @@ Termlinks provides remote keyboard access to local processes. Treat access to th
 - State-changing browser requests and WebSocket upgrades require an exact same-origin request.
 - Request/input sizes, terminal dimensions, scrollback, session count, and HTTP headers are bounded.
 - The portal uses a restrictive Content Security Policy, refuses framing, disables sensitive browser features, and does not store the login token in browser storage.
+- The PWA service worker caches only the static app shell, manifest, and icons. It bypasses `/api/`, `/ws/`, non-GET requests, cross-origin traffic, tokens, session metadata, terminal output, and keystrokes.
 - Command names, arguments, paths, and terminal output are inserted into the page as text, not HTML.
 - The optional cloud connector makes an outbound authenticated WSS connection; the local portal remains bound to loopback and no inbound port is opened.
 - The public browser derives an AES-256-GCM key from the portal token and proves possession with an encrypted random challenge. The token itself never crosses the network or enters browser storage.
@@ -45,5 +46,6 @@ The state directory is shown by `termlinks doctor`. On macOS it normally lives u
 - Public attackers can attempt connections or denial-of-service traffic. The 256-bit portal token makes successful guessing impractical, but timeouts and connection caps do not eliminate availability attacks.
 - Cloudflare still observes IP addresses, connection timing, ciphertext sizes, and whether the computer is online. E2E encryption does not conceal this metadata.
 - The frontend JavaScript is delivered by Cloudflare Pages. If the Cloudflare account or deployment is compromised, altered JavaScript could capture a portal token when it is typed; E2E encryption cannot protect against a malicious client build.
+- Offline PWA launch provides only the cached interface. Terminal access still requires an online computer and connector, and the portal token must be entered again after a fresh app process starts.
 
 For these reasons, this MVP is appropriate for personal use on trusted devices, not shared hosts or a public SaaS service.
