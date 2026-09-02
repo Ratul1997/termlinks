@@ -1,7 +1,7 @@
 {
   "name": "@termlinks/web",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "node scripts/build.mjs --serve",
@@ -9,12 +9,13 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@novnc/novnc": "1.7.0",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/xterm": "6.0.0"
   },
   "devDependencies": {
+    "@types/node": "22.10.2",
     "esbuild": "0.28.2",
-    "typescript": "5.6.3",
-    "@types/node": "22.10.2"
+    "typescript": "5.6.3"
   }
 }

@@ -2,6 +2,7 @@ package cloud
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -161,4 +162,124 @@ func TestEncryptedPortalCreatesInteractiveShellThroughControlSocket(t *testing.T
 		t.Fatalf("unexpected interactive shell: %#v", created)
 	}
 	t.Cleanup(func() { _ = current.Stop() })
+}
+
+func TestEncryptedDesktopBridgesLoopbackVNCBytes(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			accepted <- connection
+		}
+	}()
+
+	channelID := "01234567-89ab-cdef-0123-456789abcdef"
+	desktopID := "11111111-1111-4111-8111-111111111111"
+	key := deriveKey("abcdefghijklmnopqrstuvwxyz1234567890")
+	channel := &browserChannel{desktops: make(map[string]*desktopSocket)}
+	state := &connectionState{
+		ctx:            context.Background(),
+		key:            key,
+		outgoing:       make(chan []byte, 8),
+		channels:       map[string]*browserChannel{channelID: channel},
+		desktopEnabled: true,
+		vncAddress:     listener.Addr().String(),
+	}
+	state.openDesktop(channelID, channel, desktopOpenMessage{Version: protocolVersion, Type: "desktop_open", ID: desktopID})
+
+	var server net.Conn
+	select {
+	case server = <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("connector did not dial the loopback VNC server")
+	}
+	defer server.Close()
+	assertEncryptedDesktopMessageType(t, <-state.outgoing, key, channelID, 0, "desktop_opened")
+
+	greeting := []byte("RFB 003.008\n")
+	if _, err := server.Write(greeting); err != nil {
+		t.Fatal(err)
+	}
+	dataPlaintext := decryptOutgoingForTest(t, <-state.outgoing, key, channelID, 1)
+	var output desktopDataMessage
+	if err := json.Unmarshal(dataPlaintext, &output); err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(output.Data)
+	if err != nil || string(decoded) != string(greeting) {
+		t.Fatalf("desktop output = %q, err = %v", decoded, err)
+	}
+
+	reply := []byte("RFB 003.008\n")
+	state.writeDesktop(channelID, channel, desktopDataMessage{
+		Version: protocolVersion,
+		Type:    "desktop_data",
+		ID:      desktopID,
+		Data:    base64.RawURLEncoding.EncodeToString(reply),
+	})
+	if err := server.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	received := make([]byte, len(reply))
+	if _, err := io.ReadFull(server, received); err != nil {
+		t.Fatal(err)
+	}
+	if string(received) != string(reply) {
+		t.Fatalf("desktop input = %q, want %q", received, reply)
+	}
+	state.closeDesktop(channel, desktopID)
+}
+
+func TestEncryptedDesktopIsDisabledByDefault(t *testing.T) {
+	channelID := "01234567-89ab-cdef-0123-456789abcdef"
+	desktopID := "11111111-1111-4111-8111-111111111111"
+	key := deriveKey("abcdefghijklmnopqrstuvwxyz1234567890")
+	channel := &browserChannel{desktops: make(map[string]*desktopSocket)}
+	state := &connectionState{
+		ctx:      context.Background(),
+		key:      key,
+		outgoing: make(chan []byte, 1),
+		channels: map[string]*browserChannel{channelID: channel},
+	}
+	state.openDesktop(channelID, channel, desktopOpenMessage{Version: protocolVersion, Type: "desktop_open", ID: desktopID})
+
+	plaintext := decryptOutgoingForTest(t, <-state.outgoing, key, channelID, 0)
+	var message desktopCloseMessage
+	if err := json.Unmarshal(plaintext, &message); err != nil {
+		t.Fatal(err)
+	}
+	if message.Type != "desktop_close" || message.Code != 1008 || message.Reason == "" {
+		t.Fatalf("unexpected disabled response: %#v", message)
+	}
+}
+
+func assertEncryptedDesktopMessageType(t *testing.T, outerData []byte, key [32]byte, channelID string, sequence uint32, want string) {
+	t.Helper()
+	plaintext := decryptOutgoingForTest(t, outerData, key, channelID, sequence)
+	var message innerMessageType
+	if err := json.Unmarshal(plaintext, &message); err != nil {
+		t.Fatal(err)
+	}
+	if message.Type != want {
+		t.Fatalf("message type = %q, want %q", message.Type, want)
+	}
+}
+
+func decryptOutgoingForTest(t *testing.T, outerData []byte, key [32]byte, channelID string, sequence uint32) []byte {
+	t.Helper()
+	var outer encryptedOuterMessage
+	if err := json.Unmarshal(outerData, &outer); err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := decryptPacket(key, channelID, "connector", sequence, outer.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plaintext
 }

@@ -1,5 +1,6 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
+import RFB from "@novnc/novnc";
 import "@xterm/xterm/css/xterm.css";
 import { base64URLToBytes, bytesToBase64URL, decryptPacket, deriveEncryptionKey, encryptPacket } from "./e2e";
 import "./style.css";
@@ -43,6 +44,18 @@ type TerminalCallbacks = {
   error: () => void;
 };
 
+type RawDesktopChannel = {
+  binaryType: BinaryType;
+  onerror: ((event: Event) => void) | null;
+  onmessage: ((event: MessageEvent<ArrayBuffer>) => void) | null;
+  onopen: ((event: Event) => void) | null;
+  onclose: ((event: CloseEvent) => void) | null;
+  protocol: string;
+  readyState: number;
+  send(data: string | ArrayBuffer | ArrayBufferView): void;
+  close(): void;
+};
+
 const state: {
   authenticated: boolean;
   sessions: Session[];
@@ -51,6 +64,8 @@ const state: {
   terminal?: Terminal;
   fit?: FitAddon;
   touchCleanup?: () => void;
+  desktop?: RFB;
+  desktopLink?: EncryptedDesktopLink;
   polling?: number;
   closedSessions: Set<string>;
 } = { authenticated: false, sessions: [], closedSessions: new Set() };
@@ -113,6 +128,52 @@ class EncryptedTerminalLink implements TerminalLink {
   }
 }
 
+class EncryptedDesktopLink implements RawDesktopChannel {
+  binaryType: BinaryType = "arraybuffer";
+  onerror: ((event: Event) => void) | null = null;
+  onmessage: ((event: MessageEvent<ArrayBuffer>) => void) | null = null;
+  onopen: ((event: Event) => void) | null = null;
+  onclose: ((event: CloseEvent) => void) | null = null;
+  protocol = "";
+  readyState: number = WebSocket.CONNECTING;
+
+  constructor(readonly id: string, private readonly bridge: EncryptedBridge) {}
+
+  markOpen(): void {
+    if (this.readyState !== WebSocket.CONNECTING) return;
+    this.readyState = WebSocket.OPEN;
+    this.onopen?.(new Event("open"));
+  }
+
+  receive(data: ArrayBuffer): void {
+    if (this.readyState === WebSocket.OPEN) this.onmessage?.(new MessageEvent("message", { data }));
+  }
+
+  remoteClose(code: number, reason: string): void {
+    if (this.readyState === WebSocket.CLOSED) return;
+    this.readyState = WebSocket.CLOSED;
+    this.onclose?.(new CloseEvent("close", { code, reason, wasClean: code === 1000 }));
+  }
+
+  fail(): void {
+    if (this.readyState === WebSocket.CLOSED) return;
+    this.onerror?.(new Event("error"));
+    this.remoteClose(1011, "Encrypted desktop tunnel failed");
+  }
+
+  send(data: string | ArrayBuffer | ArrayBufferView): void {
+    if (this.readyState !== WebSocket.OPEN) return;
+    void this.bridge.sendDesktopData(this.id, data).catch(() => this.fail());
+  }
+
+  close(): void {
+    if (this.readyState === WebSocket.CLOSED) return;
+    this.readyState = WebSocket.CLOSING;
+    void this.bridge.closeDesktop(this.id);
+    this.readyState = WebSocket.CLOSED;
+  }
+}
+
 class EncryptedBridge {
   private socket?: WebSocket;
   private key?: CryptoKey;
@@ -123,6 +184,7 @@ class EncryptedBridge {
   private receiveSequence = 0;
   private readonly requests = new Map<string, { resolve: (value: { status: number; body: string }) => void; reject: (error: Error) => void; timeout: number }>();
   private readonly terminals = new Map<string, EncryptedTerminalLink>();
+  private readonly desktops = new Map<string, EncryptedDesktopLink>();
   private authResolve?: () => void;
   private authReject?: (error: Error) => void;
   private challenge = "";
@@ -179,6 +241,28 @@ class EncryptedBridge {
     return link;
   }
 
+  openDesktop(): EncryptedDesktopLink {
+    const link = new EncryptedDesktopLink(crypto.randomUUID(), this);
+    this.desktops.set(link.id, link);
+    void this.sendEncrypted({ v: 1, type: "desktop_open", id: link.id }).catch(() => link.fail());
+    return link;
+  }
+
+  async sendDesktopData(id: string, data: string | ArrayBuffer | ArrayBufferView): Promise<void> {
+    if (typeof data === "string") throw new Error("Remote desktop data must be binary");
+    const bytes = data instanceof ArrayBuffer
+      ? new Uint8Array(data)
+      : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    await this.sendEncrypted({ v: 1, type: "desktop_data", id, data: bytesToBase64URL(bytes) });
+  }
+
+  async closeDesktop(id: string): Promise<void> {
+    this.desktops.delete(id);
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      await this.sendEncrypted({ v: 1, type: "desktop_close", id, code: 1000, reason: "Viewer closed" });
+    }
+  }
+
   async sendTerminalData(id: string, data: string | ArrayBuffer | ArrayBufferView): Promise<void> {
     if (typeof data === "string") {
       await this.sendEncrypted({ v: 1, type: "terminal_data", id, binary: false, data });
@@ -222,7 +306,25 @@ class EncryptedBridge {
       pending.resolve({ status: value.status, body: value.body });
       return;
     }
-    if (typeof value.id !== "string") throw new Error("Invalid encrypted terminal response");
+    if (typeof value.id !== "string") throw new Error("Invalid encrypted stream response");
+    const desktop = this.desktops.get(value.id);
+    if (desktop) {
+      if (value.type === "desktop_opened") {
+        desktop.markOpen();
+        return;
+      }
+      if (value.type === "desktop_data") {
+        if (typeof value.data !== "string") throw new Error("Invalid encrypted desktop data");
+        desktop.receive(Uint8Array.from(base64URLToBytes(value.data)).buffer);
+        return;
+      }
+      if (value.type === "desktop_close") {
+        this.desktops.delete(value.id);
+        desktop.remoteClose(typeof value.code === "number" ? value.code : 1000, typeof value.reason === "string" ? value.reason : "Remote desktop closed");
+        return;
+      }
+      throw new Error("Unsupported encrypted desktop message");
+    }
     const terminal = this.terminals.get(value.id);
     if (!terminal) return;
     if (value.type === "terminal_opened") {
@@ -273,6 +375,8 @@ class EncryptedBridge {
     }
     for (const terminal of this.terminals.values()) terminal.remoteClose(1012);
     this.terminals.clear();
+    for (const desktop of this.desktops.values()) desktop.remoteClose(1012, error.message);
+    this.desktops.clear();
     if (encryptedBridge === this && state.authenticated) {
       encryptedBridge = undefined;
       state.authenticated = false;
@@ -513,6 +617,12 @@ function renderSessions(): void {
   create.setAttribute("aria-expanded", "false");
   create.setAttribute("aria-controls", "create-terminal-panel");
   const headingActions = el("div", "dashboard-actions");
+  if (encryptedPortal) {
+    const desktop = el("button", "desktop-button", "▣ Remote desktop");
+    desktop.type = "button";
+    desktop.addEventListener("click", renderDesktop);
+    headingActions.append(desktop);
+  }
   headingActions.append(create, refresh);
   heading.append(titleGroup, headingActions);
 
@@ -533,6 +643,201 @@ function renderSessions(): void {
   app.append(page);
   updateSessionSummary();
   startPolling();
+}
+
+function renderDesktop(): void {
+  stopPolling();
+  closeConnection();
+  if (!encryptedPortal || !encryptedBridge) {
+    renderLogin("Remote desktop requires the encrypted cloud portal");
+    return;
+  }
+
+  app.replaceChildren();
+  const page = el("main", "desktop-page");
+  const header = el("header", "desktop-header");
+  const back = el("button", "back-button", "‹");
+  back.type = "button";
+  back.setAttribute("aria-label", "Back to sessions");
+  back.addEventListener("click", renderSessions);
+  const identity = el("div", "terminal-identity");
+  identity.append(el("strong", "terminal-name", "Remote desktop"), el("span", "terminal-subtitle", "Full Mac screen · E2E tunnel"));
+  const fullscreen = el("button", "desktop-header-action", "Full screen");
+  fullscreen.type = "button";
+  fullscreen.addEventListener("click", async () => {
+    try {
+      const target = page as HTMLElement & { webkitRequestFullscreen?: () => Promise<void> | void };
+      if (target.requestFullscreen) await target.requestFullscreen();
+      else if (target.webkitRequestFullscreen) await target.webkitRequestFullscreen();
+      else setConnectionState("Already using the largest view available on this browser", "warning");
+    } catch {
+      setConnectionState("Full screen was blocked; install the PWA for the largest iPhone view", "warning");
+    }
+  });
+  header.append(back, identity, fullscreen);
+
+  const connection = el("div", "connection-bar");
+  connection.id = "connection-state";
+  connection.append(el("span", "connection-dot"), el("span", "connection-label", "Opening encrypted desktop tunnel…"));
+  const frame = el("section", "desktop-frame");
+  const mount = el("div", "desktop-mount");
+  mount.id = "remote-desktop";
+  const empty = el("div", "desktop-waiting");
+  empty.append(el("span", "desktop-waiting-icon", "▣"), el("span", "desktop-waiting-copy", "Waiting for your Mac…"));
+  mount.append(empty);
+  frame.append(mount);
+
+  const controls = el("div", "desktop-controls");
+  const control = el("button", "desktop-control primary-control", "Enable control");
+  control.type = "button";
+  const keyboard = el("button", "desktop-control", "Keyboard");
+  keyboard.type = "button";
+  const clipboard = el("button", "desktop-control", "Clipboard");
+  clipboard.type = "button";
+  controls.append(control, keyboard, clipboard);
+
+  const typingPanel = el("section", "desktop-typing");
+  typingPanel.hidden = true;
+  const typingForm = el("form", "desktop-typing-form");
+  const typingInput = el("input", "desktop-typing-input");
+  typingInput.type = "text";
+  typingInput.placeholder = "Type text on the Mac";
+  typingInput.autocomplete = "off";
+  typingInput.autocapitalize = "off";
+  typingInput.spellcheck = false;
+  typingInput.disabled = true;
+  const sendText = el("button", "desktop-type-send", "Send");
+  sendText.type = "submit";
+  sendText.disabled = true;
+  typingForm.append(typingInput, sendText);
+  const keys = el("div", "desktop-keys");
+  const specialKeys: Array<[string, number, string]> = [
+    ["Esc", 0xff1b, "Escape"], ["Tab", 0xff09, "Tab"], ["⌫", 0xff08, "Backspace"],
+    ["←", 0xff51, "ArrowLeft"], ["↑", 0xff52, "ArrowUp"], ["↓", 0xff54, "ArrowDown"], ["→", 0xff53, "ArrowRight"], ["Enter", 0xff0d, "Enter"],
+  ];
+  for (const [label, keysym, code] of specialKeys) {
+    const button = el("button", "desktop-key", label);
+    button.type = "button";
+    button.disabled = true;
+    button.addEventListener("click", () => state.desktop?.sendKey(keysym, code));
+    keys.append(button);
+  }
+  typingPanel.append(typingForm, keys);
+
+  const credentials = el("section", "desktop-credentials");
+  credentials.hidden = true;
+  const credentialForm = el("form", "desktop-credential-card");
+  credentialForm.append(el("h2", "desktop-credential-title", "Mac Screen Sharing login"), el("p", "desktop-credential-copy", "Enter the VNC or Mac credentials requested by your Mac. They stay in this page and are not saved."));
+  const username = el("input", "desktop-credential-input");
+  username.name = "username";
+  username.placeholder = "Mac username (if requested)";
+  username.autocomplete = "username";
+  const password = el("input", "desktop-credential-input");
+  password.name = "password";
+  password.type = "password";
+  password.placeholder = "Screen Sharing password";
+  password.autocomplete = "current-password";
+  password.required = true;
+  const credentialSubmit = el("button", "desktop-credential-submit", "Connect securely");
+  credentialSubmit.type = "submit";
+  credentialForm.append(username, password, credentialSubmit);
+  credentials.append(credentialForm);
+  frame.append(credentials);
+  page.append(header, connection, frame, controls, typingPanel);
+  app.append(page);
+
+  let controlEnabled = false;
+  control.addEventListener("click", () => {
+    const rfb = state.desktop;
+    if (!rfb) return;
+    controlEnabled = !controlEnabled;
+    rfb.viewOnly = !controlEnabled;
+    control.textContent = controlEnabled ? "Control enabled" : "Enable control";
+    control.classList.toggle("enabled", controlEnabled);
+    typingInput.disabled = !controlEnabled;
+    sendText.disabled = !controlEnabled;
+    for (const key of keys.querySelectorAll<HTMLButtonElement>("button")) key.disabled = !controlEnabled;
+    setConnectionState(controlEnabled ? "E2E · Live · touch and keyboard control enabled" : "E2E · Live · view only", "online");
+  });
+  keyboard.addEventListener("click", () => {
+    typingPanel.hidden = !typingPanel.hidden;
+    if (!typingPanel.hidden) typingInput.focus();
+  });
+  clipboard.addEventListener("click", () => {
+    if (!controlEnabled || !state.desktop) {
+      setConnectionState("Enable control before sending clipboard text", "warning");
+      return;
+    }
+    const text = window.prompt("Text to copy into the Mac clipboard");
+    if (text !== null) state.desktop.clipboardPasteFrom(text);
+  });
+  typingForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!controlEnabled || !state.desktop || !typingInput.value) return;
+    sendDesktopText(state.desktop, typingInput.value);
+    typingInput.value = "";
+    typingInput.focus();
+  });
+
+  const link = encryptedBridge.openDesktop();
+  state.desktopLink = link;
+  try {
+    const rfb = new RFB(mount, link, { shared: true });
+    state.desktop = rfb;
+    rfb.viewOnly = true;
+    rfb.scaleViewport = true;
+    rfb.resizeSession = false;
+    rfb.clipViewport = false;
+    rfb.qualityLevel = 6;
+    rfb.compressionLevel = 6;
+    rfb.addEventListener("connect", () => {
+      if (state.desktop !== rfb) return;
+      empty.remove();
+      credentials.hidden = true;
+      setConnectionState("E2E · Live · view only", "online");
+    });
+    rfb.addEventListener("credentialsrequired", (event) => {
+      if (state.desktop !== rfb) return;
+      const detail = (event as CustomEvent<{ types?: string[] }>).detail;
+      username.hidden = !detail?.types?.includes("username");
+      password.required = detail?.types?.includes("password") ?? true;
+      credentials.hidden = false;
+      setConnectionState("Mac authentication required", "warning");
+      (username.hidden ? password : username).focus();
+    });
+    rfb.addEventListener("securityfailure", (event) => {
+      const detail = (event as CustomEvent<{ reason?: string }>).detail;
+      password.value = "";
+      credentials.hidden = false;
+      setConnectionState(detail?.reason || "Screen Sharing rejected those credentials", "offline");
+    });
+    rfb.addEventListener("disconnect", (event) => {
+      if (state.desktop !== rfb) return;
+      const clean = (event as CustomEvent<{ clean?: boolean }>).detail?.clean;
+      setConnectionState(clean ? "Remote desktop closed" : "Remote desktop disconnected", "offline");
+    });
+    credentialForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      credentialSubmit.disabled = true;
+      rfb.sendCredentials({ username: username.value, password: password.value });
+      password.value = "";
+      credentials.hidden = true;
+      credentialSubmit.disabled = false;
+      setConnectionState("Authenticating with your Mac…", "connecting");
+    });
+  } catch (caught) {
+    link.close();
+    setConnectionState(caught instanceof Error ? caught.message : "Could not start remote desktop", "offline");
+  }
+}
+
+function sendDesktopText(rfb: RFB, text: string): void {
+  for (const character of text) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint === undefined) continue;
+    const keysym = codePoint <= 0xff ? codePoint : 0x01000000 | codePoint;
+    rfb.sendKey(keysym, null);
+  }
 }
 
 function renderCreatePanel(close: () => void): HTMLElement {
@@ -1012,6 +1317,12 @@ function setConnectionState(label: string, kind: "connecting" | "online" | "offl
 }
 
 function closeConnection(): void {
+  if (state.desktop) {
+    try { state.desktop.disconnect(); } catch { /* The stream may already be closed. */ }
+  }
+  state.desktop = undefined;
+  state.desktopLink?.close();
+  state.desktopLink = undefined;
   if (state.socket) {
     state.socket.close();
   }

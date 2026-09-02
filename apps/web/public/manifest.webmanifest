@@ -2,7 +2,7 @@
   "id": "/",
   "name": "Termlinks",
   "short_name": "Termlinks",
-  "description": "Securely view and control managed terminal sessions on your computer.",
+  "description": "Securely control managed terminals and an opt-in remote desktop on your computer.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

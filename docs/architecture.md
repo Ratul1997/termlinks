@@ -17,7 +17,7 @@ The daemon exposes two deliberately separate surfaces:
 
 ### Browser portal
 
-The portal is a mobile-first static TypeScript application embedded into the Go binary. xterm.js interprets ANSI terminal output and captures keyboard input. Extra mobile keys provide Escape, Tab, Ctrl-C, Ctrl-D, arrows, and Enter.
+The portal is a mobile-first static TypeScript application embedded into the Go binary. xterm.js interprets ANSI terminal output and captures keyboard input. Extra mobile keys provide Escape, Tab, Ctrl-C, Ctrl-D, arrows, and Enter. The encrypted cloud view also includes noVNC for an opt-in Mac framebuffer, touch/mouse control, keyboard input, and clipboard transfer.
 
 The same app is installable as a PWA from the HTTPS Pages deployment or a trusted loopback origin. Its service worker uses network-first app-shell caching and explicitly bypasses API and WebSocket paths, so terminal/authentication data is never stored in Cache Storage. Native touch overflow provides mobile momentum scrolling; xterm's short animation handles wheel and trackpad scroll events.
 
@@ -86,6 +86,21 @@ The AES-GCM additional authenticated data includes the random relay channel ID, 
 
 The public flow asks for the portal token after each page load and retains only a non-extractable Web Crypto key in page memory. The connector performs the actual local cookie login using its local token file. A wrong token cannot decrypt the connector's challenge response.
 
+## Encrypted remote desktop flow
+
+```text
+Phone / PWA                 Cloudflare relay                 Local Mac
+    │                              │                             │
+    │ noVNC RFB client             │                             │ macOS Screen Sharing
+    │ desktop_open (AES-GCM) ─────►│── opaque ciphertext ──────►│ connector authorizes feature
+    │◄── encrypted RFB bytes ──────│◄────────────────────────────│ TCP 127.0.0.1:5900
+    │── encrypted touch/key bytes ►│────────────────────────────►│ mouse / keyboard control
+```
+
+Remote desktop reuses the authenticated channel and its direction/sequence/channel-bound AES-256-GCM packets. The relay has no RFB parser and sees no framebuffer, VNC credentials, clipboard text, pointer data, or keystrokes. The connector is not a generic TCP proxy: desktop access must be enabled in local configuration and the only permitted target is a loopback hostname or IP. Each browser channel is limited to one desktop connection.
+
+The VNC authentication conversation remains inside the RFB stream, so its credentials exist only in the browser page and the local Screen Sharing server. Termlinks does not persist them. View-only is the portal's initial UI state, but the portal token remains the true authorization boundary because an authenticated client can request control-capable RFB access.
+
 ## Disconnect behavior
 
 - Local terminal closes: its socket disappears; the daemon and PTY continue.
@@ -93,4 +108,6 @@ The public flow asks for the portal token after each page load and retains only 
 - Phone reconnects: retained scrollback is sent first, followed by live bytes.
 - Child exits: the daemon records the exit code and retained output remains viewable.
 - Dashboard refreshes: completed sessions are omitted, so exited or explicitly stopped terminals do not clutter the portal list.
+- Remote desktop viewer closes: its loopback VNC socket is closed; Screen Sharing remains governed by macOS and terminal sessions are unaffected.
+- `termlinks desktop disable`: the connector restarts with GUI tunneling revoked; the terminal daemon and managed PTYs remain running.
 - Daemon/computer stops: in-memory sessions end. Persistence across restart is outside this MVP.

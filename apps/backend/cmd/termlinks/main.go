@@ -28,7 +28,7 @@ import (
 	"termlinks/backend/internal/session"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -64,6 +64,8 @@ func run(args []string) error {
 			return doctor()
 		case "cloud":
 			return runCloud(args[1:])
+		case "desktop":
+			return runDesktop(args[1:])
 		case "version", "--version", "-v":
 			fmt.Println("termlinks", version)
 			return nil
@@ -118,11 +120,114 @@ func configureCloud(args []string) error {
 	if err := config.Ensure(paths); err != nil {
 		return err
 	}
-	settings := config.CloudSettings{RelayURL: *relayURL, ConnectorToken: strings.TrimSpace(string(token))}
+	settings := config.CloudSettings{RelayURL: *relayURL, ConnectorToken: strings.TrimSpace(string(token)), VNCAddress: config.DefaultVNCAddress}
+	if previous, loadErr := config.LoadCloudSettings(paths); loadErr == nil {
+		settings.DesktopEnabled = previous.DesktopEnabled
+		settings.VNCAddress = previous.VNCAddress
+	}
 	if err := config.SaveCloudSettings(paths, settings); err != nil {
 		return err
 	}
 	fmt.Println("Cloud access configured. Start it with: termlinks cloud start")
+	return nil
+}
+
+func runDesktop(args []string) error {
+	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		printDesktopHelp()
+		return nil
+	}
+	switch args[0] {
+	case "enable":
+		flags := flag.NewFlagSet("desktop enable", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		address := flags.String("address", config.DefaultVNCAddress, "loopback VNC server address")
+		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
+			return errors.New("usage: termlinks desktop enable [--address 127.0.0.1:5900]")
+		}
+		return setDesktopEnabled(true, *address)
+	case "disable":
+		if len(args) != 1 {
+			return errors.New("usage: termlinks desktop disable")
+		}
+		return setDesktopEnabled(false, "")
+	case "status":
+		if len(args) != 1 {
+			return errors.New("usage: termlinks desktop status")
+		}
+		return desktopStatus()
+	default:
+		return errors.New("usage: termlinks desktop <enable|disable|status>")
+	}
+}
+
+func setDesktopEnabled(enabled bool, address string) error {
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		return err
+	}
+	settings, err := config.LoadCloudSettings(paths)
+	if err != nil {
+		return err
+	}
+	wasRunning := false
+	if pid, running := cloudProcess(paths); running && isTermlinksConnector(pid) {
+		wasRunning = true
+	}
+	if enabled {
+		address = strings.TrimSpace(address)
+		if err := config.ValidateVNCAddress(address); err != nil {
+			return err
+		}
+		settings.DesktopEnabled = true
+		settings.VNCAddress = address
+	} else {
+		settings.DesktopEnabled = false
+	}
+	if err := config.SaveCloudSettings(paths, settings); err != nil {
+		return err
+	}
+	if wasRunning {
+		if err := stopCloud(); err != nil {
+			return fmt.Errorf("desktop setting was saved, but the cloud connector could not stop: %w", err)
+		}
+		if err := startCloud(); err != nil {
+			return fmt.Errorf("desktop setting was saved, but the cloud connector could not restart: %w", err)
+		}
+	}
+	if enabled {
+		fmt.Printf("Remote desktop tunnel enabled for %s.\n", settings.VNCAddress)
+		fmt.Println("Screen Sharing must also be enabled locally in macOS System Settings.")
+	} else {
+		fmt.Println("Remote desktop tunnel disabled.")
+	}
+	return nil
+}
+
+func desktopStatus() error {
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		return err
+	}
+	settings, err := config.LoadCloudSettings(paths)
+	if err != nil {
+		return err
+	}
+	status := "disabled"
+	if settings.DesktopEnabled {
+		status = "enabled"
+	}
+	server := "not checked"
+	if settings.DesktopEnabled {
+		connection, dialErr := net.DialTimeout("tcp", settings.VNCAddress, 750*time.Millisecond)
+		if dialErr == nil {
+			server = "reachable"
+			_ = connection.Close()
+		} else {
+			server = "unreachable (enable macOS Screen Sharing and VNC access)"
+		}
+	}
+	fmt.Printf("Tunnel:     %s\nVNC target:  %s\nVNC server:  %s\n", status, settings.VNCAddress, server)
 	return nil
 }
 
@@ -684,12 +789,29 @@ Usage:
   termlinks cloud start             Connect this computer to the cloud portal
   termlinks cloud status            Show cloud connector status
   termlinks cloud stop              Disconnect the cloud portal
+  termlinks desktop enable          Allow encrypted remote desktop access
+  termlinks desktop status          Check the desktop tunnel and VNC server
+  termlinks desktop disable         Revoke remote desktop access
   termlinks daemon [--listen addr]  Run the daemon in the foreground
 
 Examples:
   termlinks codex
   termlinks -n api -- npm run dev
   termlinks -d -- python import.py
+`)
+}
+
+func printDesktopHelp() {
+	fmt.Print(`Termlinks remote desktop (macOS-first)
+
+Usage:
+  termlinks desktop enable [--address 127.0.0.1:5900]
+  termlinks desktop status
+  termlinks desktop disable
+
+The address must be localhost or a loopback IP. Remote desktop is disabled by
+default. Enabling the tunnel does not change macOS sharing permissions: enable
+Screen Sharing and VNC viewer access locally in System Settings first.
 `)
 }
 

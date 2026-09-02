@@ -1,6 +1,6 @@
 # Termlinks
 
-Termlinks keeps terminal work running on your computer and lets you view and control it from a phone browser. It is command-agnostic: Codex, Claude, development servers, import scripts, shells, and other terminal programs all use the same PTY bridge.
+Termlinks keeps terminal work running on your computer and lets you view and control it from a phone browser. It is command-agnostic: Codex, Claude, development servers, import scripts, shells, and other terminal programs all use the same PTY bridge. It can also carry an opt-in full Mac desktop through the encrypted portal.
 
 This first version is for one person and supports macOS and Linux. It controls sessions started through Termlinks; it does not take over unrelated Terminal/iTerm windows.
 
@@ -93,6 +93,14 @@ termlinks cloud status
 termlinks cloud stop
 ```
 
+Control the optional remote desktop tunnel:
+
+```sh
+termlinks desktop enable
+termlinks desktop status
+termlinks desktop disable
+```
+
 Build, test, and install from source:
 
 ```sh
@@ -133,6 +141,35 @@ Nothing needs to be installed on the viewing device. Giving another person the p
 
 If the computer sleeps, shuts down, loses internet access, or runs `termlinks cloud stop`, the public portal reports the computer as offline. Running terminal processes also pause while macOS is asleep.
 
+## Remote desktop (macOS-first)
+
+Remote desktop is disabled by default and must be enabled locally on the Mac. Termlinks does not change macOS privacy or sharing settings for you.
+
+1. On the Mac, open **System Settings → General → Sharing** and enable **Screen Sharing**.
+2. Open the Screen Sharing details, restrict allowed users, and enable VNC viewer access with a strong, unique password if macOS offers that option. Apple documents the current controls in its [Screen Sharing setup guide](https://support.apple.com/guide/mac-help/turn-screen-sharing-on-or-off-mh11848/mac).
+3. Enable the Termlinks loopback tunnel:
+
+   ```sh
+   termlinks desktop enable
+   termlinks desktop status
+   ```
+
+4. Open **Remote desktop** in the deployed portal. Enter the Screen Sharing credentials requested by the Mac. The page starts in view-only mode; tap **Enable control** to allow touch, mouse, and keyboard input.
+
+The default target is `127.0.0.1:5900`. A different local VNC server can be selected with `termlinks desktop enable --address 127.0.0.1:<port>`. Non-loopback targets are rejected. The VNC password is entered into the browser only when requested and is never written to Termlinks configuration or browser storage.
+
+The viewer supports full-viewport scaling, fullscreen where the browser permits it, touch gestures, mouse input, hardware keyboards, an on-screen text/special-key panel, and clipboard text sent to the Mac. On iPhone/iPad, installing the PWA from **Share → Add to Home Screen** gives the largest persistent app view.
+
+This version tunnels the framebuffer exposed by the local VNC server. It does not yet provide a Termlinks-native picker for one physical monitor or one application window. Which display layout is exposed depends on the local Screen Sharing/VNC server.
+
+To revoke GUI access immediately:
+
+```sh
+termlinks desktop disable
+```
+
+That setting restarts only the cloud connector; managed terminal sessions and the terminal daemon continue running.
+
 ### Private-network alternative
 
 The default portal listens only on the computer itself. For access away from home, connect the computer and phone to the same private VPN/tailnet, then bind Termlinks to the computer's private VPN address:
@@ -161,6 +198,8 @@ termlinks CLI ──┴─ Unix socket ─► daemon ├─ WebSocket ─► pho
 
 For public phone access, the browser derives an AES-256-GCM key from the portal token and opens one encrypted bridge through `termlinks.pages.dev`. Pages and the Worker relay only ciphertext; the local connector decrypts approved requests and terminal data, then talks to `127.0.0.1:8787`. The portal token itself never crosses the network, and the local port is never publicly bound.
 
+Remote desktop uses the same bridge. Browser-side noVNC speaks the RFB/VNC protocol through an in-memory WebSocket-like channel; Termlinks encrypts each byte chunk and the connector forwards it only to the configured loopback VNC address. There is no public VNC port or generic TCP proxy.
+
 1. `termlinks <command>` asks the local daemon to create a real pseudo-terminal (PTY).
    The authenticated portal can also request a new interactive shell; it cannot submit a hidden one-shot command or custom environment.
 2. The daemon starts and owns the child process. The launching terminal is only an attached client, so disconnecting it does not end the work.
@@ -175,7 +214,7 @@ See [docs/architecture.md](docs/architecture.md) for the component and data-flow
 ```text
 apps/backend/   Go daemon, PTY manager, local CLI, HTTP/WebSocket portal
 apps/relay/     Cloudflare Worker + Durable Object outbound relay
-apps/web/       Mobile-first TypeScript portal using xterm.js
+apps/web/       Mobile-first TypeScript portal using xterm.js and noVNC
 scripts/        Reproducible build/test orchestration
 dist/           Generated standalone executable (gitignored)
 ```
@@ -194,7 +233,8 @@ See [docs/cloudflare.md](docs/cloudflare.md) for deployment, connector-secret ro
 ## Current boundary
 
 - Only sessions managed by Termlinks can be opened. Launch them with `termlinks …` or create an interactive shell from the portal; unrelated Terminal/iTerm windows cannot be attached after the fact because their PTYs belong to another process.
-- This is a text terminal, not screen sharing. Full desktop/GUI control would be a separate remote-desktop subsystem.
+- Remote desktop is an explicitly enabled, macOS-first subsystem. The terminal features remain usable without it.
+- The current desktop viewer shows the framebuffer supplied by the VNC server; native per-monitor and per-window selection are not implemented yet.
 - Sessions live in daemon memory and do not survive a daemon or computer restart.
 - An authenticated browser can create a normal interactive shell, then type arbitrary commands into it. Treat the portal token as full access to your operating-system user account.
 - This personal version uses one shared portal identity. It does not yet provide per-person accounts, per-session permissions, or an audit trail.

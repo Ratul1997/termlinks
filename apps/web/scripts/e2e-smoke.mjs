@@ -7,6 +7,8 @@ const wantedSession = process.env.TERMLINKS_E2E_SESSION_NAME || "";
 let input = process.env.TERMLINKS_E2E_SEND || "";
 let expectedOutput = input;
 const createShell = process.env.TERMLINKS_E2E_CREATE_SHELL === "1";
+const testDesktopDisabled = process.env.TERMLINKS_E2E_DESKTOP_DISABLED === "1";
+const testDesktopBridge = process.env.TERMLINKS_E2E_DESKTOP_BRIDGE === "1";
 
 if (!portal.startsWith("https://") || token.length < 32) {
   throw new Error("Set TERMLINKS_E2E_PORTAL and TERMLINKS_E2E_TOKEN");
@@ -101,6 +103,41 @@ if (response.type !== "http_response" || response.id !== requestID || response.s
   throw new Error("Encrypted session list failed");
 }
 const sessions = JSON.parse(response.body).sessions;
+let desktopDenied = false;
+let desktopBridge = false;
+if (testDesktopDisabled) {
+  const desktopID = crypto.randomUUID();
+  await sendEncrypted({ v: 1, type: "desktop_open", id: desktopID });
+  let desktopResponse;
+  do {
+    desktopResponse = await receiveEncrypted();
+  } while (desktopResponse.id !== desktopID);
+  if (desktopResponse.type !== "desktop_close" || desktopResponse.code !== 1008 || !desktopResponse.reason) {
+    throw new Error("Disabled remote desktop was not rejected by the connector");
+  }
+  desktopDenied = true;
+}
+if (testDesktopBridge) {
+  const desktopID = crypto.randomUUID();
+  await sendEncrypted({ v: 1, type: "desktop_open", id: desktopID });
+  let opened = false;
+  let greeting;
+  while (!opened || !greeting) {
+    const desktopResponse = await receiveEncrypted();
+    if (desktopResponse.id !== desktopID) continue;
+    if (desktopResponse.type === "desktop_close") throw new Error(`Remote desktop closed during bridge test: ${desktopResponse.reason || "unknown reason"}`);
+    if (desktopResponse.type === "desktop_opened") opened = true;
+    if (desktopResponse.type === "desktop_data") greeting = base64URLToBytes(desktopResponse.data);
+  }
+  if (new TextDecoder().decode(greeting) !== "RFB 003.008\n") throw new Error("Remote desktop returned an invalid RFB greeting");
+  await sendEncrypted({
+    v: 1,
+    type: "desktop_data",
+    id: desktopID,
+    data: bytesToBase64URL(new TextEncoder().encode("RFB 003.008\n")),
+  });
+  desktopBridge = true;
+}
 let session = wantedSession ? sessions.find((item) => item.name === wantedSession) : sessions[0];
 if (createShell) {
   const createID = crypto.randomUUID();
@@ -112,7 +149,10 @@ if (createShell) {
     path: "/api/sessions",
     body: JSON.stringify({ name: "portal-shell-smoke", cwd: "/tmp" }),
   });
-  const created = await receiveEncrypted();
+  let created;
+  do {
+    created = await receiveEncrypted();
+  } while (created.type !== "http_response" || created.id !== createID);
   if (created.type !== "http_response" || created.id !== createID || created.status !== 201) {
     throw new Error(`Encrypted interactive-shell creation failed (${created.status ?? "invalid response"})`);
   }
@@ -164,7 +204,7 @@ if (createShell) {
   }
 }
 socket.close(1000, "Smoke test complete");
-console.log(JSON.stringify({ authenticated: true, sessions: sessions.length, terminalOutput: true, keyboardInput: Boolean(input), interactiveShell: createShell, encryption: "AES-256-GCM e2e-v1" }));
+console.log(JSON.stringify({ authenticated: true, sessions: sessions.length, terminalOutput: true, keyboardInput: Boolean(input), interactiveShell: createShell, desktopDenied, desktopBridge, encryption: "AES-256-GCM e2e-v1" }));
 // Node's built-in WebSocket can retain the Cloudflare close handshake handle
 // after the protocol assertions have completed successfully.
 setTimeout(() => process.exit(0), 50);

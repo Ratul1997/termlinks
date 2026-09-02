@@ -16,7 +16,10 @@ func TestCloudSettingsPersistPrivately(t *testing.T) {
 	if err := Ensure(paths); err != nil {
 		t.Fatal(err)
 	}
-	want := CloudSettings{RelayURL: "https://relay.example.workers.dev/", ConnectorToken: "abcdefghijklmnopqrstuvwxyz1234567890"}
+	want := CloudSettings{
+		RelayURL: "https://relay.example.workers.dev/", ConnectorToken: "abcdefghijklmnopqrstuvwxyz1234567890",
+		DesktopEnabled: true, VNCAddress: "127.0.0.1:5901",
+	}
 	if err := SaveCloudSettings(paths, want); err != nil {
 		t.Fatal(err)
 	}
@@ -24,7 +27,7 @@ func TestCloudSettingsPersistPrivately(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.RelayURL != "https://relay.example.workers.dev" || got.ConnectorToken != want.ConnectorToken {
+	if got.RelayURL != "https://relay.example.workers.dev" || got.ConnectorToken != want.ConnectorToken || !got.DesktopEnabled || got.VNCAddress != want.VNCAddress {
 		t.Fatalf("cloud settings = %#v", got)
 	}
 	info, err := os.Stat(paths.Cloud)
@@ -45,6 +48,39 @@ func TestValidateCloudSettings(t *testing.T) {
 	}
 	if err := ValidateCloudSettings(CloudSettings{RelayURL: "https://relay.example", ConnectorToken: token}); err != nil {
 		t.Fatalf("valid cloud settings rejected: %v", err)
+	}
+	for _, address := range []string{"192.168.1.10:5900", "example.com:5900", "127.0.0.1:0", "127.0.0.1"} {
+		if err := ValidateCloudSettings(CloudSettings{RelayURL: "https://relay.example", ConnectorToken: token, DesktopEnabled: true, VNCAddress: address}); err == nil {
+			t.Errorf("accepted unsafe VNC address %q", address)
+		}
+	}
+	for _, address := range []string{"127.0.0.1:5900", "[::1]:5900", "localhost:5900"} {
+		if err := ValidateCloudSettings(CloudSettings{RelayURL: "https://relay.example", ConnectorToken: token, DesktopEnabled: true, VNCAddress: address}); err != nil {
+			t.Errorf("rejected safe VNC address %q: %v", address, err)
+		}
+	}
+}
+
+func TestLegacyCloudSettingsDefaultToLoopbackDesktopTarget(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TERMLINKS_STATE_DIR", dir)
+	paths, err := ResolvePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Ensure(paths); err != nil {
+		t.Fatal(err)
+	}
+	legacy := []byte(`{"relayUrl":"https://relay.example","connectorToken":"abcdefghijklmnopqrstuvwxyz1234567890"}`)
+	if err := os.WriteFile(paths.Cloud, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := LoadCloudSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.DesktopEnabled || settings.VNCAddress != DefaultVNCAddress {
+		t.Fatalf("legacy desktop settings = enabled %v, address %q", settings.DesktopEnabled, settings.VNCAddress)
 	}
 }
 

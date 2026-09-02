@@ -6,13 +6,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
-const DefaultListen = "127.0.0.1:8787"
+const (
+	DefaultListen     = "127.0.0.1:8787"
+	DefaultVNCAddress = "127.0.0.1:5900"
+)
 
 type Paths struct {
 	Dir       string
@@ -32,6 +37,8 @@ type Settings struct {
 type CloudSettings struct {
 	RelayURL       string `json:"relayUrl"`
 	ConnectorToken string `json:"connectorToken"`
+	DesktopEnabled bool   `json:"desktopEnabled,omitempty"`
+	VNCAddress     string `json:"vncAddress,omitempty"`
 }
 
 func ResolvePaths() (Paths, error) {
@@ -75,6 +82,9 @@ func LoadCloudSettings(paths Paths) (CloudSettings, error) {
 	if err := json.Unmarshal(data, &settings); err != nil {
 		return CloudSettings{}, fmt.Errorf("parse cloud settings: %w", err)
 	}
+	if strings.TrimSpace(settings.VNCAddress) == "" {
+		settings.VNCAddress = DefaultVNCAddress
+	}
 	if err := ValidateCloudSettings(settings); err != nil {
 		return CloudSettings{}, err
 	}
@@ -84,6 +94,10 @@ func LoadCloudSettings(paths Paths) (CloudSettings, error) {
 func SaveCloudSettings(paths Paths, settings CloudSettings) error {
 	settings.RelayURL = strings.TrimRight(strings.TrimSpace(settings.RelayURL), "/")
 	settings.ConnectorToken = strings.TrimSpace(settings.ConnectorToken)
+	settings.VNCAddress = strings.TrimSpace(settings.VNCAddress)
+	if settings.VNCAddress == "" {
+		settings.VNCAddress = DefaultVNCAddress
+	}
 	if err := ValidateCloudSettings(settings); err != nil {
 		return err
 	}
@@ -125,6 +139,30 @@ func ValidateCloudSettings(settings CloudSettings) error {
 	}
 	if len(strings.TrimSpace(settings.ConnectorToken)) < 32 {
 		return errors.New("connector token must contain at least 32 characters")
+	}
+	if settings.DesktopEnabled {
+		if err := ValidateVNCAddress(settings.VNCAddress); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ValidateVNCAddress(address string) error {
+	host, portValue, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil {
+		return errors.New("VNC address must be a loopback host and port, for example 127.0.0.1:5900")
+	}
+	port, err := strconv.Atoi(portValue)
+	if err != nil || port < 1 || port > 65535 {
+		return errors.New("VNC port is invalid")
+	}
+	if strings.EqualFold(host, "localhost") {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return errors.New("VNC address must use localhost or a loopback IP")
 	}
 	return nil
 }

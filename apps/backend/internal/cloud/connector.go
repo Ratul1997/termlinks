@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -38,6 +39,8 @@ const (
 	maxHTTPResponse    = 2 << 20
 	maxTerminalInput   = 64 << 10
 	maxTerminalOutput  = 2 << 20
+	maxDesktopInput    = 256 << 10
+	desktopReadBuffer  = 64 << 10
 	authenticateWithin = 15 * time.Second
 )
 
@@ -126,8 +129,40 @@ type terminalCloseMessage struct {
 	Reason  string `json:"reason,omitempty"`
 }
 
+type desktopOpenMessage struct {
+	Version int    `json:"v"`
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+}
+
+type desktopOpenedMessage struct {
+	Version int    `json:"v"`
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+}
+
+type desktopDataMessage struct {
+	Version int    `json:"v"`
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+	Data    string `json:"data"`
+}
+
+type desktopCloseMessage struct {
+	Version int    `json:"v"`
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+	Code    int    `json:"code,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+}
+
 type localSocket struct {
 	connection *websocket.Conn
+	writeMu    sync.Mutex
+}
+
+type desktopSocket struct {
+	connection net.Conn
 	writeMu    sync.Mutex
 }
 
@@ -137,20 +172,23 @@ type browserChannel struct {
 	authenticated bool
 	httpClient    *http.Client
 	sockets       map[string]*localSocket
+	desktops      map[string]*desktopSocket
 	authTimer     *time.Timer
 	receiveSeq    uint32
 	sendSeq       uint32
 }
 
 type connectionState struct {
-	ctx         context.Context
-	localOrigin string
-	portalToken string
-	control     *client.Client
-	key         [32]byte
-	outgoing    chan []byte
-	channelsMu  sync.Mutex
-	channels    map[string]*browserChannel
+	ctx            context.Context
+	localOrigin    string
+	portalToken    string
+	desktopEnabled bool
+	vncAddress     string
+	control        *client.Client
+	key            [32]byte
+	outgoing       chan []byte
+	channelsMu     sync.Mutex
+	channels       map[string]*browserChannel
 }
 
 // Run keeps an authenticated outbound WebSocket connected to the Cloudflare relay.
@@ -180,7 +218,7 @@ func Run(ctx context.Context, settings config.CloudSettings, localListen, portal
 			return nil
 		}
 		connectedAt := time.Now()
-		err := runOnce(ctx, connectorURL, settings.ConnectorToken, localOrigin, portalToken, controlSocket, key)
+		err := runOnce(ctx, connectorURL, settings, localOrigin, portalToken, controlSocket, key)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -232,10 +270,10 @@ func RelayStatus(ctx context.Context, relayURL string) (bool, error) {
 	return status.Online, nil
 }
 
-func runOnce(ctx context.Context, connectorURL, token, localOrigin, portalToken, controlSocket string, key [32]byte) error {
+func runOnce(ctx context.Context, connectorURL string, settings config.CloudSettings, localOrigin, portalToken, controlSocket string, key [32]byte) error {
 	headers := http.Header{}
-	headers.Set("Authorization", "Bearer "+token)
-	headers.Set("User-Agent", "termlinks-connector/0.2")
+	headers.Set("Authorization", "Bearer "+settings.ConnectorToken)
+	headers.Set("User-Agent", "termlinks-connector/0.3")
 	connection, response, err := (&websocket.Dialer{HandshakeTimeout: 10 * time.Second}).DialContext(ctx, connectorURL, headers)
 	if err != nil {
 		if response != nil {
@@ -251,6 +289,7 @@ func runOnce(ctx context.Context, connectorURL, token, localOrigin, portalToken,
 	defer cancel()
 	state := &connectionState{
 		ctx: runCtx, localOrigin: localOrigin, portalToken: portalToken, key: key,
+		desktopEnabled: settings.DesktopEnabled, vncAddress: settings.VNCAddress,
 		control:  client.New(controlSocket),
 		outgoing: make(chan []byte, 256), channels: make(map[string]*browserChannel),
 	}
@@ -340,6 +379,7 @@ func (state *connectionState) openChannel(id string) {
 	channel := &browserChannel{
 		httpClient: &http.Client{Jar: jar, Timeout: 12 * time.Second},
 		sockets:    make(map[string]*localSocket),
+		desktops:   make(map[string]*desktopSocket),
 	}
 	channel.authTimer = time.AfterFunc(authenticateWithin, func() {
 		channel.mu.Lock()
@@ -428,8 +468,126 @@ func (state *connectionState) handleEncrypted(channelID, packet string) {
 			return
 		}
 		state.closeLocalSocket(channel, message.ID, normalizeCloseCode(message.Code), boundedReason(message.Reason))
+	case "desktop_open":
+		var message desktopOpenMessage
+		if json.Unmarshal(plaintext, &message) != nil || !validMessageID(message.ID) {
+			state.closeChannel(channelID, websocket.CloseUnsupportedData, "Invalid desktop request", true)
+			return
+		}
+		state.openDesktop(channelID, channel, message)
+	case "desktop_data":
+		var message desktopDataMessage
+		if json.Unmarshal(plaintext, &message) != nil || !validMessageID(message.ID) {
+			state.closeChannel(channelID, websocket.CloseUnsupportedData, "Invalid desktop data", true)
+			return
+		}
+		state.writeDesktop(channelID, channel, message)
+	case "desktop_close":
+		var message desktopCloseMessage
+		if json.Unmarshal(plaintext, &message) != nil || !validMessageID(message.ID) {
+			state.closeChannel(channelID, websocket.CloseUnsupportedData, "Invalid desktop close", true)
+			return
+		}
+		state.closeDesktop(channel, message.ID)
 	default:
 		state.closeChannel(channelID, websocket.CloseUnsupportedData, "Unsupported encrypted message", true)
+	}
+}
+
+func (state *connectionState) openDesktop(channelID string, channel *browserChannel, message desktopOpenMessage) {
+	if !state.desktopEnabled {
+		_ = state.sendEncrypted(channelID, desktopCloseMessage{Version: protocolVersion, Type: "desktop_close", ID: message.ID, Code: websocket.ClosePolicyViolation, Reason: "Remote desktop is disabled on this computer"})
+		return
+	}
+	if err := config.ValidateVNCAddress(state.vncAddress); err != nil {
+		_ = state.sendEncrypted(channelID, desktopCloseMessage{Version: protocolVersion, Type: "desktop_close", ID: message.ID, Code: websocket.ClosePolicyViolation, Reason: "Remote desktop target is not a safe loopback address"})
+		return
+	}
+	channel.mu.Lock()
+	if len(channel.desktops) != 0 {
+		channel.mu.Unlock()
+		_ = state.sendEncrypted(channelID, desktopCloseMessage{Version: protocolVersion, Type: "desktop_close", ID: message.ID, Code: websocket.ClosePolicyViolation, Reason: "A remote desktop is already open in this portal connection"})
+		return
+	}
+	channel.mu.Unlock()
+
+	dialer := net.Dialer{Timeout: 3 * time.Second}
+	connection, err := dialer.DialContext(state.ctx, "tcp", state.vncAddress)
+	if err != nil {
+		_ = state.sendEncrypted(channelID, desktopCloseMessage{Version: protocolVersion, Type: "desktop_close", ID: message.ID, Code: websocket.CloseTryAgainLater, Reason: "Local Screen Sharing is unavailable"})
+		return
+	}
+	socket := &desktopSocket{connection: connection}
+	channel.mu.Lock()
+	if len(channel.desktops) != 0 {
+		channel.mu.Unlock()
+		_ = connection.Close()
+		_ = state.sendEncrypted(channelID, desktopCloseMessage{Version: protocolVersion, Type: "desktop_close", ID: message.ID, Code: websocket.ClosePolicyViolation, Reason: "A remote desktop is already open in this portal connection"})
+		return
+	}
+	channel.desktops[message.ID] = socket
+	channel.mu.Unlock()
+	if err := state.sendEncrypted(channelID, desktopOpenedMessage{Version: protocolVersion, Type: "desktop_opened", ID: message.ID}); err != nil {
+		state.removeDesktop(channel, message.ID, socket)
+		return
+	}
+	go state.readDesktop(channelID, channel, message.ID, socket)
+}
+
+func (state *connectionState) readDesktop(channelID string, channel *browserChannel, desktopID string, socket *desktopSocket) {
+	defer state.removeDesktop(channel, desktopID, socket)
+	buffer := make([]byte, desktopReadBuffer)
+	for {
+		count, err := socket.connection.Read(buffer)
+		if count > 0 {
+			message := desktopDataMessage{
+				Version: protocolVersion,
+				Type:    "desktop_data",
+				ID:      desktopID,
+				Data:    base64.RawURLEncoding.EncodeToString(buffer[:count]),
+			}
+			if sendErr := state.sendEncrypted(channelID, message); sendErr != nil {
+				return
+			}
+		}
+		if err != nil {
+			reason := "Remote desktop disconnected"
+			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+				reason = "Remote desktop connection failed"
+			}
+			_ = state.sendEncrypted(channelID, desktopCloseMessage{Version: protocolVersion, Type: "desktop_close", ID: desktopID, Code: websocket.CloseNormalClosure, Reason: reason})
+			return
+		}
+	}
+}
+
+func (state *connectionState) writeDesktop(channelID string, channel *browserChannel, message desktopDataMessage) {
+	channel.mu.Lock()
+	socket := channel.desktops[message.ID]
+	channel.mu.Unlock()
+	if socket == nil {
+		return
+	}
+	data, err := base64.RawURLEncoding.DecodeString(message.Data)
+	if err != nil || len(data) == 0 || len(data) > maxDesktopInput {
+		state.closeDesktop(channel, message.ID)
+		_ = state.sendEncrypted(channelID, desktopCloseMessage{Version: protocolVersion, Type: "desktop_close", ID: message.ID, Code: websocket.CloseMessageTooBig, Reason: "Remote desktop input is invalid or too large"})
+		return
+	}
+	socket.writeMu.Lock()
+	for len(data) > 0 && err == nil {
+		var written int
+		written, err = socket.connection.Write(data)
+		if written == 0 && err == nil {
+			err = io.ErrUnexpectedEOF
+			break
+		}
+		data = data[written:]
+	}
+	socket.writeMu.Unlock()
+	if err != nil {
+		state.closeDesktop(channel, message.ID)
+		_ = state.sendEncrypted(channelID, desktopCloseMessage{Version: protocolVersion, Type: "desktop_close", ID: message.ID, Code: websocket.CloseInternalServerErr, Reason: "Remote desktop write failed"})
 	}
 }
 
@@ -691,14 +849,38 @@ func (state *connectionState) closeChannel(id string, code int, reason string, n
 		}
 		sockets := channel.sockets
 		channel.sockets = make(map[string]*localSocket)
+		desktops := channel.desktops
+		channel.desktops = make(map[string]*desktopSocket)
 		channel.mu.Unlock()
 		for _, socket := range sockets {
+			_ = socket.connection.Close()
+		}
+		for _, socket := range desktops {
 			_ = socket.connection.Close()
 		}
 	}
 	if notifyRelay {
 		_ = state.sendOuter(channelCloseMessage{Type: "channel_close", ID: id, Code: code, Reason: reason})
 	}
+}
+
+func (state *connectionState) closeDesktop(channel *browserChannel, id string) {
+	channel.mu.Lock()
+	socket := channel.desktops[id]
+	delete(channel.desktops, id)
+	channel.mu.Unlock()
+	if socket != nil {
+		_ = socket.connection.Close()
+	}
+}
+
+func (state *connectionState) removeDesktop(channel *browserChannel, id string, expected *desktopSocket) {
+	channel.mu.Lock()
+	if channel.desktops[id] == expected {
+		delete(channel.desktops, id)
+	}
+	channel.mu.Unlock()
+	_ = expected.connection.Close()
 }
 
 func (state *connectionState) closeAllChannels() {
