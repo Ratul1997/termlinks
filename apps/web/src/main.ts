@@ -1085,6 +1085,16 @@ function renderSessions(): void {
   startPolling();
 }
 
+function renderSessionsWithCreate(): void {
+  renderSessions();
+  const panel = document.querySelector<HTMLElement>("#create-terminal-panel");
+  const create = document.querySelector<HTMLButtonElement>('[aria-controls="create-terminal-panel"]');
+  if (!panel || !create) return;
+  panel.hidden = false;
+  create.setAttribute("aria-expanded", "true");
+  window.requestAnimationFrame(() => panel.querySelector<HTMLInputElement>("#new-session-name")?.focus({ preventScroll: true }));
+}
+
 function chooseAndUploadFiles(button: HTMLButtonElement, setStatus: (message: string, failed: boolean) => void): void {
   if (!encryptedBridge) {
     setStatus("The encrypted computer connection is offline", true);
@@ -1922,7 +1932,7 @@ function renderTerminal(id: string): void {
   const mount = el("div", "terminal-mount");
   mount.id = "terminal";
   frame.append(mount);
-  page.append(header, actions, connection, frame, renderTerminalComposer());
+  page.append(header, actions, connection, frame, renderTerminalTabs(session.id), renderTerminalComposer());
   app.append(page);
 
   const terminal = new Terminal({
@@ -1969,6 +1979,50 @@ function renderTerminal(id: string): void {
     window.removeEventListener("orientationchange", onOrientationChange);
     viewportCleanup?.();
   };
+}
+
+function renderTerminalTabs(activeSessionId: string): HTMLElement {
+  const navigation = el("nav", "terminal-tab-bar");
+  navigation.setAttribute("aria-label", "Terminal navigation");
+
+  const sessions = el("button", "terminal-tab-action", "☷");
+  sessions.type = "button";
+  sessions.title = "All terminal sessions";
+  sessions.setAttribute("aria-label", "Show all terminal sessions");
+  sessions.addEventListener("click", renderSessions);
+
+  const list = el("div", "terminal-tab-list");
+  list.setAttribute("role", "tablist");
+  list.setAttribute("aria-label", "Running terminals");
+  let activeTab: HTMLButtonElement | undefined;
+  for (const session of state.sessions.filter((item) => item.running)) {
+    const tab = el("button", "terminal-tab");
+    tab.type = "button";
+    tab.setAttribute("role", "tab");
+    const active = session.id === activeSessionId;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+    if (active) tab.setAttribute("aria-current", "page");
+    tab.title = `${session.name} · ${shortCommand(session.command)}`;
+    tab.append(el("span", "terminal-tab-dot"), el("span", "terminal-tab-name", session.name));
+    tab.addEventListener("click", () => {
+      if (!active) renderTerminal(session.id);
+    });
+    list.append(tab);
+    if (active) activeTab = tab;
+  }
+
+  const create = el("button", "terminal-tab-action terminal-tab-create", "+");
+  create.type = "button";
+  create.title = "Open a new terminal";
+  create.setAttribute("aria-label", "Open a new terminal");
+  create.addEventListener("click", renderSessionsWithCreate);
+  navigation.append(sessions, list, create);
+  window.requestAnimationFrame(() => {
+    if (!activeTab) return;
+    list.scrollLeft = Math.max(0, activeTab.offsetLeft - ((list.clientWidth - activeTab.clientWidth) / 2));
+  });
+  return navigation;
 }
 
 function installTerminalViewportSizing(page: HTMLElement): () => void {
@@ -2258,11 +2312,6 @@ function renderExtraKeys(focusTarget?: HTMLElement): HTMLElement {
     });
     bar.append(button);
   }
-  const text = el("button", "key-button key-action", "Copy screen");
-  text.type = "button";
-  text.addEventListener("pointerdown", (event) => event.preventDefault());
-  text.addEventListener("click", () => { void copyVisibleTerminalOutput(); });
-  bar.prepend(text);
   return bar;
 }
 
