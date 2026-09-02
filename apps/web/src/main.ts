@@ -790,15 +790,15 @@ function renderTerminal(id: string): void {
 
 function enableTouchScroll(terminal: Terminal): () => void {
   const root = terminal.element;
-  const viewport = terminal.element?.querySelector<HTMLElement>(".xterm-viewport");
   const hasTouchInput = navigator.maxTouchPoints > 0 || window.matchMedia("(pointer: coarse)").matches;
-  if (!root || !viewport || !hasTouchInput) return () => undefined;
+  if (!root || !hasTouchInput) return () => undefined;
 
   let activeTouch: number | undefined;
   let lastY = 0;
   let lastTime = 0;
   let velocity = 0;
   let pendingDelta = 0;
+  let pixelRemainder = 0;
   let scrollFrame = 0;
   let momentumFrame = 0;
 
@@ -806,11 +806,21 @@ function enableTouchScroll(terminal: Terminal): () => void {
     if (momentumFrame) window.cancelAnimationFrame(momentumFrame);
     momentumFrame = 0;
   };
-  const applyPendingScroll = (): void => {
+  const applyPendingScroll = (): boolean | undefined => {
     scrollFrame = 0;
-    if (!pendingDelta) return;
-    viewport.scrollTop += pendingDelta;
+    if (!pendingDelta) return undefined;
+    const rowHeight = root.clientHeight / terminal.rows;
+    if (!Number.isFinite(rowHeight) || rowHeight <= 0) return undefined;
+    const pixels = pixelRemainder + pendingDelta;
     pendingDelta = 0;
+    const lines = pixels < 0 ? Math.ceil(pixels / rowHeight) : Math.floor(pixels / rowHeight);
+    pixelRemainder = pixels - lines * rowHeight;
+    if (!lines) return undefined;
+    const before = terminal.buffer.active.viewportY;
+    terminal.scrollLines(lines);
+    const moved = terminal.buffer.active.viewportY !== before;
+    if (!moved) pixelRemainder = 0;
+    return moved;
   };
   const findTouch = (touches: TouchList): Touch | undefined => {
     if (activeTouch === undefined) return undefined;
@@ -830,8 +840,9 @@ function enableTouchScroll(terminal: Terminal): () => void {
     lastTime = performance.now();
     velocity = 0;
     pendingDelta = 0;
-    // The visible xterm canvas and its scroll viewport are siblings. Capture
-    // the gesture here so xterm's synchronous per-event handler cannot run too.
+    pixelRemainder = 0;
+    // Capture the gesture and translate pixels to terminal rows once per frame.
+    // This avoids relying on xterm's private viewport DOM, which changed in v6.
     event.stopImmediatePropagation();
   };
   const onTouchMove = (event: TouchEvent): void => {
@@ -854,11 +865,10 @@ function enableTouchScroll(terminal: Terminal): () => void {
     const step = (now: number): void => {
       const elapsed = Math.min(32, now - previous);
       previous = now;
-      const before = viewport.scrollTop;
-      viewport.scrollTop += velocity * elapsed;
+      pendingDelta += velocity * elapsed;
+      const moved = applyPendingScroll();
       velocity *= Math.pow(0.95, elapsed / 16.67);
-      const hitBoundary = viewport.scrollTop === before;
-      if (!hitBoundary && Math.abs(velocity) >= 0.03) {
+      if (moved !== false && Math.abs(velocity) >= 0.03) {
         momentumFrame = window.requestAnimationFrame(step);
       } else {
         momentumFrame = 0;
@@ -878,6 +888,7 @@ function enableTouchScroll(terminal: Terminal): () => void {
   const onTouchCancel = (): void => {
     activeTouch = undefined;
     pendingDelta = 0;
+    pixelRemainder = 0;
     velocity = 0;
     if (scrollFrame) window.cancelAnimationFrame(scrollFrame);
     scrollFrame = 0;
