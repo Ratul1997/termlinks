@@ -1,0 +1,20 @@
+{
+  "name": "termlinks",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "build:web": "npm run build --workspace @termlinks/web",
+    "sync:web": "node scripts/sync-web.mjs",
+    "build:backend": "node scripts/build-backend.mjs",
+    "build": "npm run build:web && npm run sync:web && npm run build:backend",
+    "typecheck": "npm run typecheck --workspace @termlinks/web",
+    "test:go": "node scripts/test-backend.mjs",
+    "test": "npm run typecheck && npm run test:go"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

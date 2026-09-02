@@ -1,0 +1,66 @@
+package session
+
+import (
+	"bytes"
+	"testing"
+	"time"
+)
+
+func TestInteractiveSessionAndScrollback(t *testing.T) {
+	manager := NewManager()
+	current, err := manager.Start(StartOptions{
+		Command: []string{"/bin/sh", "-c", "printf 'ready\\n'; IFS= read -r value; printf 'received:%s\\n' \"$value\""},
+		Cwd:     t.TempDir(),
+		Cols:    80,
+		Rows:    24,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = current.Stop() })
+
+	initial, updates, cancel := current.Subscribe()
+	defer cancel()
+	output := append([]byte(nil), initial...)
+	output = waitForOutput(t, output, updates, []byte("ready"))
+	if err := current.Write([]byte("from-phone\n")); err != nil {
+		t.Fatal(err)
+	}
+	output = waitForOutput(t, output, updates, []byte("received:from-phone"))
+
+	select {
+	case <-current.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("command did not exit")
+	}
+	if info := current.Info(); info.Running || info.ExitCode == nil || *info.ExitCode != 0 {
+		t.Fatalf("unexpected final state: %+v", info)
+	}
+	history, _, detach := current.Subscribe()
+	detach()
+	if !bytes.Contains(history, []byte("ready")) || !bytes.Contains(history, []byte("received:from-phone")) {
+		t.Fatalf("scrollback did not retain output: %q", history)
+	}
+}
+
+func TestRejectsUnsafeTerminalSizes(t *testing.T) {
+	_, err := NewManager().Start(StartOptions{Command: []string{"/bin/echo", "hello"}, Cwd: t.TempDir(), Cols: 10, Rows: 2})
+	if err == nil {
+		t.Fatal("expected unsafe terminal dimensions to be rejected")
+	}
+}
+
+func waitForOutput(t *testing.T, output []byte, updates <-chan []byte, expected []byte) []byte {
+	t.Helper()
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	for !bytes.Contains(output, expected) {
+		select {
+		case chunk := <-updates:
+			output = append(output, chunk...)
+		case <-timer.C:
+			t.Fatalf("timed out waiting for %q in %q", expected, output)
+		}
+	}
+	return output
+}

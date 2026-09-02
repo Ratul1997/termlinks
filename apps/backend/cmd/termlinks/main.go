@@ -1,0 +1,467 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"golang.org/x/term"
+
+	"termlinks/backend/internal/auth"
+	"termlinks/backend/internal/client"
+	"termlinks/backend/internal/config"
+	"termlinks/backend/internal/server"
+	"termlinks/backend/internal/session"
+)
+
+const version = "0.1.0"
+
+func main() {
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "termlinks:", err)
+		var status exitStatus
+		if errors.As(err, &status) {
+			os.Exit(int(status))
+		}
+		os.Exit(1)
+	}
+}
+
+func run(args []string) error {
+	if len(args) > 0 {
+		switch args[0] {
+		case "daemon", "serve":
+			return runDaemon(args[1:])
+		case "list", "ls":
+			return listSessions()
+		case "attach":
+			if len(args) != 2 {
+				return errors.New("usage: termlinks attach <session-id>")
+			}
+			return attachSession(args[1])
+		case "stop":
+			if len(args) != 2 {
+				return errors.New("usage: termlinks stop <session-id>")
+			}
+			return stopSession(args[1])
+		case "token":
+			return printToken()
+		case "doctor":
+			return doctor()
+		case "version", "--version", "-v":
+			fmt.Println("termlinks", version)
+			return nil
+		case "help", "--help", "-h":
+			printHelp()
+			return nil
+		}
+	}
+	return runCommand(args)
+}
+
+func runCommand(args []string) error {
+	flags := flag.NewFlagSet("run", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	name := flags.String("name", "", "session name")
+	flags.StringVar(name, "n", "", "session name")
+	detach := flags.Bool("detach", false, "start without attaching")
+	flags.BoolVar(detach, "d", false, "start without attaching")
+	if err := flags.Parse(args); err != nil {
+		return errors.New("usage: termlinks [-n name] [-d] [--] <command> [args...]")
+	}
+	command := flags.Args()
+	if len(command) == 0 {
+		shell := os.Getenv("SHELL")
+		if shell == "" {
+			shell = "/bin/zsh"
+		}
+		command = []string{shell}
+	}
+	paths, err := readyDaemon()
+	if err != nil {
+		return err
+	}
+	cols, rows := uint16(100), uint16(30)
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		width, height, sizeErr := term.GetSize(int(os.Stdin.Fd()))
+		if sizeErr == nil && width >= 20 && height >= 5 && width <= 500 && height <= 300 {
+			cols, rows = uint16(width), uint16(height)
+		}
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	local := client.New(paths.Socket)
+	created, err := local.Create(context.Background(), session.StartOptions{
+		Name:        *name,
+		Command:     command,
+		Cwd:         cwd,
+		Environment: os.Environ(),
+		Cols:        cols,
+		Rows:        rows,
+	})
+	if err != nil {
+		return err
+	}
+	if *detach {
+		fmt.Printf("Started %s (%s)\n", created.Name, shortID(created.ID))
+		return nil
+	}
+	exitCode, err := local.Attach(context.Background(), created.ID)
+	if err != nil {
+		return fmt.Errorf("attach to session %s: %w", shortID(created.ID), err)
+	}
+	if exitCode != 0 {
+		return exitStatus(exitCode)
+	}
+	return nil
+}
+
+func runDaemon(args []string) error {
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		return err
+	}
+	if err := config.Ensure(paths); err != nil {
+		return err
+	}
+	settings, err := config.LoadSettings(paths)
+	if err != nil {
+		return err
+	}
+	flags := flag.NewFlagSet("daemon", flag.ContinueOnError)
+	listen := flags.String("listen", settings.Listen, "web listen address")
+	allowPublic := flags.Bool("allow-public-bind", false, "allow 0.0.0.0 or [::] binding")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if err := validateListen(*listen, *allowPublic); err != nil {
+		return err
+	}
+	settings.Listen = *listen
+	if err := config.SaveSettings(paths, settings); err != nil {
+		return err
+	}
+	token, err := config.LoadOrCreateToken(paths)
+	if err != nil {
+		return err
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	manager := session.NewManager()
+	handlers, err := server.New(manager, auth.New(token), logger)
+	if err != nil {
+		return err
+	}
+	unixListener, err := listenUnix(paths.Socket)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = unixListener.Close()
+		_ = os.Remove(paths.Socket)
+	}()
+	tcpListener, err := net.Listen("tcp", *listen)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", *listen, err)
+	}
+	defer tcpListener.Close()
+
+	controlServer := newHTTPServer(handlers.ControlHandler())
+	webServer := newHTTPServer(handlers.WebHandler())
+	serveErrors := make(chan error, 2)
+	go func() { serveErrors <- controlServer.Serve(unixListener) }()
+	go func() { serveErrors <- webServer.Serve(tcpListener) }()
+	logger.Info("Termlinks is ready", "url", "http://"+tcpListener.Addr().String(), "state", paths.Dir)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	select {
+	case <-ctx.Done():
+	case serveErr := <-serveErrors:
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			return serveErr
+		}
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return server.Shutdown(shutdownCtx, controlServer, webServer)
+}
+
+func readyDaemon() (config.Paths, error) {
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		return config.Paths{}, err
+	}
+	if err := config.Ensure(paths); err != nil {
+		return config.Paths{}, err
+	}
+	local := client.New(paths.Socket)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	healthy := local.Healthy(ctx)
+	cancel()
+	if healthy {
+		return paths, nil
+	}
+	settings, err := config.LoadSettings(paths)
+	if err != nil {
+		return config.Paths{}, err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return config.Paths{}, err
+	}
+	logFile, err := os.OpenFile(paths.DaemonLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return config.Paths{}, err
+	}
+	if err := os.Chmod(paths.DaemonLog, 0o600); err != nil {
+		_ = logFile.Close()
+		return config.Paths{}, fmt.Errorf("secure daemon log: %w", err)
+	}
+	command := exec.Command(executable, "daemon", "--listen", settings.Listen)
+	command.Stdin = nil
+	command.Stdout = logFile
+	command.Stderr = logFile
+	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := command.Start(); err != nil {
+		_ = logFile.Close()
+		return config.Paths{}, err
+	}
+	_ = logFile.Close()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		healthy = local.Healthy(ctx)
+		cancel()
+		if healthy {
+			return paths, nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return config.Paths{}, fmt.Errorf("daemon did not start; inspect %s", paths.DaemonLog)
+}
+
+func listSessions() error {
+	paths, err := readyDaemon()
+	if err != nil {
+		return err
+	}
+	items, err := client.New(paths.Socket).List(context.Background())
+	if err != nil {
+		return err
+	}
+	if len(items) == 0 {
+		fmt.Println("No sessions. Start one with: termlinks <command>")
+		return nil
+	}
+	for _, item := range items {
+		status := "running"
+		if !item.Running {
+			status = "exited"
+			if item.ExitCode != nil {
+				status = fmt.Sprintf("exited (%d)", *item.ExitCode)
+			}
+		}
+		fmt.Printf("%-10s  %-18s  %-12s  %s\n", shortID(item.ID), truncate(item.Name, 18), status, strings.Join(item.Command, " "))
+	}
+	return nil
+}
+
+func attachSession(id string) error {
+	paths, err := readyDaemon()
+	if err != nil {
+		return err
+	}
+	items, err := client.New(paths.Socket).List(context.Background())
+	if err != nil {
+		return err
+	}
+	resolved, err := resolveID(items, id)
+	if err != nil {
+		return err
+	}
+	exitCode, err := client.New(paths.Socket).Attach(context.Background(), resolved)
+	if err != nil {
+		return err
+	}
+	if exitCode != 0 {
+		return exitStatus(exitCode)
+	}
+	return nil
+}
+
+func stopSession(id string) error {
+	paths, err := readyDaemon()
+	if err != nil {
+		return err
+	}
+	local := client.New(paths.Socket)
+	items, err := local.List(context.Background())
+	if err != nil {
+		return err
+	}
+	resolved, err := resolveID(items, id)
+	if err != nil {
+		return err
+	}
+	if err := local.Stop(context.Background(), resolved); err != nil {
+		return err
+	}
+	fmt.Println("Stopping", shortID(resolved))
+	return nil
+}
+
+func printToken() error {
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		return err
+	}
+	if err := config.Ensure(paths); err != nil {
+		return err
+	}
+	token, err := config.LoadOrCreateToken(paths)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "Keep this token private. Enter it only in your Termlinks portal.")
+	fmt.Println(token)
+	return nil
+}
+
+func doctor() error {
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		return err
+	}
+	settings, err := config.LoadSettings(paths)
+	if err != nil {
+		return err
+	}
+	info := map[string]any{
+		"version":  version,
+		"stateDir": paths.Dir,
+		"listen":   settings.Listen,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	info["daemon"] = client.New(paths.Socket).Healthy(ctx)
+	cancel()
+	encoded, _ := json.MarshalIndent(info, "", "  ")
+	fmt.Println(string(encoded))
+	return nil
+}
+
+func listenUnix(socket string) (net.Listener, error) {
+	if connection, err := net.DialTimeout("unix", socket, 200*time.Millisecond); err == nil {
+		_ = connection.Close()
+		return nil, errors.New("daemon is already running")
+	}
+	if err := os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("remove stale control socket: %w", err)
+	}
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		return nil, fmt.Errorf("create control socket: %w", err)
+	}
+	if err := os.Chmod(socket, 0o600); err != nil {
+		_ = listener.Close()
+		return nil, fmt.Errorf("secure control socket: %w", err)
+	}
+	return listener, nil
+}
+
+func validateListen(address string, allowPublic bool) error {
+	resolved, err := net.ResolveTCPAddr("tcp", address)
+	if err != nil {
+		return fmt.Errorf("invalid listen address: %w", err)
+	}
+	if allowPublic {
+		return nil
+	}
+	if resolved.IP == nil || resolved.IP.IsUnspecified() || !safePrivateIP(resolved.IP) {
+		return errors.New("refusing a public bind; use a specific loopback/private/Tailscale IP or explicitly pass --allow-public-bind")
+	}
+	return nil
+}
+
+func safePrivateIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsPrivate() {
+		return true
+	}
+	tailscaleCGNAT := &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+	return tailscaleCGNAT.Contains(ip)
+}
+
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       90 * time.Second,
+		MaxHeaderBytes:    16 << 10,
+	}
+}
+
+func resolveID(items []session.Info, prefix string) (string, error) {
+	var match string
+	for _, item := range items {
+		if strings.HasPrefix(item.ID, prefix) {
+			if match != "" {
+				return "", errors.New("session id prefix is ambiguous")
+			}
+			match = item.ID
+		}
+	}
+	if match == "" {
+		return "", errors.New("session not found")
+	}
+	return match, nil
+}
+
+func shortID(id string) string {
+	if len(id) <= 10 {
+		return id
+	}
+	return id[:10]
+}
+
+func truncate(value string, length int) string {
+	if len(value) <= length {
+		return value
+	}
+	return value[:length-1] + "…"
+}
+
+type exitStatus int
+
+func (e exitStatus) Error() string { return fmt.Sprintf("command exited with status %d", int(e)) }
+
+func printHelp() {
+	fmt.Print(`Termlinks — keep local terminal work reachable from your phone
+
+Usage:
+  termlinks [-n name] [-d] [--] <command> [args...]
+  termlinks                         Start your default shell
+  termlinks list                    List sessions
+  termlinks attach <id>             Reattach locally
+  termlinks stop <id>               Gracefully stop a session
+  termlinks token                   Print the private portal login token
+  termlinks doctor                  Show safe local diagnostics
+  termlinks daemon [--listen addr]  Run the daemon in the foreground
+
+Examples:
+  termlinks codex
+  termlinks -n api -- npm run dev
+  termlinks -d -- python import.py
+`)
+}

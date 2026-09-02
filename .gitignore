@@ -1,0 +1,8 @@
+.DS_Store
+node_modules/
+apps/web/dist/
+apps/backend/internal/webui/dist/*
+!apps/backend/internal/webui/dist/.gitkeep
+/dist/
+coverage/
+*.log
