@@ -10,29 +10,85 @@ Requirements: Go 1.22+, Node.js 20+, and npm.
 
 ```sh
 npm install
-npm run build
-./dist/termlinks token
-./dist/termlinks codex
+make install
+termlinks token
+termlinks codex
 ```
 
 The first managed command starts the background daemon automatically. Open `http://127.0.0.1:8787` on the computer and log in with the token. The compiled, self-contained executable is `dist/termlinks`; its portal assets are embedded in the binary.
 
-Common commands:
+## Important commands
+
+Generate or display your private portal login token:
 
 ```sh
+termlinks token
+```
+
+Start a managed command and keep it visible in the current terminal:
+
+```sh
+termlinks codex
 termlinks claude
 termlinks npm run dev
 termlinks python import.py
 termlinks bash
-termlinks -n api npm run dev
-termlinks -d python long_import.py
-termlinks list
-termlinks attach <session-id>
-termlinks stop <session-id>
-termlinks doctor
 ```
 
-Use `make install` to build and copy the executable to `~/.local/bin/termlinks`.
+Give a session a recognizable name:
+
+```sh
+termlinks -n api -- npm run dev
+```
+
+Start a command in the background without attaching the current terminal:
+
+```sh
+termlinks -d -- python long_import.py
+```
+
+List all managed sessions and their IDs:
+
+```sh
+termlinks list
+```
+
+Attach a local terminal to an existing session:
+
+```sh
+termlinks attach <session-id>
+```
+
+Stop a managed session:
+
+```sh
+termlinks stop <session-id>
+```
+
+Start the portal daemon manually in the foreground:
+
+```sh
+termlinks daemon
+```
+
+Check the daemon, listening address, state directory, and installed version:
+
+```sh
+termlinks doctor
+termlinks version
+termlinks help
+```
+
+Build, test, and install from source:
+
+```sh
+npm install
+npm test
+npm run build
+make install
+```
+
+`make install` copies the executable to `~/.local/bin/termlinks`. Without installing, replace `termlinks` in the examples with `./dist/termlinks`.
 
 ## Phone access
 
