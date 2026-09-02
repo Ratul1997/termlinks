@@ -1868,7 +1868,7 @@ function enableTouchScroll(terminal: Terminal): { cleanup: () => void; align: ()
   terminal.options.cursorBlink = false;
   let syncFrame = 0;
   let disposed = false;
-  let ignoreNativeScrollUntil = 0;
+  let ignoreProgrammaticScroll = false;
 
   const rowHeight = (): number => screen.clientHeight / terminal.rows;
   const syncNativeScroller = (force = false): void => {
@@ -1880,7 +1880,10 @@ function enableTouchScroll(terminal: Terminal): { cleanup: () => void; align: ()
     const target = buffer.viewportY * height;
     // A nearby difference means this scroll originated from the finger. Do
     // not snap WebKit's fractional momentum position back to a terminal row.
-    if (force || Math.abs(root.scrollTop - target) > height * 1.5) root.scrollTop = target;
+    if (force || Math.abs(root.scrollTop - target) > height * 1.5) {
+      ignoreProgrammaticScroll = true;
+      root.scrollTop = target;
+    }
   };
   const scheduleSync = (): void => {
     if (!syncFrame) {
@@ -1891,7 +1894,7 @@ function enableTouchScroll(terminal: Terminal): { cleanup: () => void; align: ()
     }
   };
   const onNativeScroll = (): void => {
-    if (performance.now() < ignoreNativeScrollUntil) return;
+    if (ignoreProgrammaticScroll) return;
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed && selection.anchorNode && root.contains(selection.anchorNode)) return;
     const height = rowHeight();
@@ -1900,17 +1903,23 @@ function enableTouchScroll(terminal: Terminal): { cleanup: () => void; align: ()
     const line = Math.max(0, Math.min(buffer.length - terminal.rows, Math.round(root.scrollTop / height)));
     if (line !== buffer.viewportY) terminal.scrollToLine(line);
   };
+  const onTouchStart = (): void => {
+    // From this point, scroll events belong to the user's finger rather than
+    // a resize or xterm-driven position correction.
+    ignoreProgrammaticScroll = false;
+  };
 
   root.addEventListener("scroll", onNativeScroll, { passive: true });
+  root.addEventListener("touchstart", onTouchStart, { passive: true });
   const renderSubscription = terminal.onRender(scheduleSync);
   const scrollSubscription = terminal.onScroll(scheduleSync);
   const resizeSubscription = terminal.onResize(scheduleSync);
   scheduleSync();
   return {
     align: () => {
-      // Changing terminal rows can make WebKit emit a scroll event for the old
-      // geometry. Ignore it briefly and align the browser to xterm instead.
-      ignoreNativeScrollUntil = performance.now() + 120;
+      // Changing terminal rows can make WebKit emit delayed scroll events for
+      // the old geometry. Ignore them until the next real finger gesture.
+      ignoreProgrammaticScroll = true;
       if (syncFrame) window.cancelAnimationFrame(syncFrame);
       syncFrame = 0;
       syncNativeScroller(true);
@@ -1922,6 +1931,7 @@ function enableTouchScroll(terminal: Terminal): { cleanup: () => void; align: ()
       scrollSubscription.dispose();
       resizeSubscription.dispose();
       root.removeEventListener("scroll", onNativeScroll);
+      root.removeEventListener("touchstart", onTouchStart);
       root.classList.remove("native-touch-terminal");
       spacer.remove();
     },
@@ -2145,7 +2155,8 @@ function connectTerminal(session: Session): void {
 function fitTerminal(): void {
   if (!state.fit || !state.terminal) return;
   try {
-    const wasAtBottom = state.terminal.buffer.active.viewportY >= state.terminal.buffer.active.baseY;
+    const composerFocused = document.activeElement?.classList.contains("terminal-composer-input") ?? false;
+    const wasAtBottom = composerFocused || state.terminal.buffer.active.viewportY >= state.terminal.buffer.active.baseY;
     state.fit.fit();
     if (wasAtBottom) state.terminal.scrollToBottom();
     state.touchSync?.();
