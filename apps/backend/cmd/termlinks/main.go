@@ -26,10 +26,11 @@ import (
 	"termlinks/backend/internal/config"
 	"termlinks/backend/internal/server"
 	"termlinks/backend/internal/session"
+	"termlinks/backend/internal/visibleterminal"
 	"termlinks/backend/internal/windowcapture"
 )
 
-const version = "0.4.0"
+const version = "0.5.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -541,7 +542,7 @@ func runDaemon(args []string) error {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	manager := session.NewManager()
-	handlers, err := server.New(manager, auth.New(token), logger)
+	handlers, err := server.New(manager, auth.New(token), logger, visibleterminal.Open)
 	if err != nil {
 		return err
 	}

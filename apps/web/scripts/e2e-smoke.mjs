@@ -13,6 +13,8 @@ const testWindowCapture = process.env.TERMLINKS_E2E_WINDOW_CAPTURE === "1";
 const wantedWindow = process.env.TERMLINKS_E2E_WINDOW_MATCH || "";
 const windowText = process.env.TERMLINKS_E2E_WINDOW_TEXT || "";
 const saveWindowText = process.env.TERMLINKS_E2E_WINDOW_SAVE === "1";
+const testFileUpload = process.env.TERMLINKS_E2E_FILE_UPLOAD === "1";
+const uploadName = process.env.TERMLINKS_E2E_UPLOAD_NAME || `termlinks-e2e-${Date.now()}.txt`;
 
 if (!portal.startsWith("https://") || token.length < 32) {
   throw new Error("Set TERMLINKS_E2E_PORTAL and TERMLINKS_E2E_TOKEN");
@@ -180,6 +182,29 @@ if (testWindowCapture) {
   await sendEncrypted({ v: 1, type: "window_close", id: windowID, code: 1000, reason: "Smoke test complete" });
   windowCapture = true;
 }
+let fileUpload = false;
+if (testFileUpload) {
+  const uploadID = crypto.randomUUID();
+  const content = new TextEncoder().encode(`Termlinks encrypted upload smoke test ${Date.now()}\n`);
+  await sendEncrypted({ v: 1, type: "file_upload_start", id: uploadID, name: uploadName, size: content.length });
+  let uploadResponse = await receiveEncrypted();
+  if (uploadResponse.type !== "file_upload_ready" || uploadResponse.id !== uploadID) {
+    throw new Error(`Encrypted file upload did not become ready: ${uploadResponse.reason || uploadResponse.type}`);
+  }
+  await sendEncrypted({
+    v: 1, type: "file_upload_chunk", id: uploadID, offset: 0, data: bytesToBase64URL(content),
+  });
+  uploadResponse = await receiveEncrypted();
+  if (uploadResponse.type !== "file_upload_progress" || uploadResponse.id !== uploadID || uploadResponse.received !== content.length) {
+    throw new Error(`Encrypted file upload chunk failed: ${uploadResponse.reason || uploadResponse.type}`);
+  }
+  await sendEncrypted({ v: 1, type: "file_upload_finish", id: uploadID });
+  uploadResponse = await receiveEncrypted();
+  if (uploadResponse.type !== "file_upload_complete" || uploadResponse.id !== uploadID || !uploadResponse.path?.endsWith(uploadName)) {
+    throw new Error(`Encrypted file upload did not complete: ${uploadResponse.reason || uploadResponse.type}`);
+  }
+  fileUpload = true;
+}
 let session = wantedSession ? sessions.find((item) => item.name === wantedSession) : sessions[0];
 if (createShell) {
   const createID = crypto.randomUUID();
@@ -246,7 +271,7 @@ if (createShell) {
   }
 }
 socket.close(1000, "Smoke test complete");
-console.log(JSON.stringify({ authenticated: true, sessions: sessions.length, terminalOutput: true, keyboardInput: Boolean(input), interactiveShell: createShell, desktopDenied, desktopBridge, windowCapture, encryption: "AES-256-GCM e2e-v1" }));
+console.log(JSON.stringify({ authenticated: true, sessions: sessions.length, terminalOutput: true, keyboardInput: Boolean(input), interactiveShell: createShell, desktopDenied, desktopBridge, windowCapture, fileUpload, encryption: "AES-256-GCM e2e-v1" }));
 // Node's built-in WebSocket can retain the Cloudflare close handshake handle
 // after the protocol assertions have completed successfully.
 setTimeout(() => process.exit(0), 50);

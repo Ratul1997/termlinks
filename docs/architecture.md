@@ -44,7 +44,7 @@ Daemon creates PTY ─► starts child process in requested cwd
 
 The local CLI then attaches through a WebSocket on the same Unix socket unless `--detach` was supplied.
 
-An authenticated browser may instead send `{name, cwd}`. The daemon resolves the user's normal shell, creates it on a PTY through the private Unix control socket, and returns the new session ID. The browser immediately attaches, after which `cd`, `ls`, and all other commands are ordinary terminal keystrokes. Closing the page does not terminate that shell.
+An authenticated browser may instead send `{name, cwd}`. The daemon resolves the user's normal shell, creates it on a PTY through the private Unix control socket, and returns the new session ID. The browser immediately attaches. Termlinks also launches the computer's native terminal application with `termlinks attach <session-id>`, so the phone and local window are simultaneous viewers of the same PTY and retained history. Closing either viewer does not terminate that shell.
 
 ## Browser attachment flow
 
@@ -87,6 +87,20 @@ Phone browser                 Cloudflare                    Local computer
 The AES-GCM additional authenticated data includes the random relay channel ID, sender direction, and monotonic sequence number, preventing ciphertext from being moved between connections, reflected, reordered, or replayed. Every packet also uses a new 96-bit random nonce. Cloudflare can see endpoints, IP addresses, timing, packet sizes, channel IDs, and online state, but not the portal token, cookies, commands, session metadata, terminal output, or keystrokes.
 
 The public flow asks for the portal token after each page load and retains only a non-extractable Web Crypto key in page memory. The connector performs the actual local cookie login using its local token file. A wrong token cannot decrypt the connector's challenge response.
+
+## Encrypted browser-to-computer file flow
+
+```text
+Phone / browser             Cloudflare relay                 Local computer
+      │ choose file                │                                │
+      │── encrypted name/size ────►│── opaque ciphertext ─────────►│ validate + private temp file
+      │◄── encrypted ready/ack ────│◄───────────────────────────────│
+      │── encrypted 192 KiB chunks, one acknowledged at a time ───►│ ordered write
+      │── encrypted finish ───────►│───────────────────────────────►│ fsync + no-overwrite finalize
+      │◄── encrypted saved path ───│◄───────────────────────────────│ ~/Downloads/Termlinks Uploads
+```
+
+The relay has no upload endpoint and never receives plaintext file data. The connector permits two active uploads per browser channel and a maximum of 100 MiB per file. It rejects path separators, control characters, invalid UTF-8, oversize names, reordered offsets, oversize chunks, and bytes beyond the declared size. Temporary files use mode `0600`, completed names are reserved atomically without overwriting, and partial files are removed after cancellation, error, or channel disconnect.
 
 ## Encrypted remote desktop flow
 

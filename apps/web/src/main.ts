@@ -85,6 +85,13 @@ type WindowCallbacks = {
   error: () => void;
 };
 
+type FileUploadReply = {
+  type: "file_upload_ready" | "file_upload_progress" | "file_upload_complete";
+  received: number;
+  total: number;
+  path?: string;
+};
+
 const state: {
   authenticated: boolean;
   sessions: Session[];
@@ -263,6 +270,7 @@ class EncryptedBridge {
   private readonly desktops = new Map<string, EncryptedDesktopLink>();
   private readonly windows = new Map<string, EncryptedWindowLink>();
   private readonly windowLists = new Map<string, { resolve: (value: WindowSourcesResponse) => void; reject: (error: Error) => void; timeout: number }>();
+  private readonly uploads = new Map<string, { expected: FileUploadReply["type"]; resolve: (value: FileUploadReply) => void; reject: (error: Error) => void; timeout: number }>();
   private authResolve?: () => void;
   private authReject?: (error: Error) => void;
   private challenge = "";
@@ -390,6 +398,34 @@ class EncryptedBridge {
     }
   }
 
+  async uploadFile(file: File, onProgress: (received: number, total: number) => void): Promise<string> {
+    const nameBytes = new TextEncoder().encode(file.name);
+    if (!file.name || nameBytes.byteLength > 240 || file.name.includes("/") || file.name.includes("\\")) {
+      throw new Error("That file name is not supported");
+    }
+    if (file.size > 100 * 1024 * 1024) throw new Error("Files must be 100 MiB or smaller");
+    const id = crypto.randomUUID();
+    try {
+      await this.uploadExchange(id, "file_upload_ready", { v: 1, type: "file_upload_start", id, name: file.name, size: file.size });
+      const chunkSize = 192 * 1024;
+      for (let offset = 0; offset < file.size; offset += chunkSize) {
+        const bytes = new Uint8Array(await file.slice(offset, Math.min(file.size, offset + chunkSize)).arrayBuffer());
+        const reply = await this.uploadExchange(id, "file_upload_progress", {
+          v: 1, type: "file_upload_chunk", id, offset, data: bytesToBase64URL(bytes),
+        });
+        onProgress(reply.received, reply.total);
+      }
+      const complete = await this.uploadExchange(id, "file_upload_complete", { v: 1, type: "file_upload_finish", id });
+      onProgress(file.size, file.size);
+      return complete.path || file.name;
+    } catch (error) {
+      if (this.socket?.readyState === WebSocket.OPEN) {
+        void this.sendEncrypted({ v: 1, type: "file_upload_cancel", id }).catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
   close(): void {
     this.socket?.close(1000, "Portal closed");
     this.socket = undefined;
@@ -416,6 +452,26 @@ class EncryptedBridge {
       return;
     }
     if (typeof value.id !== "string") throw new Error("Invalid encrypted stream response");
+    if (value.type.startsWith("file_upload_")) {
+      const pending = this.uploads.get(value.id);
+      if (!pending) return;
+      if (value.type === "file_upload_error") {
+        window.clearTimeout(pending.timeout);
+        this.uploads.delete(value.id);
+        pending.reject(new Error(typeof value.reason === "string" ? value.reason : "The computer rejected the file"));
+        return;
+      }
+      if (value.type !== pending.expected || typeof value.received !== "number" || typeof value.total !== "number") {
+        throw new Error("Invalid encrypted file upload response");
+      }
+      window.clearTimeout(pending.timeout);
+      this.uploads.delete(value.id);
+      pending.resolve({
+        type: value.type as FileUploadReply["type"], received: value.received, total: value.total,
+        path: typeof value.path === "string" ? value.path : undefined,
+      });
+      return;
+    }
     if (value.type === "window_sources") {
       const pending = this.windowLists.get(value.id);
       if (!pending) return;
@@ -504,6 +560,28 @@ class EncryptedBridge {
     return this.sendChain;
   }
 
+  private async uploadExchange(id: string, expected: FileUploadReply["type"], message: Record<string, unknown>): Promise<FileUploadReply> {
+    const response = new Promise<FileUploadReply>((resolve, reject) => {
+      const timeout = window.setTimeout(() => {
+        this.uploads.delete(id);
+        reject(new Error("The file transfer timed out"));
+      }, 30_000);
+      this.uploads.set(id, { expected, resolve, reject, timeout });
+    });
+    try {
+      await this.sendEncrypted(message);
+      return await response;
+    } catch (error) {
+      const pending = this.uploads.get(id);
+      if (pending) {
+        window.clearTimeout(pending.timeout);
+        this.uploads.delete(id);
+        pending.reject(error instanceof Error ? error : new Error("Could not send the file"));
+      }
+      return await response;
+    }
+  }
+
   private async decrypt(packet: string): Promise<unknown> {
     if (!this.key) throw new Error("Encryption key is unavailable");
     const value = await decryptPacket(this.key, this.channel, "connector", this.receiveSequence, packet);
@@ -533,6 +611,11 @@ class EncryptedBridge {
       window.clearTimeout(pending.timeout);
       pending.reject(error);
       this.windowLists.delete(id);
+    }
+    for (const [id, pending] of this.uploads) {
+      window.clearTimeout(pending.timeout);
+      pending.reject(error);
+      this.uploads.delete(id);
     }
     if (encryptedBridge === this && state.authenticated) {
       encryptedBridge = undefined;
@@ -801,11 +884,20 @@ function renderSessions(): void {
   create.setAttribute("aria-expanded", "false");
   create.setAttribute("aria-controls", "create-terminal-panel");
   const headingActions = el("div", "dashboard-actions");
+  const transferStatus = el("p", "file-transfer-status");
+  transferStatus.hidden = true;
   if (encryptedPortal) {
     const desktop = el("button", "desktop-button", "▣ Remote desktop");
     desktop.type = "button";
     desktop.addEventListener("click", renderDesktop);
-    headingActions.append(desktop);
+    const upload = el("button", "desktop-button", "⇧ Send file");
+    upload.type = "button";
+    upload.addEventListener("click", () => chooseAndUploadFiles(upload, (message, failed) => {
+      transferStatus.hidden = false;
+      transferStatus.textContent = message;
+      transferStatus.classList.toggle("failed", failed);
+    }));
+    headingActions.append(desktop, upload);
   }
   headingActions.append(create, refresh);
   heading.append(titleGroup, headingActions);
@@ -823,10 +915,45 @@ function renderSessions(): void {
   const list = el("section", "session-list");
   list.id = "session-list";
   renderSessionCards(list);
-  page.append(header, heading, createPanel, list, renderStartHint());
+  page.append(header, heading, transferStatus, createPanel, list, renderStartHint());
   app.append(page);
   updateSessionSummary();
   startPolling();
+}
+
+function chooseAndUploadFiles(button: HTMLButtonElement, setStatus: (message: string, failed: boolean) => void): void {
+  if (!encryptedBridge) {
+    setStatus("The encrypted computer connection is offline", true);
+    return;
+  }
+  const picker = document.createElement("input");
+  picker.type = "file";
+  picker.multiple = true;
+  picker.hidden = true;
+  picker.addEventListener("change", async () => {
+    const files = Array.from(picker.files || []);
+    picker.remove();
+    if (files.length === 0) return;
+    button.disabled = true;
+    try {
+      for (let index = 0; index < files.length; index++) {
+        const file = files[index]!;
+        setStatus(`Sending ${file.name} (${index + 1}/${files.length})…`, false);
+        const path = await encryptedBridge!.uploadFile(file, (received, total) => {
+          const percent = total === 0 ? 100 : Math.round((received / total) * 100);
+          setStatus(`Sending ${file.name} · ${percent}%`, false);
+        });
+        setStatus(`Saved on the Mac: ${path}`, false);
+      }
+    } catch (caught) {
+      setStatus(caught instanceof Error ? caught.message : "The file transfer failed", true);
+    } finally {
+      button.disabled = false;
+    }
+  }, { once: true });
+  picker.addEventListener("cancel", () => picker.remove(), { once: true });
+  document.body.append(picker);
+  picker.click();
 }
 
 function renderDesktop(): void {
@@ -870,6 +997,10 @@ function renderDesktop(): void {
   const empty = el("div", "desktop-waiting");
   empty.append(el("span", "desktop-waiting-icon", "▣"), el("span", "desktop-waiting-copy", "Choose what you want to view"));
   mount.append(empty);
+  const touchGate = el("button", "desktop-touch-gate", "Tap to enable touch control");
+  touchGate.type = "button";
+  touchGate.hidden = true;
+  mount.append(touchGate);
   frame.append(mount);
 
   const sourcePicker = el("section", "desktop-source-picker");
@@ -899,9 +1030,11 @@ function renderDesktop(): void {
   keyboard.type = "button";
   const clipboard = el("button", "desktop-control", "Clipboard");
   clipboard.type = "button";
+  const sendFile = el("button", "desktop-control", "Send file");
+  sendFile.type = "button";
   const chooseSource = el("button", "desktop-control", "Sources");
   chooseSource.type = "button";
-  controls.append(control, keyboard, clipboard, chooseSource);
+  controls.append(control, keyboard, clipboard, sendFile, chooseSource);
 
   const typingPanel = el("section", "desktop-typing");
   typingPanel.hidden = true;
@@ -969,12 +1102,14 @@ function renderDesktop(): void {
     typingInput.disabled = !enabled;
     sendText.disabled = !enabled;
     for (const key of keys.querySelectorAll<HTMLButtonElement>("button")) key.disabled = !enabled;
+    touchGate.hidden = enabled || mode === "none";
     setConnectionState(enabled ? "E2E · Live · touch and keyboard control enabled" : "E2E · Live · view only", "online");
   };
   control.addEventListener("click", () => {
     if (mode === "none") return;
     setControls(!controlEnabled);
   });
+  touchGate.addEventListener("click", () => setControls(true));
   keyboard.addEventListener("click", () => {
     typingPanel.hidden = !typingPanel.hidden;
     if (!typingPanel.hidden) typingInput.focus();
@@ -989,6 +1124,9 @@ function renderDesktop(): void {
     if (mode === "desktop") state.desktop?.clipboardPasteFrom(text);
     else state.windowLink?.send({ kind: "clipboard", text });
   });
+  sendFile.addEventListener("click", () => chooseAndUploadFiles(sendFile, (message, failed) => {
+    setConnectionState(message, failed ? "offline" : "online");
+  }));
   typingForm.addEventListener("submit", (event) => {
     event.preventDefault();
     if (!controlEnabled || mode === "none" || !typingInput.value) return;
@@ -1016,6 +1154,7 @@ function renderDesktop(): void {
       rfb.clipViewport = false;
       rfb.qualityLevel = 6;
       rfb.compressionLevel = 6;
+      state.touchCleanup = installDesktopTouchBridge(mount, () => state.desktop, () => controlEnabled);
       rfb.addEventListener("connect", () => {
         if (state.desktop !== rfb) return;
         empty.remove();
@@ -1067,7 +1206,7 @@ function renderDesktop(): void {
     canvas.className = "window-canvas";
     canvas.tabIndex = 0;
     canvas.setAttribute("aria-label", `Remote window: ${source.application}, ${source.title}`);
-    mount.append(canvas);
+    mount.append(canvas, touchGate);
     const renderer = createWindowRenderer(canvas);
     setConnectionState("Opening encrypted selected-window stream…", "connecting");
     const link = encryptedBridge!.openWindow(source.id, 1600, 1200, {
@@ -1171,12 +1310,79 @@ function createWindowRenderer(canvas: HTMLCanvasElement): { draw: (data: Uint8Ar
   };
 }
 
+function installDesktopTouchBridge(mount: HTMLElement, desktop: () => RFB | undefined, controlEnabled: () => boolean): () => void {
+  let touchId: number | undefined;
+  let lastX = 0;
+  let lastY = 0;
+  const canvas = (): HTMLCanvasElement | null => mount.querySelector("canvas");
+  const dispatchMouse = (type: "mousedown" | "mousemove" | "mouseup", clientX: number, clientY: number): void => {
+    const target = canvas();
+    if (!target || !desktop()) return;
+    target.dispatchEvent(new MouseEvent(type, {
+      bubbles: true, cancelable: true, view: window, clientX, clientY,
+      button: 0, buttons: type === "mouseup" ? 0 : 1,
+    }));
+  };
+  const findTouch = (touches: TouchList): Touch | undefined => {
+    for (let index = 0; index < touches.length; index++) {
+      const touch = touches.item(index);
+      if (touch && touch.identifier === touchId) return touch;
+    }
+    return undefined;
+  };
+  const consume = (event: TouchEvent): void => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+  const onStart = (event: TouchEvent): void => {
+    if (!controlEnabled() || touchId !== undefined || event.touches.length !== 1) return;
+    const touch = event.touches.item(0);
+    if (!touch) return;
+    consume(event);
+    touchId = touch.identifier;
+    lastX = touch.clientX;
+    lastY = touch.clientY;
+    dispatchMouse("mousedown", lastX, lastY);
+  };
+  const onMove = (event: TouchEvent): void => {
+    if (!controlEnabled() || touchId === undefined) return;
+    const touch = findTouch(event.touches);
+    if (!touch) return;
+    consume(event);
+    lastX = touch.clientX;
+    lastY = touch.clientY;
+    dispatchMouse("mousemove", lastX, lastY);
+  };
+  const onEnd = (event: TouchEvent): void => {
+    if (touchId === undefined) return;
+    const ended = findTouch(event.changedTouches);
+    if (!ended && findTouch(event.touches)) return;
+    consume(event);
+    if (ended) {
+      lastX = ended.clientX;
+      lastY = ended.clientY;
+    }
+    dispatchMouse("mouseup", lastX, lastY);
+    touchId = undefined;
+  };
+  mount.addEventListener("touchstart", onStart, { capture: true, passive: false });
+  mount.addEventListener("touchmove", onMove, { capture: true, passive: false });
+  mount.addEventListener("touchend", onEnd, { capture: true, passive: false });
+  mount.addEventListener("touchcancel", onEnd, { capture: true, passive: false });
+  return () => {
+    mount.removeEventListener("touchstart", onStart, true);
+    mount.removeEventListener("touchmove", onMove, true);
+    mount.removeEventListener("touchend", onEnd, true);
+    mount.removeEventListener("touchcancel", onEnd, true);
+  };
+}
+
 function installWindowInput(canvas: HTMLCanvasElement, link: EncryptedWindowLink, controlEnabled: () => boolean): () => void {
-  const normalized = (event: PointerEvent): { x: number; y: number } => {
+  const normalized = (clientX: number, clientY: number): { x: number; y: number } => {
     const bounds = canvas.getBoundingClientRect();
     return {
-      x: Math.max(0, Math.min(1, (event.clientX - bounds.left) / Math.max(1, bounds.width))),
-      y: Math.max(0, Math.min(1, (event.clientY - bounds.top) / Math.max(1, bounds.height))),
+      x: Math.max(0, Math.min(1, (clientX - bounds.left) / Math.max(1, bounds.width))),
+      y: Math.max(0, Math.min(1, (clientY - bounds.top) / Math.max(1, bounds.height))),
     };
   };
   const pointerButton = (event: PointerEvent): number => event.button === 2 ? 2 : event.button === 1 ? 1 : 0;
@@ -1188,26 +1394,26 @@ function installWindowInput(canvas: HTMLCanvasElement, link: EncryptedWindowLink
     const event = pendingMove;
     pendingMove = undefined;
     if (!event || !controlEnabled()) return;
-    const point = normalized(event);
+    const point = normalized(event.clientX, event.clientY);
     link.send({ kind: "pointer", action: event.buttons ? "drag" : "move", ...point, button: event.buttons & 2 ? 2 : event.buttons & 4 ? 1 : 0 });
   };
   const onPointerDown = (event: PointerEvent): void => {
-    if (!controlEnabled()) return;
+    if (!controlEnabled() || event.pointerType === "touch") return;
     event.preventDefault();
     canvas.focus({ preventScroll: true });
     canvas.setPointerCapture(event.pointerId);
-    link.send({ kind: "pointer", action: "down", ...normalized(event), button: pointerButton(event) });
+    link.send({ kind: "pointer", action: "down", ...normalized(event.clientX, event.clientY), button: pointerButton(event) });
   };
   const onPointerMove = (event: PointerEvent): void => {
-    if (!controlEnabled()) return;
+    if (!controlEnabled() || event.pointerType === "touch") return;
     event.preventDefault();
     pendingMove = event;
     if (!animationFrame) animationFrame = requestAnimationFrame(flushMove);
   };
   const onPointerUp = (event: PointerEvent): void => {
-    if (!controlEnabled()) return;
+    if (!controlEnabled() || event.pointerType === "touch") return;
     event.preventDefault();
-    link.send({ kind: "pointer", action: "up", ...normalized(event), button: pointerButton(event) });
+    link.send({ kind: "pointer", action: "up", ...normalized(event.clientX, event.clientY), button: pointerButton(event) });
     if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
   };
   const onWheel = (event: WheelEvent): void => {
@@ -1232,6 +1438,57 @@ function installWindowInput(canvas: HTMLCanvasElement, link: EncryptedWindowLink
   const preventMenu = (event: Event): void => {
     if (controlEnabled()) event.preventDefault();
   };
+  let touchId: number | undefined;
+  let touchPoint = { x: 0, y: 0 };
+  let pendingTouchPoint: { x: number; y: number } | undefined;
+  let touchAnimationFrame = 0;
+  const findTouch = (touches: TouchList): Touch | undefined => {
+    for (let index = 0; index < touches.length; index++) {
+      const touch = touches.item(index);
+      if (touch && touch.identifier === touchId) return touch;
+    }
+    return undefined;
+  };
+  const flushTouchMove = (): void => {
+    touchAnimationFrame = 0;
+    if (!pendingTouchPoint || !controlEnabled() || touchId === undefined) return;
+    touchPoint = pendingTouchPoint;
+    pendingTouchPoint = undefined;
+    link.send({ kind: "pointer", action: "drag", ...touchPoint, button: 0 });
+  };
+  const onTouchStart = (event: TouchEvent): void => {
+    if (!controlEnabled() || touchId !== undefined || event.touches.length !== 1) return;
+    const touch = event.touches.item(0);
+    if (!touch) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    canvas.focus({ preventScroll: true });
+    touchId = touch.identifier;
+    touchPoint = normalized(touch.clientX, touch.clientY);
+    link.send({ kind: "pointer", action: "down", ...touchPoint, button: 0 });
+  };
+  const onTouchMove = (event: TouchEvent): void => {
+    if (!controlEnabled() || touchId === undefined) return;
+    const touch = findTouch(event.touches);
+    if (!touch) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    pendingTouchPoint = normalized(touch.clientX, touch.clientY);
+    if (!touchAnimationFrame) touchAnimationFrame = requestAnimationFrame(flushTouchMove);
+  };
+  const onTouchEnd = (event: TouchEvent): void => {
+    if (touchId === undefined) return;
+    const ended = findTouch(event.changedTouches);
+    if (!ended && findTouch(event.touches)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (touchAnimationFrame) cancelAnimationFrame(touchAnimationFrame);
+    touchAnimationFrame = 0;
+    pendingTouchPoint = undefined;
+    if (ended) touchPoint = normalized(ended.clientX, ended.clientY);
+    link.send({ kind: "pointer", action: "up", ...touchPoint, button: 0 });
+    touchId = undefined;
+  };
 
   canvas.addEventListener("pointerdown", onPointerDown);
   canvas.addEventListener("pointermove", onPointerMove);
@@ -1241,8 +1498,13 @@ function installWindowInput(canvas: HTMLCanvasElement, link: EncryptedWindowLink
   canvas.addEventListener("keydown", onKey);
   canvas.addEventListener("keyup", onKey);
   canvas.addEventListener("contextmenu", preventMenu);
+  canvas.addEventListener("touchstart", onTouchStart, { passive: false });
+  canvas.addEventListener("touchmove", onTouchMove, { passive: false });
+  canvas.addEventListener("touchend", onTouchEnd, { passive: false });
+  canvas.addEventListener("touchcancel", onTouchEnd, { passive: false });
   return () => {
     if (animationFrame) cancelAnimationFrame(animationFrame);
+    if (touchAnimationFrame) cancelAnimationFrame(touchAnimationFrame);
     canvas.removeEventListener("pointerdown", onPointerDown);
     canvas.removeEventListener("pointermove", onPointerMove);
     canvas.removeEventListener("pointerup", onPointerUp);
@@ -1251,6 +1513,10 @@ function installWindowInput(canvas: HTMLCanvasElement, link: EncryptedWindowLink
     canvas.removeEventListener("keydown", onKey);
     canvas.removeEventListener("keyup", onKey);
     canvas.removeEventListener("contextmenu", preventMenu);
+    canvas.removeEventListener("touchstart", onTouchStart);
+    canvas.removeEventListener("touchmove", onTouchMove);
+    canvas.removeEventListener("touchend", onTouchEnd);
+    canvas.removeEventListener("touchcancel", onTouchEnd);
   };
 }
 
@@ -1261,7 +1527,7 @@ function renderCreatePanel(close: () => void): HTMLElement {
   const intro = el("div", "create-intro");
   intro.append(
     el("h2", "create-title", "Open a new shell"),
-    el("p", "create-copy", "This creates a normal interactive terminal. Once open, type cd, ls, codex, npm, or any other command."),
+    el("p", "create-copy", "This creates one shared shell, opens it here, and opens a native terminal window on your computer. Work from either screen and return to the same state."),
   );
   const form = el("form", "create-form");
   form.autocomplete = "off";
@@ -1290,7 +1556,7 @@ function renderCreatePanel(close: () => void): HTMLElement {
   const cancel = el("button", "secondary-button", "Cancel");
   cancel.type = "button";
   cancel.addEventListener("click", close);
-  const submit = el("button", "create-submit", "Create & open");
+  const submit = el("button", "create-submit", "Open on phone + computer");
   submit.type = "submit";
   actions.append(cancel, submit);
   form.append(nameField, cwdField, error, actions);
@@ -1309,7 +1575,7 @@ function renderCreatePanel(close: () => void): HTMLElement {
     } catch (caught) {
       error.textContent = caught instanceof Error ? caught.message : "Could not create the terminal";
       submit.disabled = false;
-      submit.textContent = "Create & open";
+      submit.textContent = "Open on phone + computer";
     }
   });
   panel.append(intro, form);

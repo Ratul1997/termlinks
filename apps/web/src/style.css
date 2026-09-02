@@ -73,7 +73,13 @@ button { color: inherit; }
 .dashboard-title { margin: 7px 0 0; font-size: clamp(28px, 8vw, 38px); letter-spacing: -.045em; }
 .session-summary { margin: 7px 0 0; color: #728078; font-size: 12px; }
 .icon-button { min-width: 39px; height: 39px; border: 1px solid var(--line); border-radius: 10px; color: #a7b2ac; background: var(--panel); }
-.dashboard-actions { display: flex; align-items: center; gap: 8px; }
+.dashboard-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.file-transfer-status {
+  margin: -12px 0 18px; padding: 9px 11px; border: 1px solid #2d4636; border-radius: 8px;
+  color: #a8d8b6; background: #101a14; font: 11px/1.45 ui-monospace, monospace; overflow-wrap: anywhere;
+}
+.file-transfer-status[hidden] { display: none; }
+.file-transfer-status.failed { border-color: #6b3b3b; color: #e6aaaa; background: #211313; }
 .new-terminal-button, .desktop-button {
   min-height: 39px; padding: 0 13px; border: 1px solid #477156; border-radius: 10px;
   color: var(--green); background: #132219; font-size: 12px; font-weight: 720; cursor: pointer;
@@ -239,6 +245,12 @@ button { color: inherit; }
 .desktop-frame { position: relative; min-height: 0; overflow: hidden; background: #030504; }
 .desktop-mount { position: relative; display: grid; width: 100%; height: 100%; overflow: hidden; place-items: center; }
 .desktop-mount canvas { touch-action: none; }
+.desktop-touch-gate {
+  position: absolute; z-index: 20; inset: 0; width: 100%; height: 100%; border: 0;
+  color: #d7f9e1; background: rgb(3 5 4 / 58%); font: 700 13px/1.3 ui-monospace, monospace;
+  touch-action: manipulation; cursor: pointer; backdrop-filter: blur(1px);
+}
+.desktop-touch-gate[hidden] { display: none; }
 .window-canvas { display: block; width: auto; height: auto; max-width: 100%; max-height: 100%; outline: none; background: #000; }
 .desktop-waiting {
   position: absolute; z-index: 0; inset: 0; display: grid; place-content: center; justify-items: center; gap: 12px;

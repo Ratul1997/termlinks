@@ -18,9 +18,12 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
@@ -28,6 +31,7 @@ import (
 	"termlinks/backend/internal/client"
 	"termlinks/backend/internal/config"
 	"termlinks/backend/internal/remote"
+	"termlinks/backend/internal/visibleterminal"
 	"termlinks/backend/internal/windowcapture"
 )
 
@@ -44,6 +48,9 @@ const (
 	maxDesktopInput    = 256 << 10
 	maxWindowFrame     = 2 << 20
 	maxWindowText      = 16 << 10
+	maxUploadSize      = 100 << 20
+	maxUploadChunk     = 192 << 10
+	maxUploadNameBytes = 240
 	desktopReadBuffer  = 64 << 10
 	authenticateWithin = 15 * time.Second
 )
@@ -166,6 +173,26 @@ type windowSourcesRequestMessage struct {
 	ID      string `json:"id"`
 }
 
+type fileUploadMessage struct {
+	Version int    `json:"v"`
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+	Name    string `json:"name,omitempty"`
+	Size    int64  `json:"size,omitempty"`
+	Offset  int64  `json:"offset,omitempty"`
+	Data    string `json:"data,omitempty"`
+}
+
+type fileUploadResponse struct {
+	Version  int    `json:"v"`
+	Type     string `json:"type"`
+	ID       string `json:"id"`
+	Received int64  `json:"received"`
+	Total    int64  `json:"total"`
+	Path     string `json:"path,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
 type windowSourcesMessage struct {
 	Version     int                       `json:"v"`
 	Type        string                    `json:"type"`
@@ -243,6 +270,16 @@ type windowSocket struct {
 	mu      sync.Mutex
 }
 
+type fileUpload struct {
+	mu       sync.Mutex
+	file     *os.File
+	tempPath string
+	name     string
+	size     int64
+	received int64
+	closed   bool
+}
+
 type browserChannel struct {
 	mu            sync.Mutex
 	sendMu        sync.Mutex
@@ -251,22 +288,24 @@ type browserChannel struct {
 	sockets       map[string]*localSocket
 	desktops      map[string]*desktopSocket
 	windows       map[string]*windowSocket
+	uploads       map[string]*fileUpload
 	authTimer     *time.Timer
 	receiveSeq    uint32
 	sendSeq       uint32
 }
 
 type connectionState struct {
-	ctx            context.Context
-	localOrigin    string
-	portalToken    string
-	desktopEnabled bool
-	vncAddress     string
-	control        *client.Client
-	key            [32]byte
-	outgoing       chan []byte
-	channelsMu     sync.Mutex
-	channels       map[string]*browserChannel
+	ctx             context.Context
+	localOrigin     string
+	portalToken     string
+	desktopEnabled  bool
+	vncAddress      string
+	control         *client.Client
+	key             [32]byte
+	outgoing        chan []byte
+	channelsMu      sync.Mutex
+	channels        map[string]*browserChannel
+	uploadDirectory string
 }
 
 // Run keeps an authenticated outbound WebSocket connected to the Cloudflare relay.
@@ -370,6 +409,7 @@ func runOnce(ctx context.Context, connectorURL string, settings config.CloudSett
 		desktopEnabled: settings.DesktopEnabled, vncAddress: settings.VNCAddress,
 		control:  client.New(controlSocket),
 		outgoing: make(chan []byte, 256), channels: make(map[string]*browserChannel),
+		uploadDirectory: defaultUploadDirectory(),
 	}
 	writerErrors := make(chan error, 1)
 	go func() { writerErrors <- writeRelay(runCtx, connection, state.outgoing) }()
@@ -459,6 +499,7 @@ func (state *connectionState) openChannel(id string) {
 		sockets:    make(map[string]*localSocket),
 		desktops:   make(map[string]*desktopSocket),
 		windows:    make(map[string]*windowSocket),
+		uploads:    make(map[string]*fileUpload),
 	}
 	channel.authTimer = time.AfterFunc(authenticateWithin, func() {
 		channel.mu.Lock()
@@ -596,6 +637,34 @@ func (state *connectionState) handleEncrypted(channelID, packet string) {
 			return
 		}
 		state.closeWindow(channel, message.ID)
+	case "file_upload_start":
+		var message fileUploadMessage
+		if json.Unmarshal(plaintext, &message) != nil || !validMessageID(message.ID) {
+			state.closeChannel(channelID, websocket.CloseUnsupportedData, "Invalid file upload request", true)
+			return
+		}
+		state.startFileUpload(channelID, channel, message)
+	case "file_upload_chunk":
+		var message fileUploadMessage
+		if json.Unmarshal(plaintext, &message) != nil || !validMessageID(message.ID) {
+			state.closeChannel(channelID, websocket.CloseUnsupportedData, "Invalid file upload data", true)
+			return
+		}
+		state.writeFileUpload(channelID, channel, message)
+	case "file_upload_finish":
+		var message fileUploadMessage
+		if json.Unmarshal(plaintext, &message) != nil || !validMessageID(message.ID) {
+			state.closeChannel(channelID, websocket.CloseUnsupportedData, "Invalid file upload finish", true)
+			return
+		}
+		state.finishFileUpload(channelID, channel, message.ID)
+	case "file_upload_cancel":
+		var message fileUploadMessage
+		if json.Unmarshal(plaintext, &message) != nil || !validMessageID(message.ID) {
+			state.closeChannel(channelID, websocket.CloseUnsupportedData, "Invalid file upload cancel", true)
+			return
+		}
+		state.cancelFileUpload(channel, message.ID)
 	default:
 		state.closeChannel(channelID, websocket.CloseUnsupportedData, "Unsupported encrypted message", true)
 	}
@@ -930,6 +999,7 @@ func (state *connectionState) createInteractiveShell(channelID string, message h
 		state.sendHTTPError(channelID, message.ID, http.StatusBadRequest, err.Error())
 		return
 	}
+	_ = visibleterminal.Open(created.ID)
 	body, err := json.Marshal(created)
 	if err != nil {
 		state.sendHTTPError(channelID, message.ID, http.StatusInternalServerError, "could not encode the new session")
@@ -1051,6 +1121,204 @@ func (state *connectionState) writeLocalSocket(channelID string, channel *browse
 	}
 }
 
+func defaultUploadDirectory() string {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
+	}
+	return filepath.Join(home, "Downloads", "Termlinks Uploads")
+}
+
+func validUploadName(name string) bool {
+	if name == "" || len(name) > maxUploadNameBytes || !utf8.ValidString(name) || name == "." || name == ".." {
+		return false
+	}
+	if filepath.Base(name) != name || strings.ContainsAny(name, `/\\`) {
+		return false
+	}
+	for _, character := range name {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
+}
+
+func (state *connectionState) uploadError(channelID, id, reason string) {
+	_ = state.sendEncrypted(channelID, fileUploadResponse{
+		Version: protocolVersion, Type: "file_upload_error", ID: id, Reason: boundedReason(reason),
+	})
+}
+
+func (state *connectionState) startFileUpload(channelID string, channel *browserChannel, message fileUploadMessage) {
+	if !validUploadName(message.Name) || message.Size < 0 || message.Size > maxUploadSize {
+		state.uploadError(channelID, message.ID, "Invalid file name or size (maximum 100 MiB)")
+		return
+	}
+	if state.uploadDirectory == "" {
+		state.uploadError(channelID, message.ID, "The computer upload directory is unavailable")
+		return
+	}
+	channel.mu.Lock()
+	if _, exists := channel.uploads[message.ID]; exists || len(channel.uploads) >= 2 {
+		channel.mu.Unlock()
+		state.uploadError(channelID, message.ID, "Too many active file uploads")
+		return
+	}
+	channel.mu.Unlock()
+	if err := os.MkdirAll(state.uploadDirectory, 0o700); err != nil {
+		state.uploadError(channelID, message.ID, "Could not create the upload directory")
+		return
+	}
+	_ = os.Chmod(state.uploadDirectory, 0o700)
+	file, err := os.CreateTemp(state.uploadDirectory, ".termlinks-upload-*")
+	if err != nil {
+		state.uploadError(channelID, message.ID, "Could not create a temporary upload file")
+		return
+	}
+	_ = file.Chmod(0o600)
+	upload := &fileUpload{file: file, tempPath: file.Name(), name: message.Name, size: message.Size}
+	channel.mu.Lock()
+	if _, exists := channel.uploads[message.ID]; exists || len(channel.uploads) >= 2 {
+		channel.mu.Unlock()
+		cleanupFileUpload(upload)
+		state.uploadError(channelID, message.ID, "Too many active file uploads")
+		return
+	}
+	channel.uploads[message.ID] = upload
+	channel.mu.Unlock()
+	_ = state.sendEncrypted(channelID, fileUploadResponse{Version: protocolVersion, Type: "file_upload_ready", ID: message.ID, Total: message.Size})
+}
+
+func (state *connectionState) writeFileUpload(channelID string, channel *browserChannel, message fileUploadMessage) {
+	channel.mu.Lock()
+	upload := channel.uploads[message.ID]
+	channel.mu.Unlock()
+	if upload == nil {
+		state.uploadError(channelID, message.ID, "File upload is not active")
+		return
+	}
+	data, err := base64.RawURLEncoding.DecodeString(message.Data)
+	upload.mu.Lock()
+	invalid := upload.closed || err != nil || len(data) > maxUploadChunk || message.Offset != upload.received || upload.received+int64(len(data)) > upload.size
+	if !invalid {
+		_, err = upload.file.Write(data)
+		if err == nil {
+			upload.received += int64(len(data))
+		}
+	}
+	received, total := upload.received, upload.size
+	upload.mu.Unlock()
+	if invalid || err != nil {
+		state.removeFileUpload(channel, message.ID, upload)
+		cleanupFileUpload(upload)
+		state.uploadError(channelID, message.ID, "Invalid file chunk")
+		return
+	}
+	_ = state.sendEncrypted(channelID, fileUploadResponse{
+		Version: protocolVersion, Type: "file_upload_progress", ID: message.ID, Received: received, Total: total,
+	})
+}
+
+func (state *connectionState) finishFileUpload(channelID string, channel *browserChannel, id string) {
+	channel.mu.Lock()
+	upload := channel.uploads[id]
+	if upload != nil {
+		delete(channel.uploads, id)
+	}
+	channel.mu.Unlock()
+	if upload == nil {
+		state.uploadError(channelID, id, "File upload is not active")
+		return
+	}
+	upload.mu.Lock()
+	if upload.closed || upload.received != upload.size {
+		upload.mu.Unlock()
+		cleanupFileUpload(upload)
+		state.uploadError(channelID, id, "File upload is incomplete")
+		return
+	}
+	if err := upload.file.Sync(); err != nil {
+		upload.mu.Unlock()
+		cleanupFileUpload(upload)
+		state.uploadError(channelID, id, "Could not save the uploaded file")
+		return
+	}
+	err := upload.file.Close()
+	upload.closed = true
+	upload.mu.Unlock()
+	if err != nil {
+		cleanupFileUpload(upload)
+		state.uploadError(channelID, id, "Could not save the uploaded file")
+		return
+	}
+	finalPath, err := reserveUploadPath(upload.tempPath, state.uploadDirectory, upload.name)
+	if err != nil {
+		cleanupFileUpload(upload)
+		state.uploadError(channelID, id, "Could not finalize the uploaded file")
+		return
+	}
+	_ = state.sendEncrypted(channelID, fileUploadResponse{
+		Version: protocolVersion, Type: "file_upload_complete", ID: id, Received: upload.received, Total: upload.size, Path: finalPath,
+	})
+}
+
+func reserveUploadPath(tempPath, directory, name string) (string, error) {
+	extension := filepath.Ext(name)
+	stem := strings.TrimSuffix(name, extension)
+	for suffix := 0; suffix < 10_000; suffix++ {
+		candidateName := name
+		if suffix > 0 {
+			candidateName = fmt.Sprintf("%s (%d)%s", stem, suffix, extension)
+		}
+		candidate := filepath.Join(directory, candidateName)
+		err := os.Link(tempPath, candidate)
+		if err == nil {
+			if removeErr := os.Remove(tempPath); removeErr != nil {
+				_ = os.Remove(candidate)
+				return "", removeErr
+			}
+			return candidate, nil
+		}
+		if !os.IsExist(err) {
+			return "", err
+		}
+	}
+	return "", errors.New("too many files use that name")
+}
+
+func (state *connectionState) removeFileUpload(channel *browserChannel, id string, expected *fileUpload) {
+	channel.mu.Lock()
+	if channel.uploads[id] == expected {
+		delete(channel.uploads, id)
+	}
+	channel.mu.Unlock()
+}
+
+func (state *connectionState) cancelFileUpload(channel *browserChannel, id string) {
+	channel.mu.Lock()
+	upload := channel.uploads[id]
+	delete(channel.uploads, id)
+	channel.mu.Unlock()
+	cleanupFileUpload(upload)
+}
+
+func cleanupFileUpload(upload *fileUpload) {
+	if upload == nil {
+		return
+	}
+	upload.mu.Lock()
+	if !upload.closed {
+		_ = upload.file.Close()
+		upload.closed = true
+	}
+	tempPath := upload.tempPath
+	upload.mu.Unlock()
+	if tempPath != "" {
+		_ = os.Remove(tempPath)
+	}
+}
+
 func (state *connectionState) sendEncrypted(channelID string, value any) error {
 	state.channelsMu.Lock()
 	channel := state.channels[channelID]
@@ -1103,6 +1371,8 @@ func (state *connectionState) closeChannel(id string, code int, reason string, n
 		channel.desktops = make(map[string]*desktopSocket)
 		windows := channel.windows
 		channel.windows = make(map[string]*windowSocket)
+		uploads := channel.uploads
+		channel.uploads = make(map[string]*fileUpload)
 		channel.mu.Unlock()
 		for _, socket := range sockets {
 			_ = socket.connection.Close()
@@ -1112,6 +1382,9 @@ func (state *connectionState) closeChannel(id string, code int, reason string, n
 		}
 		for _, socket := range windows {
 			socket.cancel()
+		}
+		for _, upload := range uploads {
+			cleanupFileUpload(upload)
 		}
 	}
 	if notifyRelay {

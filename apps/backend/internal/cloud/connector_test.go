@@ -285,6 +285,93 @@ func TestValidWindowInput(t *testing.T) {
 	}
 }
 
+func TestEncryptedFileUploadIsPrivateOrderedAndDoesNotOverwrite(t *testing.T) {
+	channelID := "01234567-89ab-cdef-0123-456789abcdef"
+	uploadID := "11111111-1111-4111-8111-111111111111"
+	key := deriveKey("abcdefghijklmnopqrstuvwxyz1234567890")
+	directory := t.TempDir()
+	existingPath := filepath.Join(directory, "report.pdf")
+	if err := os.WriteFile(existingPath, []byte("existing"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	channel := &browserChannel{uploads: make(map[string]*fileUpload)}
+	state := &connectionState{
+		ctx: context.Background(), key: key, outgoing: make(chan []byte, 8),
+		channels: map[string]*browserChannel{channelID: channel}, uploadDirectory: directory,
+	}
+	content := []byte("%PDF-1.7\nprivate upload\n")
+	state.startFileUpload(channelID, channel, fileUploadMessage{
+		Version: protocolVersion, Type: "file_upload_start", ID: uploadID, Name: "report.pdf", Size: int64(len(content)),
+	})
+	assertEncryptedFileMessageType(t, <-state.outgoing, key, channelID, 0, "file_upload_ready")
+	state.writeFileUpload(channelID, channel, fileUploadMessage{
+		Version: protocolVersion, Type: "file_upload_chunk", ID: uploadID, Offset: 0,
+		Data: base64.RawURLEncoding.EncodeToString(content),
+	})
+	assertEncryptedFileMessageType(t, <-state.outgoing, key, channelID, 1, "file_upload_progress")
+	state.finishFileUpload(channelID, channel, uploadID)
+	plaintext := decryptOutgoingForTest(t, <-state.outgoing, key, channelID, 2)
+	var complete fileUploadResponse
+	if err := json.Unmarshal(plaintext, &complete); err != nil {
+		t.Fatal(err)
+	}
+	if complete.Type != "file_upload_complete" || complete.Path != filepath.Join(directory, "report (1).pdf") {
+		t.Fatalf("unexpected upload completion: %#v", complete)
+	}
+	got, err := os.ReadFile(complete.Path)
+	if err != nil || string(got) != string(content) {
+		t.Fatalf("uploaded file = %q, err = %v", got, err)
+	}
+	unchanged, _ := os.ReadFile(existingPath)
+	if string(unchanged) != "existing" {
+		t.Fatalf("existing file was overwritten: %q", unchanged)
+	}
+	info, err := os.Stat(complete.Path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("uploaded mode = %v, err = %v", info.Mode().Perm(), err)
+	}
+	if validUploadName("../escape.pdf") || validUploadName("folder/file.pdf") || validUploadName("bad\x00name") {
+		t.Fatal("unsafe upload name was accepted")
+	}
+}
+
+func TestEncryptedFileUploadRejectsOutOfOrderChunkAndCleansTemporaryFile(t *testing.T) {
+	channelID := "01234567-89ab-cdef-0123-456789abcdef"
+	uploadID := "11111111-1111-4111-8111-111111111111"
+	key := deriveKey("abcdefghijklmnopqrstuvwxyz1234567890")
+	directory := t.TempDir()
+	channel := &browserChannel{uploads: make(map[string]*fileUpload)}
+	state := &connectionState{
+		ctx: context.Background(), key: key, outgoing: make(chan []byte, 8),
+		channels: map[string]*browserChannel{channelID: channel}, uploadDirectory: directory,
+	}
+	state.startFileUpload(channelID, channel, fileUploadMessage{
+		Version: protocolVersion, Type: "file_upload_start", ID: uploadID, Name: "photo.jpg", Size: 3,
+	})
+	assertEncryptedFileMessageType(t, <-state.outgoing, key, channelID, 0, "file_upload_ready")
+	state.writeFileUpload(channelID, channel, fileUploadMessage{
+		Version: protocolVersion, Type: "file_upload_chunk", ID: uploadID, Offset: 2,
+		Data: base64.RawURLEncoding.EncodeToString([]byte("x")),
+	})
+	assertEncryptedFileMessageType(t, <-state.outgoing, key, channelID, 1, "file_upload_error")
+	entries, err := os.ReadDir(directory)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("partial upload was not removed: %v, err = %v", entries, err)
+	}
+}
+
+func assertEncryptedFileMessageType(t *testing.T, outerData []byte, key [32]byte, channelID string, sequence uint32, want string) {
+	t.Helper()
+	plaintext := decryptOutgoingForTest(t, outerData, key, channelID, sequence)
+	var message fileUploadResponse
+	if err := json.Unmarshal(plaintext, &message); err != nil {
+		t.Fatal(err)
+	}
+	if message.Type != want {
+		t.Fatalf("message type = %q, want %q", message.Type, want)
+	}
+}
+
 func assertEncryptedDesktopMessageType(t *testing.T, outerData []byte, key [32]byte, channelID string, sequence uint32, want string) {
 	t.Helper()
 	plaintext := decryptOutgoingForTest(t, outerData, key, channelID, sequence)

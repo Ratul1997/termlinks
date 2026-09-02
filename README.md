@@ -1,6 +1,6 @@
 # Termlinks
 
-Termlinks is an open-source, self-hosted bridge that keeps terminal work running on your computer and lets you view and control it from a phone browser. It is command-agnostic: Codex, Claude, development servers, import scripts, shells, and other terminal programs all use the same PTY bridge. It can also carry an opt-in full Mac desktop or one selected macOS window through the encrypted portal.
+Termlinks is an open-source, self-hosted bridge that keeps terminal work running on your computer and lets you view and control it from a phone browser. It is command-agnostic: Codex, Claude, development servers, import scripts, shells, and other terminal programs all use the same PTY bridge. A shell created from the portal also opens in a native terminal window on the computer, so both screens share the same PTY and history. Termlinks can carry an opt-in full Mac desktop or one selected macOS window and can transfer files from the encrypted portal to the computer.
 
 No Termlinks-hosted account or service is required. Run it only on the local computer, reach it through SSH or a private VPN, expose it through an HTTPS tunnel provider, or deploy the included Cloudflare Pages + Workers relay. Cloudflare is the documented default public option, not a requirement.
 
@@ -8,7 +8,7 @@ This first version is designed for one trusted owner and supports macOS and Linu
 
 ## Quick start
 
-Requirements: Go 1.22+, Node.js 20+, and npm.
+Requirements: Go 1.24+ (the module selects the tested Go 1.26.8 toolchain), Node.js 20+, and npm.
 
 ```sh
 git clone https://github.com/Ratul1997/termlinks.git
@@ -162,6 +162,7 @@ Termlinks intentionally has a small configuration surface. There is no hidden ap
 | `termlinks daemon --allow-public-bind` | Off | Allows an unspecified/public bind such as `0.0.0.0`. This is dangerous and does not add TLS; prefer an SSH/VPN/tunnel setup. |
 | Portal **New terminal → Name** | Empty/generated display name | Optional label, at most 80 characters. |
 | Portal **New terminal → Starting directory** | Home directory | Accepts `~`, `~/path`, or an absolute accessible directory, at most 4096 characters. Browser creation always opens the configured shell; commands are typed afterward. |
+| Portal-created native window | Enabled | A portal-created session also launches the platform terminal and runs `termlinks attach <opaque-session-id>`. There is currently no disable toggle; local CLI-created sessions keep their existing attach/detach behavior. |
 
 `--listen` is a daemon option, so if the daemon is already running, stop that foreground daemon before changing it. Later automatic daemon starts reuse the saved address. `termlinks doctor` shows the effective listener, state directory, daemon status, and version without revealing tokens.
 
@@ -227,6 +228,8 @@ The connector token authenticates the computer to the relay. The portal token au
 | `termlinks desktop permissions` | — | On macOS, requests Screen Recording for viewing and Accessibility for control. |
 | `termlinks desktop windows` | — | Lists the normal titled on-screen windows that the portal can offer. |
 | Portal control toggle | View-only | **Enable control** must be selected before the UI sends pointer or keyboard input. It is an accident-prevention control, not another authentication layer. |
+| Portal touch input | View-only until explicitly enabled | Tap the full-screen **Tap to enable touch control** shield, then use one finger to click or drag. Mouse and hardware keyboard input continue to work. |
+| Portal **Send file** | Up to 100 MiB per file | Sends any browser-selected file over the authenticated AES-GCM channel and saves it to `~/Downloads/Termlinks Uploads`. Existing names are never overwritten. |
 
 Selected-window capture requires macOS 14+ and a cgo-enabled build. Full-desktop mode additionally requires a loopback VNC/Screen Sharing server. These GUI modes currently travel through the encrypted connector-relay protocol, not the direct local portal.
 
@@ -286,6 +289,8 @@ These variables are for maintainers and CI; normal users do not need them:
 | `TERMLINKS_E2E_WINDOW_MATCH` | Case-insensitive substring | Chooses a window by combined application/title instead of the first source. |
 | `TERMLINKS_E2E_WINDOW_TEXT` | Text | Injects text into the deliberately selected test window. |
 | `TERMLINKS_E2E_WINDOW_SAVE=1` | Boolean switch | Sends Command-S after window text; use only with a disposable document. |
+| `TERMLINKS_E2E_FILE_UPLOAD=1` | Boolean switch | Sends a small uniquely named text file through the encrypted upload protocol. Remove the resulting file from `~/Downloads/Termlinks Uploads` after a public smoke test. |
+| `TERMLINKS_E2E_UPLOAD_NAME` | Safe basename | Overrides the smoke-test upload filename; it must not contain a path separator. |
 | `TERMLINKS_WINDOW_INTEGRATION=1` | Boolean switch | Enables the native ScreenCaptureKit Go integration test, which is skipped by default. |
 
 ### Fixed safety and capacity limits
@@ -296,6 +301,7 @@ These limits and UI tuning values are compiled into this release rather than run
 - PTYs default to 100 columns × 30 rows when no valid attached-terminal size is available, accept sizes from 20–500 columns and 5–300 rows, retain 2 MiB backend scrollback per session, and accept terminal input messages up to 64 KiB.
 - The browser terminal retains 10,000 rendered rows, uses 13 px text below 600 px viewport width and 14 px otherwise, and polls the dashboard every 2.5 seconds.
 - The relay permits eight simultaneous browser sockets and 5 MiB encrypted packets. Each browser channel permits either one VNC desktop or one selected-window stream.
+- A browser may transfer at most two files concurrently; each file is limited to 100 MiB and is sent as acknowledged 192 KiB chunks. Partial files are deleted after errors or disconnects.
 - noVNC uses viewport scaling, view-only startup, shared mode, and quality/compression level 6; it does not request remote framebuffer resizing.
 - Selected-window capture accepts bounds from 320×240 through 2560×1800, captures approximately every 150 ms, JPEG-encodes locally at quality `0.62`, caps a frame at 2 MiB, and caps text/clipboard messages at 16 KiB.
 
@@ -305,7 +311,7 @@ Forks may change the corresponding source constants, but should reassess memory,
 
 After login, the portal dashboard automatically shows every managed terminal and its current state:
 
-- Select **New terminal** to create and immediately open a normal interactive shell. Its optional starting directory may be `~`, `~/path`, or an absolute path.
+- Select **New terminal** to create one normal interactive shell. Termlinks immediately attaches the portal and opens a native Terminal window on the computer to the same PTY. Its optional starting directory may be `~`, `~/path`, or an absolute path.
 - Inside that shell, type `cd`, `ls`, `codex`, `npm run dev`, or any other command exactly as in a desktop terminal.
 - Terminal history uses native touch momentum on mobile and short smooth scrolling for mouse wheels and trackpads.
 - On a desktop browser, drag across terminal text normally to select and copy it. On iPhone/iPad or another touch device, tap **Select text** in the bottom toolbar. Termlinks opens the retained terminal history in a normal read-only text panel, where you can long-press to select exact text and tap **Copy selection**, or use **Copy visible screen**.
@@ -313,6 +319,7 @@ After login, the portal dashboard automatically shows every managed terminal and
 - The header shows the number of running sessions. Finished and explicitly closed sessions are removed from the dashboard automatically.
 - Each card shows the session name, command, directory, runtime, and status.
 - Select **Open terminal** to view and type in that terminal.
+- Select **Send file** to transfer images, PDFs, archives, or other files to `~/Downloads/Termlinks Uploads` on the computer. Transfers are E2E encrypted in cloud mode, filenames are validated, and duplicate names receive ` (1)`, ` (2)`, and so on.
 - Select **Stop & close** to terminate a running command after confirmation.
 - The terminal screen also has **Stop & close session** in its `•••` menu.
 - While a terminal is open, its final output remains visible after the process exits. Returning to the dashboard clears that finished card.
@@ -327,7 +334,8 @@ For the default Cloudflare deployment:
 2. Run `termlinks cloud start` on the computer.
 3. Open your Pages URL on the phone or another computer.
 4. Enter the token printed by `termlinks token`.
-5. Select an existing session, or tap **New terminal** to create an interactive shell, and type with the device keyboard.
+5. Select an existing session, or tap **New terminal** to create an interactive shell. A native terminal window opens on the computer and the phone attaches to the same shell.
+6. Use **Send file** on the dashboard or remote-desktop toolbar to copy a file from the phone/browser to the computer.
 
 Nothing needs to be installed on the viewing device. Giving another person the portal URL and portal token gives them the same full terminal access, so share it only with someone you completely trust. The connector secret is separate and must never be shared.
 
@@ -335,7 +343,7 @@ If the computer sleeps, shuts down, loses internet access, or runs `termlinks cl
 
 ## Remote desktop (macOS-first)
 
-Remote desktop is disabled by default. Termlinks 0.4 offers two source modes in the portal:
+Remote desktop is disabled by default. Termlinks 0.5 offers two source modes in the portal:
 
 - **Full Mac desktop** uses macOS Screen Sharing/VNC and shows the complete framebuffer.
 - **Selected window** uses Apple's ScreenCaptureKit to show a live list of on-screen application windows and streams only the one you choose. Screen Sharing does not need to be enabled for this mode.
@@ -395,7 +403,7 @@ The password is entered into the macOS dialog; Termlinks does not receive it. Re
 1. Open your deployed HTTPS portal, enter the portal token, and select **Remote desktop**.
 2. Choose **Full Mac desktop** or choose an entry from the encrypted **Open windows** list.
 3. Full-desktop mode asks for Screen Sharing credentials; selected-window mode relies on the Mac's local privacy permissions and does not request a VNC password.
-4. The page starts in view-only mode. Tap **Enable control** before sending touch, mouse, or keyboard input.
+4. The page starts in view-only mode. Tap the large **Tap to enable touch control** shield (or the toolbar toggle) before sending touch, mouse, or keyboard input.
 5. Use the toolbar for fullscreen, scaling, special keys, the mobile keyboard, and clipboard text sent to the Mac.
 
 The default target is `127.0.0.1:5900`. A different local VNC server can be selected with `termlinks desktop enable --address 127.0.0.1:<port>`. Non-loopback targets are rejected. The VNC password is entered into the browser only when requested and is never written to Termlinks configuration or browser storage.
@@ -429,7 +437,9 @@ Selected-window access also stops immediately when `termlinks desktop disable` d
 - **Tunnel disabled:** run `termlinks desktop enable --address 127.0.0.1:5900`.
 - **VNC server unreachable:** enable macOS Screen Sharing, then check the local port with `nc -z 127.0.0.1 5900` and rerun `termlinks desktop status`.
 - **Window list says permission is missing:** run `termlinks desktop permissions`, approve Termlinks under **System Settings → Privacy & Security → Screen & System Audio Recording**, then restart the connector.
-- **Window is visible but cannot be controlled:** allow Termlinks under **System Settings → Privacy & Security → Accessibility**, then restart the connector and explicitly tap **Enable control** in the portal.
+- **Window is visible but cannot be controlled:** allow Termlinks under **System Settings → Privacy & Security → Accessibility**, restart the connector, then tap the large **Tap to enable touch control** shield. One-finger touch maps directly to click and drag on iPhone/iPad.
+- **Native terminal did not appear after New terminal:** keep the Mac user logged into the desktop. On first use, macOS may ask whether Termlinks/osascript may control Terminal; approve it under **System Settings → Privacy & Security → Automation**. The managed shell still exists and can be opened from the portal if window launch fails.
+- **File transfer fails:** keep the connector online, use a file no larger than 100 MiB, and confirm that `~/Downloads` is writable. Successful files appear under `~/Downloads/Termlinks Uploads`.
 - **Window is missing from the list:** make sure it is open, on screen, not minimized, and has a normal title, then tap **Refresh**.
 - **Computer offline:** run `termlinks cloud start` and check `termlinks cloud status`. The connector is outbound-only; do not open or forward port 5900 on the router.
 - **PWA appears outdated:** fully close and reopen it. If necessary, reload your portal URL in the browser or remove and add the Home Screen app again.
@@ -442,6 +452,7 @@ Selected-window access also stops immediately when `termlinks desktop disable` d
 - The portal token derives the AES-256-GCM bridge key in the browser. Cloudflare carries encrypted terminal and desktop payloads and cannot read their contents, although normal connection metadata remains visible.
 - VNC credentials are supplied directly to the in-browser VNC client for the live connection. Termlinks does not save them.
 - Selected-window titles, application names, captured frames, and control events are encrypted inside the same bridge. Cloudflare receives ciphertext, sizes, timing, and ordinary connection metadata only.
+- Uploaded filenames and file bytes are chunked inside that same authenticated AES-256-GCM bridge. Cloudflare can observe transfer timing and ciphertext sizes but not names or contents.
 - macOS Screen Recording and Accessibility permissions apply to the installed Termlinks executable. Replacing it with an unsigned/differently signed build may require approval again; official local builds use the stable `dev.termlinks.cli` ad-hoc identifier.
 - View-only mode prevents accidental input in the UI; it is a safety control, not an authentication boundary.
 

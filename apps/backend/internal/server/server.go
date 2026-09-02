@@ -25,10 +25,11 @@ import (
 const cookieName = "termlinks_session"
 
 type Server struct {
-	sessions *session.Manager
-	auth     *auth.Manager
-	logger   *slog.Logger
-	web      http.Handler
+	sessions            *session.Manager
+	auth                *auth.Manager
+	logger              *slog.Logger
+	web                 http.Handler
+	openVisibleTerminal func(string) error
 }
 
 type terminalControl struct {
@@ -37,17 +38,21 @@ type terminalControl struct {
 	Rows uint16 `json:"rows,omitempty"`
 }
 
-func New(sessions *session.Manager, authManager *auth.Manager, logger *slog.Logger) (*Server, error) {
+func New(sessions *session.Manager, authManager *auth.Manager, logger *slog.Logger, visibleTerminal ...func(string) error) (*Server, error) {
 	root, err := fs.Sub(webui.Files, "dist")
 	if err != nil {
 		return nil, fmt.Errorf("load embedded web client: %w", err)
 	}
-	return &Server{
+	server := &Server{
 		sessions: sessions,
 		auth:     authManager,
 		logger:   logger,
 		web:      spaHandler(root),
-	}, nil
+	}
+	if len(visibleTerminal) > 0 {
+		server.openVisibleTerminal = visibleTerminal[0]
+	}
+	return server, nil
 }
 
 func (s *Server) ControlHandler() http.Handler {
@@ -105,6 +110,11 @@ func (s *Server) createWebSession(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if s.openVisibleTerminal != nil {
+		if err := s.openVisibleTerminal(created.Info().ID); err != nil {
+			s.logger.Warn("could not open a visible terminal window", "session", created.Info().ID, "error", err)
+		}
 	}
 	writeJSON(w, http.StatusCreated, created.Info())
 }

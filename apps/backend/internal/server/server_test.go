@@ -145,7 +145,11 @@ func TestWebRejectsCrossOriginAndUnauthenticatedCreation(t *testing.T) {
 
 func TestAuthenticatedWebCreationStartsInteractiveShell(t *testing.T) {
 	manager := session.NewManager()
-	handler, err := New(manager, auth.New("token"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	opened := make(chan string, 1)
+	handler, err := New(manager, auth.New("token"), slog.New(slog.NewTextHandler(io.Discard, nil)), func(id string) error {
+		opened <- id
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,6 +185,14 @@ func TestAuthenticatedWebCreationStartsInteractiveShell(t *testing.T) {
 	}
 	if !created.Running || created.Name != "phone shell" || created.Cwd != cwd || len(created.Command) != 1 {
 		t.Fatalf("unexpected created shell: %#v", created)
+	}
+	select {
+	case openedID := <-opened:
+		if openedID != created.ID {
+			t.Fatalf("visible terminal opened for %q, want %q", openedID, created.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("web-created shell did not open a visible terminal")
 	}
 	current, ok := manager.Get(created.ID)
 	if !ok {
