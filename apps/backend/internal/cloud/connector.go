@@ -1,0 +1,894 @@
+package cloud
+
+import (
+	"bytes"
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/cookiejar"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
+
+	"github.com/gorilla/websocket"
+
+	"termlinks/backend/internal/client"
+	"termlinks/backend/internal/config"
+	"termlinks/backend/internal/remote"
+)
+
+const (
+	protocolVersion    = 1
+	keyContext         = "termlinks-e2e-v1\x00"
+	aadContext         = "termlinks-e2e-v1:"
+	maxControlMessage  = 7 << 20
+	maxEncryptedPacket = 5 << 20
+	maxHTTPBody        = 64 << 10
+	maxHTTPResponse    = 2 << 20
+	maxTerminalInput   = 64 << 10
+	maxTerminalOutput  = 2 << 20
+	authenticateWithin = 15 * time.Second
+)
+
+type messageType struct {
+	Type string `json:"type"`
+}
+
+type channelOpenMessage struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+}
+
+type encryptedOuterMessage struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+	Data string `json:"data"`
+}
+
+type channelCloseMessage struct {
+	Type   string `json:"type"`
+	ID     string `json:"id"`
+	Code   int    `json:"code,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
+type innerMessageType struct {
+	Version int    `json:"v"`
+	Type    string `json:"type"`
+}
+
+type authenticateMessage struct {
+	Version   int    `json:"v"`
+	Type      string `json:"type"`
+	Challenge string `json:"challenge"`
+}
+
+type authenticatedMessage struct {
+	Version   int    `json:"v"`
+	Type      string `json:"type"`
+	Challenge string `json:"challenge"`
+}
+
+type httpRequestMessage struct {
+	Version int    `json:"v"`
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+	Method  string `json:"method"`
+	Path    string `json:"path"`
+	Body    string `json:"body,omitempty"`
+}
+
+type httpResponseMessage struct {
+	Version int    `json:"v"`
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+	Status  int    `json:"status"`
+	Body    string `json:"body,omitempty"`
+}
+
+type terminalOpenMessage struct {
+	Version   int    `json:"v"`
+	Type      string `json:"type"`
+	ID        string `json:"id"`
+	SessionID string `json:"sessionId"`
+}
+
+type terminalOpenedMessage struct {
+	Version int    `json:"v"`
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+}
+
+type terminalDataMessage struct {
+	Version int    `json:"v"`
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+	Binary  bool   `json:"binary"`
+	Data    string `json:"data"`
+}
+
+type terminalCloseMessage struct {
+	Version int    `json:"v"`
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+	Code    int    `json:"code,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+type localSocket struct {
+	connection *websocket.Conn
+	writeMu    sync.Mutex
+}
+
+type browserChannel struct {
+	mu            sync.Mutex
+	sendMu        sync.Mutex
+	authenticated bool
+	httpClient    *http.Client
+	sockets       map[string]*localSocket
+	authTimer     *time.Timer
+	receiveSeq    uint32
+	sendSeq       uint32
+}
+
+type connectionState struct {
+	ctx         context.Context
+	localOrigin string
+	portalToken string
+	control     *client.Client
+	key         [32]byte
+	outgoing    chan []byte
+	channelsMu  sync.Mutex
+	channels    map[string]*browserChannel
+}
+
+// Run keeps an authenticated outbound WebSocket connected to the Cloudflare relay.
+// All browser payloads remain AES-256-GCM encrypted until they reach this connector.
+func Run(ctx context.Context, settings config.CloudSettings, localListen, portalToken, controlSocket string, logOutput io.Writer) error {
+	if err := config.ValidateCloudSettings(settings); err != nil {
+		return err
+	}
+	if strings.TrimSpace(localListen) == "" {
+		return errors.New("local daemon listen address is empty")
+	}
+	if len(strings.TrimSpace(portalToken)) < 32 {
+		return errors.New("portal token is invalid")
+	}
+	if strings.TrimSpace(controlSocket) == "" {
+		return errors.New("local control socket is empty")
+	}
+	connectorURL, err := connectorURL(settings.RelayURL)
+	if err != nil {
+		return err
+	}
+	localOrigin := "http://" + localListen
+	key := deriveKey(portalToken)
+	backoff := time.Second
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		connectedAt := time.Now()
+		err := runOnce(ctx, connectorURL, settings.ConnectorToken, localOrigin, portalToken, controlSocket, key)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if time.Since(connectedAt) > time.Minute {
+			backoff = time.Second
+		}
+		if logOutput != nil {
+			_, _ = fmt.Fprintf(logOutput, "%s cloud connector disconnected: %v; retrying\n", time.Now().UTC().Format(time.RFC3339), err)
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+			if backoff > 30*time.Second {
+				backoff = 30 * time.Second
+			}
+		}
+	}
+}
+
+func RelayStatus(ctx context.Context, relayURL string) (bool, error) {
+	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(relayURL), "/") + "/status")
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return false, errors.New("invalid relay URL")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return false, err
+	}
+	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("relay status returned HTTP %d", response.StatusCode)
+	}
+	var status struct {
+		Online bool `json:"online"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&status); err != nil {
+		return false, fmt.Errorf("decode relay status: %w", err)
+	}
+	return status.Online, nil
+}
+
+func runOnce(ctx context.Context, connectorURL, token, localOrigin, portalToken, controlSocket string, key [32]byte) error {
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer "+token)
+	headers.Set("User-Agent", "termlinks-connector/0.2")
+	connection, response, err := (&websocket.Dialer{HandshakeTimeout: 10 * time.Second}).DialContext(ctx, connectorURL, headers)
+	if err != nil {
+		if response != nil {
+			_ = response.Body.Close()
+			return fmt.Errorf("relay rejected connector with HTTP %d", response.StatusCode)
+		}
+		return fmt.Errorf("connect to relay: %w", err)
+	}
+	defer connection.Close()
+	connection.SetReadLimit(maxControlMessage)
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	state := &connectionState{
+		ctx: runCtx, localOrigin: localOrigin, portalToken: portalToken, key: key,
+		control:  client.New(controlSocket),
+		outgoing: make(chan []byte, 256), channels: make(map[string]*browserChannel),
+	}
+	writerErrors := make(chan error, 1)
+	go func() { writerErrors <- writeRelay(runCtx, connection, state.outgoing) }()
+	if err := state.sendOuter(messageType{Type: "hello"}); err != nil {
+		return err
+	}
+	readErrors := make(chan error, 1)
+	go func() { readErrors <- readRelay(connection, state) }()
+	select {
+	case <-ctx.Done():
+		state.closeAllChannels()
+		return nil
+	case err := <-writerErrors:
+		state.closeAllChannels()
+		return err
+	case err := <-readErrors:
+		state.closeAllChannels()
+		return err
+	}
+}
+
+func writeRelay(ctx context.Context, connection *websocket.Conn, outgoing <-chan []byte) error {
+	heartbeat := time.NewTicker(20 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			_ = connection.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "Connector stopped"), time.Now().Add(2*time.Second))
+			return nil
+		case data := <-outgoing:
+			_ = connection.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := connection.WriteMessage(websocket.TextMessage, data); err != nil {
+				return err
+			}
+		case <-heartbeat.C:
+			_ = connection.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"ping"}`)); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func readRelay(connection *websocket.Conn, state *connectionState) error {
+	for {
+		messageKind, data, err := connection.ReadMessage()
+		if err != nil {
+			return err
+		}
+		if messageKind != websocket.TextMessage {
+			return errors.New("relay sent a non-text control message")
+		}
+		var kind messageType
+		if err := json.Unmarshal(data, &kind); err != nil {
+			return errors.New("relay sent invalid JSON")
+		}
+		switch kind.Type {
+		case "connected", "pong":
+		case "channel_open":
+			var message channelOpenMessage
+			if json.Unmarshal(data, &message) != nil || !validMessageID(message.ID) {
+				return errors.New("relay sent an invalid channel open")
+			}
+			state.openChannel(message.ID)
+		case "e2e_from_browser":
+			var message encryptedOuterMessage
+			if json.Unmarshal(data, &message) != nil || !validMessageID(message.ID) || len(message.Data) == 0 || len(message.Data) > maxEncryptedPacket {
+				return errors.New("relay sent an invalid encrypted packet")
+			}
+			state.handleEncrypted(message.ID, message.Data)
+		case "channel_close":
+			var message channelCloseMessage
+			if json.Unmarshal(data, &message) != nil || !validMessageID(message.ID) {
+				return errors.New("relay sent an invalid channel close")
+			}
+			state.closeChannel(message.ID, normalizeCloseCode(message.Code), boundedReason(message.Reason), false)
+		default:
+			return errors.New("relay sent an unsupported message")
+		}
+	}
+}
+
+func (state *connectionState) openChannel(id string) {
+	jar, _ := cookiejar.New(nil)
+	channel := &browserChannel{
+		httpClient: &http.Client{Jar: jar, Timeout: 12 * time.Second},
+		sockets:    make(map[string]*localSocket),
+	}
+	channel.authTimer = time.AfterFunc(authenticateWithin, func() {
+		channel.mu.Lock()
+		authenticated := channel.authenticated
+		channel.mu.Unlock()
+		if !authenticated {
+			state.closeChannel(id, websocket.ClosePolicyViolation, "Authentication timed out", true)
+		}
+	})
+	state.channelsMu.Lock()
+	if previous := state.channels[id]; previous != nil {
+		state.channelsMu.Unlock()
+		state.closeChannel(id, websocket.CloseServiceRestart, "Channel replaced", true)
+		state.channelsMu.Lock()
+	}
+	state.channels[id] = channel
+	state.channelsMu.Unlock()
+}
+
+func (state *connectionState) handleEncrypted(channelID, packet string) {
+	state.channelsMu.Lock()
+	channel := state.channels[channelID]
+	state.channelsMu.Unlock()
+	if channel == nil {
+		state.closeChannel(channelID, websocket.ClosePolicyViolation, "Unknown channel", true)
+		return
+	}
+	channel.mu.Lock()
+	receiveSequence := channel.receiveSeq
+	channel.mu.Unlock()
+	plaintext, err := decryptPacket(state.key, channelID, "browser", receiveSequence, packet)
+	if err != nil || len(plaintext) > maxControlMessage {
+		state.closeChannel(channelID, websocket.ClosePolicyViolation, "Authentication failed", true)
+		return
+	}
+	channel.mu.Lock()
+	if channel.receiveSeq != receiveSequence {
+		channel.mu.Unlock()
+		state.closeChannel(channelID, websocket.ClosePolicyViolation, "Encrypted sequence conflict", true)
+		return
+	}
+	channel.receiveSeq++
+	channel.mu.Unlock()
+	var kind innerMessageType
+	if json.Unmarshal(plaintext, &kind) != nil || kind.Version != protocolVersion {
+		state.closeChannel(channelID, websocket.CloseUnsupportedData, "Invalid encrypted message", true)
+		return
+	}
+	channel.mu.Lock()
+	authenticated := channel.authenticated
+	channel.mu.Unlock()
+	if !authenticated {
+		if kind.Type != "authenticate" {
+			state.closeChannel(channelID, websocket.ClosePolicyViolation, "Authentication required", true)
+			return
+		}
+		state.authenticateChannel(channelID, channel, plaintext)
+		return
+	}
+	switch kind.Type {
+	case "http_request":
+		var message httpRequestMessage
+		if json.Unmarshal(plaintext, &message) != nil || !validMessageID(message.ID) {
+			state.closeChannel(channelID, websocket.CloseUnsupportedData, "Invalid API request", true)
+			return
+		}
+		go state.handleHTTPRequest(channelID, channel, message)
+	case "terminal_open":
+		var message terminalOpenMessage
+		if json.Unmarshal(plaintext, &message) != nil || !validMessageID(message.ID) || !validSessionID(message.SessionID) {
+			state.closeChannel(channelID, websocket.CloseUnsupportedData, "Invalid terminal request", true)
+			return
+		}
+		state.openLocalSocket(channelID, channel, message)
+	case "terminal_data":
+		var message terminalDataMessage
+		if json.Unmarshal(plaintext, &message) != nil || !validMessageID(message.ID) {
+			state.closeChannel(channelID, websocket.CloseUnsupportedData, "Invalid terminal data", true)
+			return
+		}
+		state.writeLocalSocket(channelID, channel, message)
+	case "terminal_close":
+		var message terminalCloseMessage
+		if json.Unmarshal(plaintext, &message) != nil || !validMessageID(message.ID) {
+			state.closeChannel(channelID, websocket.CloseUnsupportedData, "Invalid terminal close", true)
+			return
+		}
+		state.closeLocalSocket(channel, message.ID, normalizeCloseCode(message.Code), boundedReason(message.Reason))
+	default:
+		state.closeChannel(channelID, websocket.CloseUnsupportedData, "Unsupported encrypted message", true)
+	}
+}
+
+func (state *connectionState) authenticateChannel(channelID string, channel *browserChannel, plaintext []byte) {
+	var message authenticateMessage
+	if json.Unmarshal(plaintext, &message) != nil || len(message.Challenge) < 16 || len(message.Challenge) > 256 {
+		state.closeChannel(channelID, websocket.ClosePolicyViolation, "Authentication failed", true)
+		return
+	}
+	body, _ := json.Marshal(map[string]string{"token": state.portalToken})
+	request, err := http.NewRequestWithContext(state.ctx, http.MethodPost, state.localOrigin+"/api/login", bytes.NewReader(body))
+	if err != nil {
+		state.closeChannel(channelID, websocket.CloseInternalServerErr, "Local authentication failed", true)
+		return
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", state.localOrigin)
+	response, err := channel.httpClient.Do(request)
+	if err != nil {
+		state.closeChannel(channelID, websocket.CloseTryAgainLater, "Local portal is unavailable", true)
+		return
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		state.closeChannel(channelID, websocket.ClosePolicyViolation, "Local authentication failed", true)
+		return
+	}
+	channel.mu.Lock()
+	channel.authenticated = true
+	if channel.authTimer != nil {
+		channel.authTimer.Stop()
+	}
+	channel.mu.Unlock()
+	_ = state.sendEncrypted(channelID, authenticatedMessage{Version: protocolVersion, Type: "authenticated", Challenge: message.Challenge})
+}
+
+func (state *connectionState) handleHTTPRequest(channelID string, channel *browserChannel, message httpRequestMessage) {
+	if !allowedHTTPRoute(message.Method, message.Path) || len(message.Body) > maxHTTPBody {
+		state.sendHTTPError(channelID, message.ID, http.StatusForbidden, "API route is not allowed")
+		return
+	}
+	if message.Method == http.MethodPost && message.Path == "/api/sessions" {
+		state.createInteractiveShell(channelID, message)
+		return
+	}
+	target, err := localURL(state.localOrigin, message.Path)
+	if err != nil {
+		state.sendHTTPError(channelID, message.ID, http.StatusBadRequest, "Invalid API path")
+		return
+	}
+	request, err := http.NewRequestWithContext(state.ctx, message.Method, target, strings.NewReader(message.Body))
+	if err != nil {
+		state.sendHTTPError(channelID, message.ID, http.StatusBadRequest, "Invalid API request")
+		return
+	}
+	request.Header.Set("Origin", state.localOrigin)
+	if message.Body != "" {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	response, err := channel.httpClient.Do(request)
+	if err != nil {
+		state.sendHTTPError(channelID, message.ID, http.StatusBadGateway, "Local portal did not respond")
+		return
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxHTTPResponse+1))
+	if err != nil || len(responseBody) > maxHTTPResponse {
+		state.sendHTTPError(channelID, message.ID, http.StatusBadGateway, "Local portal response was too large")
+		return
+	}
+	_ = state.sendEncrypted(channelID, httpResponseMessage{
+		Version: protocolVersion, Type: "http_response", ID: message.ID,
+		Status: response.StatusCode, Body: string(responseBody),
+	})
+}
+
+func (state *connectionState) createInteractiveShell(channelID string, message httpRequestMessage) {
+	request, err := remote.DecodeStartRequest(strings.NewReader(message.Body))
+	if err != nil {
+		state.sendHTTPError(channelID, message.ID, http.StatusBadRequest, err.Error())
+		return
+	}
+	options, err := request.Options()
+	if err != nil {
+		state.sendHTTPError(channelID, message.ID, http.StatusBadRequest, err.Error())
+		return
+	}
+	created, err := state.control.Create(state.ctx, options)
+	if err != nil {
+		state.sendHTTPError(channelID, message.ID, http.StatusBadRequest, err.Error())
+		return
+	}
+	body, err := json.Marshal(created)
+	if err != nil {
+		state.sendHTTPError(channelID, message.ID, http.StatusInternalServerError, "could not encode the new session")
+		return
+	}
+	_ = state.sendEncrypted(channelID, httpResponseMessage{
+		Version: protocolVersion, Type: "http_response", ID: message.ID,
+		Status: http.StatusCreated, Body: string(body),
+	})
+}
+
+func (state *connectionState) sendHTTPError(channelID, requestID string, status int, message string) {
+	body, _ := json.Marshal(map[string]string{"error": message})
+	_ = state.sendEncrypted(channelID, httpResponseMessage{
+		Version: protocolVersion, Type: "http_response", ID: requestID, Status: status, Body: string(body),
+	})
+}
+
+func (state *connectionState) openLocalSocket(channelID string, channel *browserChannel, message terminalOpenMessage) {
+	target, err := localWebSocketURL(state.localOrigin, "/ws/sessions/"+message.SessionID)
+	if err != nil {
+		_ = state.sendEncrypted(channelID, terminalCloseMessage{Version: protocolVersion, Type: "terminal_close", ID: message.ID, Code: websocket.ClosePolicyViolation, Reason: "Invalid terminal path"})
+		return
+	}
+	headers := http.Header{"Origin": {state.localOrigin}}
+	if originURL, parseErr := url.Parse(state.localOrigin); parseErr == nil {
+		for _, cookie := range channel.httpClient.Jar.Cookies(originURL) {
+			headers.Add("Cookie", cookie.String())
+		}
+	}
+	connection, response, err := (&websocket.Dialer{HandshakeTimeout: 5 * time.Second}).DialContext(state.ctx, target, headers)
+	if err != nil {
+		code := websocket.CloseTryAgainLater
+		reason := "Local terminal is unavailable"
+		if response != nil {
+			_ = response.Body.Close()
+			if response.StatusCode == http.StatusUnauthorized {
+				code = websocket.ClosePolicyViolation
+				reason = "Portal authentication expired"
+			}
+		}
+		_ = state.sendEncrypted(channelID, terminalCloseMessage{Version: protocolVersion, Type: "terminal_close", ID: message.ID, Code: code, Reason: reason})
+		return
+	}
+	connection.SetReadLimit(maxTerminalOutput)
+	socket := &localSocket{connection: connection}
+	channel.mu.Lock()
+	if previous := channel.sockets[message.ID]; previous != nil {
+		_ = previous.connection.Close()
+	}
+	channel.sockets[message.ID] = socket
+	channel.mu.Unlock()
+	_ = state.sendEncrypted(channelID, terminalOpenedMessage{Version: protocolVersion, Type: "terminal_opened", ID: message.ID})
+	go state.readLocalSocket(channelID, channel, message.ID, socket)
+}
+
+func (state *connectionState) readLocalSocket(channelID string, channel *browserChannel, terminalID string, socket *localSocket) {
+	defer state.removeLocalSocket(channel, terminalID, socket)
+	for {
+		kind, data, err := socket.connection.ReadMessage()
+		if err != nil {
+			code := websocket.CloseNormalClosure
+			reason := "Terminal disconnected"
+			var closeError *websocket.CloseError
+			if errors.As(err, &closeError) {
+				code = normalizeCloseCode(closeError.Code)
+				reason = boundedReason(closeError.Text)
+			}
+			_ = state.sendEncrypted(channelID, terminalCloseMessage{Version: protocolVersion, Type: "terminal_close", ID: terminalID, Code: code, Reason: reason})
+			return
+		}
+		if kind != websocket.TextMessage && kind != websocket.BinaryMessage {
+			continue
+		}
+		if len(data) > maxTerminalOutput {
+			_ = state.sendEncrypted(channelID, terminalCloseMessage{Version: protocolVersion, Type: "terminal_close", ID: terminalID, Code: websocket.CloseMessageTooBig, Reason: "Terminal output message is too large"})
+			return
+		}
+		message := terminalDataMessage{Version: protocolVersion, Type: "terminal_data", ID: terminalID, Binary: kind == websocket.BinaryMessage}
+		if message.Binary {
+			message.Data = base64.RawURLEncoding.EncodeToString(data)
+		} else {
+			message.Data = string(data)
+		}
+		if err := state.sendEncrypted(channelID, message); err != nil {
+			return
+		}
+	}
+}
+
+func (state *connectionState) writeLocalSocket(channelID string, channel *browserChannel, message terminalDataMessage) {
+	channel.mu.Lock()
+	socket := channel.sockets[message.ID]
+	channel.mu.Unlock()
+	if socket == nil {
+		return
+	}
+	var data []byte
+	var err error
+	if message.Binary {
+		data, err = base64.RawURLEncoding.DecodeString(message.Data)
+	} else {
+		data = []byte(message.Data)
+	}
+	if err != nil || len(data) > maxTerminalInput {
+		state.closeLocalSocket(channel, message.ID, websocket.CloseMessageTooBig, "Terminal input is too large")
+		_ = state.sendEncrypted(channelID, terminalCloseMessage{Version: protocolVersion, Type: "terminal_close", ID: message.ID, Code: websocket.CloseMessageTooBig, Reason: "Terminal input is too large"})
+		return
+	}
+	kind := websocket.TextMessage
+	if message.Binary {
+		kind = websocket.BinaryMessage
+	}
+	socket.writeMu.Lock()
+	err = socket.connection.WriteMessage(kind, data)
+	socket.writeMu.Unlock()
+	if err != nil {
+		state.closeLocalSocket(channel, message.ID, websocket.CloseInternalServerErr, "Terminal write failed")
+	}
+}
+
+func (state *connectionState) sendEncrypted(channelID string, value any) error {
+	state.channelsMu.Lock()
+	channel := state.channels[channelID]
+	state.channelsMu.Unlock()
+	if channel == nil {
+		return errors.New("encrypted channel is closed")
+	}
+	channel.sendMu.Lock()
+	defer channel.sendMu.Unlock()
+	channel.mu.Lock()
+	sequence := channel.sendSeq
+	channel.sendSeq++
+	channel.mu.Unlock()
+	packet, err := encryptPacket(state.key, channelID, "connector", sequence, value)
+	if err != nil {
+		return err
+	}
+	if len(packet) > maxEncryptedPacket {
+		return errors.New("encrypted packet is too large")
+	}
+	return state.sendOuter(encryptedOuterMessage{Type: "e2e_to_browser", ID: channelID, Data: packet})
+}
+
+func (state *connectionState) sendOuter(value any) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	select {
+	case <-state.ctx.Done():
+		return state.ctx.Err()
+	case state.outgoing <- data:
+		return nil
+	}
+}
+
+func (state *connectionState) closeChannel(id string, code int, reason string, notifyRelay bool) {
+	state.channelsMu.Lock()
+	channel := state.channels[id]
+	delete(state.channels, id)
+	state.channelsMu.Unlock()
+	if channel != nil {
+		channel.mu.Lock()
+		if channel.authTimer != nil {
+			channel.authTimer.Stop()
+		}
+		sockets := channel.sockets
+		channel.sockets = make(map[string]*localSocket)
+		channel.mu.Unlock()
+		for _, socket := range sockets {
+			_ = socket.connection.Close()
+		}
+	}
+	if notifyRelay {
+		_ = state.sendOuter(channelCloseMessage{Type: "channel_close", ID: id, Code: code, Reason: reason})
+	}
+}
+
+func (state *connectionState) closeAllChannels() {
+	state.channelsMu.Lock()
+	ids := make([]string, 0, len(state.channels))
+	for id := range state.channels {
+		ids = append(ids, id)
+	}
+	state.channelsMu.Unlock()
+	for _, id := range ids {
+		state.closeChannel(id, websocket.CloseServiceRestart, "Connector disconnected", false)
+	}
+}
+
+func (state *connectionState) closeLocalSocket(channel *browserChannel, id string, code int, reason string) {
+	channel.mu.Lock()
+	socket := channel.sockets[id]
+	delete(channel.sockets, id)
+	channel.mu.Unlock()
+	if socket == nil {
+		return
+	}
+	socket.writeMu.Lock()
+	_ = socket.connection.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(2*time.Second))
+	_ = socket.connection.Close()
+	socket.writeMu.Unlock()
+}
+
+func (state *connectionState) removeLocalSocket(channel *browserChannel, id string, expected *localSocket) {
+	channel.mu.Lock()
+	if channel.sockets[id] == expected {
+		delete(channel.sockets, id)
+	}
+	channel.mu.Unlock()
+	_ = expected.connection.Close()
+}
+
+func deriveKey(token string) [32]byte {
+	return sha256.Sum256([]byte(keyContext + token))
+}
+
+func encryptPacket(key [32]byte, channelID, direction string, sequence uint32, value any) (string, error) {
+	plaintext, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	sequenceBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(sequenceBytes, sequence)
+	aad := append([]byte(aadContext+channelID+":"+direction+":"), sequenceBytes...)
+	sealed := gcm.Seal(nil, nonce, plaintext, aad)
+	packet := append(sequenceBytes, nonce...)
+	packet = append(packet, sealed...)
+	return base64.RawURLEncoding.EncodeToString(packet), nil
+}
+
+func decryptPacket(key [32]byte, channelID, direction string, expectedSequence uint32, packet string) ([]byte, error) {
+	encoded, err := base64.RawURLEncoding.DecodeString(packet)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) < 4+gcm.NonceSize()+gcm.Overhead() {
+		return nil, errors.New("encrypted packet is too short")
+	}
+	sequenceBytes := encoded[:4]
+	if binary.BigEndian.Uint32(sequenceBytes) != expectedSequence {
+		return nil, errors.New("encrypted packet sequence is invalid")
+	}
+	nonce := encoded[4 : 4+gcm.NonceSize()]
+	ciphertext := encoded[4+gcm.NonceSize():]
+	aad := append([]byte(aadContext+channelID+":"+direction+":"), sequenceBytes...)
+	return gcm.Open(nil, nonce, ciphertext, aad)
+}
+
+func connectorURL(relayURL string) (string, error) {
+	parsed, err := url.Parse(strings.TrimRight(relayURL, "/"))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return "", errors.New("invalid relay URL")
+	}
+	parsed.Scheme = "wss"
+	parsed.Path = "/connector"
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
+}
+
+func localURL(origin, requestPath string) (string, error) {
+	parsed, err := url.ParseRequestURI(requestPath)
+	if err != nil || parsed.IsAbs() || !strings.HasPrefix(parsed.Path, "/") {
+		return "", errors.New("invalid local path")
+	}
+	return strings.TrimRight(origin, "/") + parsed.RequestURI(), nil
+}
+
+func localWebSocketURL(origin, requestPath string) (string, error) {
+	target, err := localURL(origin, requestPath)
+	if err != nil {
+		return "", err
+	}
+	parsed, _ := url.Parse(target)
+	parsed.Scheme = "ws"
+	return parsed.String(), nil
+}
+
+func allowedHTTPRoute(method, requestPath string) bool {
+	parsed, err := url.ParseRequestURI(requestPath)
+	if err != nil || parsed.RawQuery != "" {
+		return false
+	}
+	path := parsed.Path
+	if method == http.MethodPost && path == "/api/logout" {
+		return true
+	}
+	if method == http.MethodGet && (path == "/api/me" || path == "/api/sessions") {
+		return true
+	}
+	if method == http.MethodPost && path == "/api/sessions" {
+		return true
+	}
+	if method != http.MethodPost || !strings.HasPrefix(path, "/api/sessions/") || !strings.HasSuffix(path, "/stop") {
+		return false
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(path, "/api/sessions/"), "/stop")
+	return validSessionID(id)
+}
+
+func validSessionID(id string) bool {
+	if len(id) != 32 {
+		return false
+	}
+	for _, character := range id {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validMessageID(id string) bool {
+	if len(id) != 36 {
+		return false
+	}
+	for index, character := range id {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			if character != '-' {
+				return false
+			}
+			continue
+		}
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeCloseCode(code int) int {
+	if code < 1000 || code > 4999 || code == 1004 || code == 1005 || code == 1006 || code == 1015 {
+		return websocket.CloseServiceRestart
+	}
+	return code
+}
+
+func boundedReason(reason string) string {
+	data := []byte(reason)
+	if len(data) <= 120 {
+		return reason
+	}
+	data = data[:120]
+	for !utf8.Valid(data) && len(data) > 0 {
+		data = data[:len(data)-1]
+	}
+	return string(data)
+}

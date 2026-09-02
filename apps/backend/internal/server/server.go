@@ -17,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"termlinks/backend/internal/auth"
+	"termlinks/backend/internal/remote"
 	"termlinks/backend/internal/session"
 	"termlinks/backend/internal/webui"
 )
@@ -71,15 +72,38 @@ func (s *Server) WebHandler() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
 	}))
 	mux.HandleFunc("GET /api/sessions", s.requireWebAuth(s.listSessions))
-	mux.HandleFunc("POST /api/sessions", func(w http.ResponseWriter, _ *http.Request) {
-		writeError(w, http.StatusForbidden, "remote session creation is disabled")
-	})
+	mux.HandleFunc("POST /api/sessions", s.requireWebAuth(s.createWebSession))
 	mux.HandleFunc("POST /api/sessions/{id}/stop", s.requireWebAuth(s.stopSession))
 	mux.HandleFunc("GET /ws/sessions/{id}", s.requireWebAuth(func(w http.ResponseWriter, r *http.Request) {
 		s.terminal(w, r, true)
 	}))
 	mux.Handle("/", s.web)
 	return s.securityHeaders(mux)
+}
+
+func (s *Server) createWebSession(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "cross-origin request rejected")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	defer r.Body.Close()
+	input, err := remote.DecodeStartRequest(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid session request")
+		return
+	}
+	options, err := input.Options()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	created, err := s.sessions.Start(options)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, created.Info())
 }
 
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {

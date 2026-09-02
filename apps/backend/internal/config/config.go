@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,10 +20,18 @@ type Paths struct {
 	Token     string
 	Settings  string
 	DaemonLog string
+	Cloud     string
+	CloudPID  string
+	CloudLog  string
 }
 
 type Settings struct {
 	Listen string `json:"listen"`
+}
+
+type CloudSettings struct {
+	RelayURL       string `json:"relayUrl"`
+	ConnectorToken string `json:"connectorToken"`
 }
 
 func ResolvePaths() (Paths, error) {
@@ -45,7 +54,79 @@ func ResolvePaths() (Paths, error) {
 		Token:     filepath.Join(dir, "auth.token"),
 		Settings:  filepath.Join(dir, "settings.json"),
 		DaemonLog: filepath.Join(dir, "daemon.log"),
+		Cloud:     filepath.Join(dir, "cloud.json"),
+		CloudPID:  filepath.Join(dir, "cloud.pid"),
+		CloudLog:  filepath.Join(dir, "cloud.log"),
 	}, nil
+}
+
+func LoadCloudSettings(paths Paths) (CloudSettings, error) {
+	data, err := os.ReadFile(paths.Cloud)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return CloudSettings{}, errors.New("cloud access is not configured; run: termlinks cloud configure --url <relay-url> --token-stdin")
+		}
+		return CloudSettings{}, fmt.Errorf("read cloud settings: %w", err)
+	}
+	if err := os.Chmod(paths.Cloud, 0o600); err != nil {
+		return CloudSettings{}, fmt.Errorf("secure cloud settings: %w", err)
+	}
+	var settings CloudSettings
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return CloudSettings{}, fmt.Errorf("parse cloud settings: %w", err)
+	}
+	if err := ValidateCloudSettings(settings); err != nil {
+		return CloudSettings{}, err
+	}
+	return settings, nil
+}
+
+func SaveCloudSettings(paths Paths, settings CloudSettings) error {
+	settings.RelayURL = strings.TrimRight(strings.TrimSpace(settings.RelayURL), "/")
+	settings.ConnectorToken = strings.TrimSpace(settings.ConnectorToken)
+	if err := ValidateCloudSettings(settings); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode cloud settings: %w", err)
+	}
+	data = append(data, '\n')
+	temporary, err := os.CreateTemp(paths.Dir, ".cloud-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create cloud settings: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("secure cloud settings: %w", err)
+	}
+	if _, err := temporary.Write(data); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("write cloud settings: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close cloud settings: %w", err)
+	}
+	if err := os.Rename(temporaryPath, paths.Cloud); err != nil {
+		return fmt.Errorf("save cloud settings: %w", err)
+	}
+	return os.Chmod(paths.Cloud, 0o600)
+}
+
+func ValidateCloudSettings(settings CloudSettings) error {
+	parsed, err := url.Parse(strings.TrimSpace(settings.RelayURL))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("relay URL must be a plain https:// URL without credentials, query, or fragment")
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return errors.New("relay URL must not include a path")
+	}
+	if len(strings.TrimSpace(settings.ConnectorToken)) < 32 {
+		return errors.New("connector token must contain at least 32 characters")
+	}
+	return nil
 }
 
 func Ensure(paths Paths) error {

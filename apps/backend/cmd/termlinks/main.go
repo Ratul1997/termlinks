@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,12 +22,13 @@ import (
 
 	"termlinks/backend/internal/auth"
 	"termlinks/backend/internal/client"
+	"termlinks/backend/internal/cloud"
 	"termlinks/backend/internal/config"
 	"termlinks/backend/internal/server"
 	"termlinks/backend/internal/session"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -60,6 +62,8 @@ func run(args []string) error {
 			return printToken()
 		case "doctor":
 			return doctor()
+		case "cloud":
+			return runCloud(args[1:])
 		case "version", "--version", "-v":
 			fmt.Println("termlinks", version)
 			return nil
@@ -69,6 +73,225 @@ func run(args []string) error {
 		}
 	}
 	return runCommand(args)
+}
+
+func runCloud(args []string) error {
+	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		printCloudHelp()
+		return nil
+	}
+	switch args[0] {
+	case "configure":
+		return configureCloud(args[1:])
+	case "start":
+		return startCloud()
+	case "connect":
+		return connectCloud()
+	case "status":
+		return cloudStatus()
+	case "stop":
+		return stopCloud()
+	default:
+		return errors.New("usage: termlinks cloud <configure|start|status|stop>")
+	}
+}
+
+func configureCloud(args []string) error {
+	flags := flag.NewFlagSet("cloud configure", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	relayURL := flags.String("url", "", "Cloudflare relay URL")
+	tokenStdin := flags.Bool("token-stdin", false, "read the connector secret from standard input")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || strings.TrimSpace(*relayURL) == "" || !*tokenStdin {
+		return errors.New("usage: termlinks cloud configure --url https://<relay>.workers.dev --token-stdin")
+	}
+	token, err := io.ReadAll(io.LimitReader(os.Stdin, 4097))
+	if err != nil {
+		return fmt.Errorf("read connector token: %w", err)
+	}
+	if len(token) > 4096 {
+		return errors.New("connector token is too large")
+	}
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		return err
+	}
+	if err := config.Ensure(paths); err != nil {
+		return err
+	}
+	settings := config.CloudSettings{RelayURL: *relayURL, ConnectorToken: strings.TrimSpace(string(token))}
+	if err := config.SaveCloudSettings(paths, settings); err != nil {
+		return err
+	}
+	fmt.Println("Cloud access configured. Start it with: termlinks cloud start")
+	return nil
+}
+
+func startCloud() error {
+	paths, err := readyDaemon()
+	if err != nil {
+		return err
+	}
+	if _, err := config.LoadCloudSettings(paths); err != nil {
+		return err
+	}
+	if pid, running := cloudProcess(paths); running {
+		if isTermlinksConnector(pid) {
+			fmt.Printf("Cloud connector is already running (PID %d)\n", pid)
+			return nil
+		}
+		return fmt.Errorf("cloud PID file points to unrelated running process %d; remove %s after verifying it", pid, paths.CloudPID)
+	}
+	if err := os.Remove(paths.CloudPID); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove stale cloud PID: %w", err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	logFile, err := os.OpenFile(paths.CloudLog, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := os.Chmod(paths.CloudLog, 0o600); err != nil {
+		_ = logFile.Close()
+		return fmt.Errorf("secure cloud log: %w", err)
+	}
+	command := exec.Command(executable, "cloud", "connect")
+	command.Stdin = nil
+	command.Stdout = logFile
+	command.Stderr = logFile
+	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := command.Start(); err != nil {
+		_ = logFile.Close()
+		return err
+	}
+	_ = logFile.Close()
+	if err := os.WriteFile(paths.CloudPID, []byte(strconv.Itoa(command.Process.Pid)+"\n"), 0o600); err != nil {
+		_ = command.Process.Signal(syscall.SIGTERM)
+		return fmt.Errorf("write cloud PID: %w", err)
+	}
+	if err := os.Chmod(paths.CloudPID, 0o600); err != nil {
+		_ = command.Process.Signal(syscall.SIGTERM)
+		return fmt.Errorf("secure cloud PID: %w", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if _, running := cloudProcess(paths); !running {
+		return fmt.Errorf("cloud connector did not start; inspect %s", paths.CloudLog)
+	}
+	fmt.Println("Cloud connector started. Your computer is now reachable through the portal.")
+	return nil
+}
+
+func connectCloud() error {
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		return err
+	}
+	cloudSettings, err := config.LoadCloudSettings(paths)
+	if err != nil {
+		return err
+	}
+	localSettings, err := config.LoadSettings(paths)
+	if err != nil {
+		return err
+	}
+	portalToken, err := config.LoadOrCreateToken(paths)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return cloud.Run(ctx, cloudSettings, localSettings.Listen, portalToken, paths.Socket, os.Stderr)
+}
+
+func cloudStatus() error {
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		return err
+	}
+	settings, err := config.LoadCloudSettings(paths)
+	if err != nil {
+		return err
+	}
+	pid, running := cloudProcess(paths)
+	status := "stopped"
+	if running && isTermlinksConnector(pid) {
+		status = fmt.Sprintf("running (PID %d)", pid)
+	} else if running {
+		status = fmt.Sprintf("invalid PID file (unrelated process %d)", pid)
+	}
+	remote := "offline"
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	online, statusErr := cloud.RelayStatus(ctx, settings.RelayURL)
+	cancel()
+	if statusErr != nil {
+		remote = "unreachable"
+	} else if online {
+		remote = "online"
+	}
+	fmt.Printf("Portal:    %s\nConnector: %s\nComputer:  %s\n", settings.RelayURL, status, remote)
+	return nil
+}
+
+func stopCloud() error {
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		return err
+	}
+	pid, running := cloudProcess(paths)
+	if !running {
+		if err := os.Remove(paths.CloudPID); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		fmt.Println("Cloud connector is already stopped.")
+		return nil
+	}
+	if !isTermlinksConnector(pid) {
+		return fmt.Errorf("refusing to signal PID %d because it is not a Termlinks cloud connector", pid)
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	if err := process.Signal(syscall.SIGTERM); err != nil {
+		return err
+	}
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		if _, alive := cloudProcess(paths); !alive {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err := os.Remove(paths.CloudPID); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	fmt.Println("Cloud connector stopped.")
+	return nil
+}
+
+func cloudProcess(paths config.Paths) (int, bool) {
+	data, err := os.ReadFile(paths.CloudPID)
+	if err != nil {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid < 2 {
+		return 0, false
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil || process.Signal(syscall.Signal(0)) != nil {
+		return pid, false
+	}
+	return pid, true
+}
+
+func isTermlinksConnector(pid int) bool {
+	output, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	if err != nil {
+		return false
+	}
+	command := string(output)
+	return strings.Contains(command, "termlinks") && strings.Contains(command, "cloud connect")
 }
 
 func runCommand(args []string) error {
@@ -457,11 +680,29 @@ Usage:
   termlinks stop <id>               Gracefully stop a session
   termlinks token                   Print the private portal login token
   termlinks doctor                  Show safe local diagnostics
+  termlinks cloud configure ...     Configure the Cloudflare relay
+  termlinks cloud start             Connect this computer to the cloud portal
+  termlinks cloud status            Show cloud connector status
+  termlinks cloud stop              Disconnect the cloud portal
   termlinks daemon [--listen addr]  Run the daemon in the foreground
 
 Examples:
   termlinks codex
   termlinks -n api -- npm run dev
   termlinks -d -- python import.py
+`)
+}
+
+func printCloudHelp() {
+	fmt.Print(`Termlinks cloud access
+
+Usage:
+  termlinks cloud configure --url https://<relay>.workers.dev --token-stdin
+  termlinks cloud start
+  termlinks cloud status
+  termlinks cloud stop
+
+The connector token is read from standard input so it does not appear in shell history.
+It is different from the portal login token shown by: termlinks token
 `)
 }

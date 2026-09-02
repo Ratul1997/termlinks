@@ -1,0 +1,3 @@
+# Wrangler uses this non-secret placeholder only to generate the CONNECTOR_TOKEN type.
+# Copy to .dev.vars and replace it with a random value for local relay development.
+CONNECTOR_TOKEN="local-development-placeholder"

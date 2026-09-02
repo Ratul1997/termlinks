@@ -6,3 +6,5 @@ apps/backend/internal/webui/dist/*
 /dist/
 coverage/
 *.log
+apps/relay/.dev.vars
+**/.wrangler/

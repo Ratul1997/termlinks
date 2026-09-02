@@ -17,6 +17,8 @@ termlinks codex
 
 The first managed command starts the background daemon automatically. Open `http://127.0.0.1:8787` on the computer and log in with the token. The compiled, self-contained executable is `dist/termlinks`; its portal assets are embedded in the binary.
 
+This personal deployment is also available at **https://termlinks.pages.dev** while the computer and cloud connector are online.
+
 ## Important commands
 
 Generate or display your private portal login token:
@@ -81,6 +83,14 @@ termlinks version
 termlinks help
 ```
 
+Control the outbound cloud connection:
+
+```sh
+termlinks cloud start
+termlinks cloud status
+termlinks cloud stop
+```
+
 Build, test, and install from source:
 
 ```sh
@@ -96,6 +106,8 @@ make install
 
 After login, the portal dashboard automatically shows every managed terminal and its current state:
 
+- Select **New terminal** to create and immediately open a normal interactive shell. Its optional starting directory may be `~`, `~/path`, or an absolute path.
+- Inside that shell, type `cd`, `ls`, `codex`, `npm run dev`, or any other command exactly as in a desktop terminal.
 - The header shows the number of running and finished sessions.
 - Each card shows the session name, command, directory, runtime, and status.
 - Select **Open terminal** to view and type in that terminal.
@@ -107,6 +119,19 @@ Stopping or closing a session terminates its command. Simply closing the browser
 
 ## Phone access
 
+For this personal deployment:
+
+1. Run `termlinks cloud start` once on the computer.
+2. Open **https://termlinks.pages.dev** on the phone or another computer.
+3. Enter the token printed by `termlinks token`.
+4. Select an existing session, or tap **New terminal** to create an interactive shell, and type with the device keyboard.
+
+Nothing needs to be installed on the viewing device. Giving another person the portal URL and portal token gives them the same full terminal access, so share it only with someone you completely trust. The connector secret is separate and must never be shared.
+
+If the computer sleeps, shuts down, loses internet access, or runs `termlinks cloud stop`, the public portal reports the computer as offline. Running terminal processes also pause while macOS is asleep.
+
+### Private-network alternative
+
 The default portal listens only on the computer itself. For access away from home, connect the computer and phone to the same private VPN/tailnet, then bind Termlinks to the computer's private VPN address:
 
 ```sh
@@ -115,7 +140,7 @@ termlinks daemon --listen 100.x.y.z:8787
 
 Open `http://100.x.y.z:8787` on the phone. Keep the daemon terminal open the first time; the address is saved, and later managed commands can auto-start the daemon with it.
 
-Do not port-forward Termlinks from your router or expose it directly to the public internet. The application does not provide TLS or a cloud relay in this version. A Tailscale/WireGuard-style private network supplies encrypted transport and device access control.
+Do not port-forward Termlinks from your router or expose its local port directly to the public internet. The Cloudflare connector makes an authenticated outbound TLS connection; a Tailscale/WireGuard-style private network remains the lower-complexity alternative.
 
 ## What happens when you run a command
 
@@ -131,7 +156,10 @@ termlinks CLI ──┴─ Unix socket ─► daemon ├─ WebSocket ─► pho
                          codex / claude / npm / bash / ...
 ```
 
+For public phone access, the browser derives an AES-256-GCM key from the portal token and opens one encrypted bridge through `termlinks.pages.dev`. Pages and the Worker relay only ciphertext; the local connector decrypts approved requests and terminal data, then talks to `127.0.0.1:8787`. The portal token itself never crosses the network, and the local port is never publicly bound.
+
 1. `termlinks <command>` asks the local daemon to create a real pseudo-terminal (PTY).
+   The authenticated portal can also request a new interactive shell; it cannot submit a hidden one-shot command or custom environment.
 2. The daemon starts and owns the child process. The launching terminal is only an attached client, so disconnecting it does not end the work.
 3. PTY output is streamed to every attached local or browser client and retained in a bounded 2 MiB scrollback buffer.
 4. Phone keystrokes travel as binary WebSocket messages into the same PTY. Terminal-size changes travel as small JSON control messages.
@@ -143,6 +171,7 @@ See [docs/architecture.md](docs/architecture.md) for the component and data-flow
 
 ```text
 apps/backend/   Go daemon, PTY manager, local CLI, HTTP/WebSocket portal
+apps/relay/     Cloudflare Worker + Durable Object outbound relay
 apps/web/       Mobile-first TypeScript portal using xterm.js
 scripts/        Reproducible build/test orchestration
 dist/           Generated standalone executable (gitignored)
@@ -157,11 +186,15 @@ npm run build
 npm audit
 ```
 
+See [docs/cloudflare.md](docs/cloudflare.md) for deployment, connector-secret rotation, and public smoke-test commands.
+
 ## Current boundary
 
-- Sessions must be launched with `termlinks …`. Existing arbitrary terminal windows cannot be attached after the fact because their PTYs belong to another process.
+- Only sessions managed by Termlinks can be opened. Launch them with `termlinks …` or create an interactive shell from the portal; unrelated Terminal/iTerm windows cannot be attached after the fact because their PTYs belong to another process.
 - This is a text terminal, not screen sharing. Full desktop/GUI control would be a separate remote-desktop subsystem.
 - Sessions live in daemon memory and do not survive a daemon or computer restart.
-- Browser command creation is deliberately disabled. A phone can attach, type, resize, and stop already-authorized sessions.
+- An authenticated browser can create a normal interactive shell, then type arbitrary commands into it. Treat the portal token as full access to your operating-system user account.
+- This personal version uses one shared portal identity. It does not yet provide per-person accounts, per-session permissions, or an audit trail.
+- The deployed relay represents one configured computer. Connecting a friend's machine safely requires a separate deployment today; shared multi-device pairing and device selection are not implemented.
 
 Read [SECURITY.md](SECURITY.md) before enabling network access.

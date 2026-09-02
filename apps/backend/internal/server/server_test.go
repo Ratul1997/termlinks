@@ -99,7 +99,7 @@ func TestWebAuthenticationAndInteractiveTerminal(t *testing.T) {
 	}
 }
 
-func TestWebRejectsCrossOriginAndRemoteCreation(t *testing.T) {
+func TestWebRejectsCrossOriginAndUnauthenticatedCreation(t *testing.T) {
 	handler, err := New(session.NewManager(), auth.New("token"), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
@@ -125,8 +125,54 @@ func TestWebRejectsCrossOriginAndRemoteCreation(t *testing.T) {
 	}
 	response.Body.Close()
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
-		t.Fatal("web portal unexpectedly permits remote session creation")
+		t.Fatal("web portal unexpectedly permits unauthenticated session creation")
 	}
+}
+
+func TestAuthenticatedWebCreationStartsInteractiveShell(t *testing.T) {
+	manager := session.NewManager()
+	handler, err := New(manager, auth.New("token"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	web := httptest.NewServer(handler.WebHandler())
+	defer web.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	request, _ := http.NewRequest(http.MethodPost, web.URL+"/api/login", bytes.NewBufferString(`{"token":"token"}`))
+	request.Header.Set("Origin", web.URL)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+
+	cwd := t.TempDir()
+	payload, _ := json.Marshal(map[string]string{"name": "phone shell", "cwd": cwd})
+	request, _ = http.NewRequest(http.MethodPost, web.URL+"/api/sessions", bytes.NewReader(payload))
+	request.Header.Set("Origin", web.URL)
+	request.Header.Set("Content-Type", "application/json")
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("create status = %d: %s", response.StatusCode, body)
+	}
+	var created session.Info
+	if err := json.NewDecoder(response.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	if !created.Running || created.Name != "phone shell" || created.Cwd != cwd || len(created.Command) != 1 {
+		t.Fatalf("unexpected created shell: %#v", created)
+	}
+	current, ok := manager.Get(created.ID)
+	if !ok {
+		t.Fatal("created shell is not managed by the daemon")
+	}
+	t.Cleanup(func() { _ = current.Stop() })
 }
 
 func TestControlAPIStartsOnlyExplicitCommand(t *testing.T) {

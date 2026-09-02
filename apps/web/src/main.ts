@@ -1,6 +1,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import { base64URLToBytes, bytesToBase64URL, decryptPacket, deriveEncryptionKey, encryptPacket } from "./e2e";
 import "./style.css";
 
 type Session = {
@@ -24,15 +25,273 @@ type StatusMessage = {
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 
+type TerminalLink = {
+  readonly readyState: number;
+  send(data: string | ArrayBuffer | ArrayBufferView): void;
+  close(): void;
+};
+
+type TerminalCallbacks = {
+  open: () => void;
+  message: (data: string | ArrayBuffer) => void;
+  close: (code: number) => void;
+  error: () => void;
+};
+
 const state: {
   authenticated: boolean;
   sessions: Session[];
   selected?: string;
-  socket?: WebSocket;
+  socket?: TerminalLink;
   terminal?: Terminal;
   fit?: FitAddon;
   polling?: number;
 } = { authenticated: false, sessions: [] };
+
+const encryptedPortal = location.hostname === "termlinks.pages.dev" || location.hostname.endsWith(".termlinks.pages.dev");
+let encryptedBridge: EncryptedBridge | undefined;
+
+class EncryptedTerminalLink implements TerminalLink {
+  readyState: number = WebSocket.CONNECTING;
+
+  constructor(
+    readonly id: string,
+    private readonly bridge: EncryptedBridge,
+    private readonly callbacks: TerminalCallbacks,
+  ) {}
+
+  markOpen(): void {
+    if (this.readyState !== WebSocket.CONNECTING) return;
+    this.readyState = WebSocket.OPEN;
+    this.callbacks.open();
+  }
+
+  receive(data: string | ArrayBuffer): void {
+    if (this.readyState === WebSocket.OPEN) this.callbacks.message(data);
+  }
+
+  remoteClose(code: number): void {
+    if (this.readyState === WebSocket.CLOSED) return;
+    this.readyState = WebSocket.CLOSED;
+    this.callbacks.close(code);
+  }
+
+  fail(): void {
+    if (this.readyState === WebSocket.CLOSED) return;
+    this.callbacks.error();
+    this.remoteClose(1011);
+  }
+
+  send(data: string | ArrayBuffer | ArrayBufferView): void {
+    if (this.readyState !== WebSocket.OPEN) return;
+    void this.bridge.sendTerminalData(this.id, data).catch(() => this.fail());
+  }
+
+  close(): void {
+    if (this.readyState === WebSocket.CLOSED) return;
+    this.readyState = WebSocket.CLOSING;
+    void this.bridge.closeTerminal(this.id);
+    this.readyState = WebSocket.CLOSED;
+  }
+}
+
+class EncryptedBridge {
+  private socket?: WebSocket;
+  private key?: CryptoKey;
+  private channel = "";
+  private sendChain: Promise<void> = Promise.resolve();
+  private receiveChain: Promise<void> = Promise.resolve();
+  private sendSequence = 0;
+  private receiveSequence = 0;
+  private readonly requests = new Map<string, { resolve: (value: { status: number; body: string }) => void; reject: (error: Error) => void; timeout: number }>();
+  private readonly terminals = new Map<string, EncryptedTerminalLink>();
+  private authResolve?: () => void;
+  private authReject?: (error: Error) => void;
+  private challenge = "";
+  private failed = false;
+
+  async connect(token: string): Promise<void> {
+    this.key = await deriveEncryptionKey(token);
+    const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(`${scheme}//${location.host}/ws/bridge`);
+    this.socket = socket;
+    const ready = await waitForBridge(socket);
+    this.channel = ready.id;
+    socket.addEventListener("message", (event) => {
+      if (typeof event.data !== "string") return this.fail(new Error("The encrypted relay returned invalid data"));
+      this.receiveChain = this.receiveChain.then(() => this.receive(event.data)).catch((error: unknown) => {
+        this.fail(error instanceof Error ? error : new Error("Could not decrypt relay data"));
+      });
+    });
+    socket.addEventListener("close", (event) => {
+      const reason = event.code === 1008 ? "Invalid portal token" : "The computer connection closed";
+      this.fail(new Error(reason));
+    });
+    socket.addEventListener("error", () => this.fail(new Error("Could not connect to your computer")));
+
+    const challengeBytes = new Uint8Array(24);
+    crypto.getRandomValues(challengeBytes);
+    this.challenge = bytesToBase64URL(challengeBytes);
+    const authenticated = new Promise<void>((resolve, reject) => {
+      const timeout = window.setTimeout(() => reject(new Error("Encrypted login timed out")), 15_000);
+      this.authResolve = () => { window.clearTimeout(timeout); resolve(); };
+      this.authReject = (error) => { window.clearTimeout(timeout); reject(error); };
+    });
+    await this.sendEncrypted({ v: 1, type: "authenticate", challenge: this.challenge });
+    await authenticated;
+  }
+
+  async request(method: string, path: string, body = ""): Promise<{ status: number; body: string }> {
+    const id = crypto.randomUUID();
+    const response = new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const timeout = window.setTimeout(() => {
+        this.requests.delete(id);
+        reject(new Error("Your computer did not respond"));
+      }, 15_000);
+      this.requests.set(id, { resolve, reject, timeout });
+    });
+    await this.sendEncrypted({ v: 1, type: "http_request", id, method, path, body });
+    return response;
+  }
+
+  openTerminal(sessionId: string, callbacks: TerminalCallbacks): EncryptedTerminalLink {
+    const link = new EncryptedTerminalLink(crypto.randomUUID(), this, callbacks);
+    this.terminals.set(link.id, link);
+    void this.sendEncrypted({ v: 1, type: "terminal_open", id: link.id, sessionId }).catch(() => link.fail());
+    return link;
+  }
+
+  async sendTerminalData(id: string, data: string | ArrayBuffer | ArrayBufferView): Promise<void> {
+    if (typeof data === "string") {
+      await this.sendEncrypted({ v: 1, type: "terminal_data", id, binary: false, data });
+      return;
+    }
+    const bytes = data instanceof ArrayBuffer
+      ? new Uint8Array(data)
+      : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    await this.sendEncrypted({ v: 1, type: "terminal_data", id, binary: true, data: bytesToBase64URL(bytes) });
+  }
+
+  async closeTerminal(id: string): Promise<void> {
+    this.terminals.delete(id);
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      await this.sendEncrypted({ v: 1, type: "terminal_close", id, code: 1000, reason: "Viewer closed" });
+    }
+  }
+
+  close(): void {
+    this.socket?.close(1000, "Portal closed");
+    this.socket = undefined;
+    this.fail(new Error("Portal closed"));
+  }
+
+  private async receive(packet: string): Promise<void> {
+    const value = await this.decrypt(packet);
+    if (!isRecord(value) || value.v !== 1 || typeof value.type !== "string") throw new Error("Invalid encrypted message");
+    if (value.type === "authenticated") {
+      if (value.challenge !== this.challenge) throw new Error("Encrypted login challenge did not match");
+      this.authResolve?.();
+      this.authResolve = undefined;
+      this.authReject = undefined;
+      return;
+    }
+    if (value.type === "http_response") {
+      if (typeof value.id !== "string" || typeof value.status !== "number" || typeof value.body !== "string") throw new Error("Invalid encrypted API response");
+      const pending = this.requests.get(value.id);
+      if (!pending) return;
+      window.clearTimeout(pending.timeout);
+      this.requests.delete(value.id);
+      pending.resolve({ status: value.status, body: value.body });
+      return;
+    }
+    if (typeof value.id !== "string") throw new Error("Invalid encrypted terminal response");
+    const terminal = this.terminals.get(value.id);
+    if (!terminal) return;
+    if (value.type === "terminal_opened") {
+      terminal.markOpen();
+      return;
+    }
+    if (value.type === "terminal_data") {
+      if (typeof value.binary !== "boolean" || typeof value.data !== "string") throw new Error("Invalid encrypted terminal data");
+      terminal.receive(value.binary ? Uint8Array.from(base64URLToBytes(value.data)).buffer : value.data);
+      return;
+    }
+    if (value.type === "terminal_close") {
+      this.terminals.delete(value.id);
+      terminal.remoteClose(typeof value.code === "number" ? value.code : 1000);
+      return;
+    }
+    throw new Error("Unsupported encrypted message");
+  }
+
+  private sendEncrypted(value: Record<string, unknown>): Promise<void> {
+    this.sendChain = this.sendChain.then(async () => {
+      if (!this.key || !this.channel || this.socket?.readyState !== WebSocket.OPEN) throw new Error("Encrypted portal is disconnected");
+      const sequence = this.sendSequence;
+      this.sendSequence += 1;
+      this.socket.send(await encryptPacket(this.key, this.channel, "browser", sequence, value));
+    });
+    return this.sendChain;
+  }
+
+  private async decrypt(packet: string): Promise<unknown> {
+    if (!this.key) throw new Error("Encryption key is unavailable");
+    const value = await decryptPacket(this.key, this.channel, "connector", this.receiveSequence, packet);
+    this.receiveSequence += 1;
+    return value;
+  }
+
+  private fail(error: Error): void {
+    if (this.failed) return;
+    this.failed = true;
+    if (this.socket && this.socket.readyState < WebSocket.CLOSING) this.socket.close(1008, "Encrypted connection failed");
+    this.authReject?.(error);
+    this.authResolve = undefined;
+    this.authReject = undefined;
+    for (const [id, pending] of this.requests) {
+      window.clearTimeout(pending.timeout);
+      pending.reject(error);
+      this.requests.delete(id);
+    }
+    for (const terminal of this.terminals.values()) terminal.remoteClose(1012);
+    this.terminals.clear();
+    if (encryptedBridge === this && state.authenticated) {
+      encryptedBridge = undefined;
+      state.authenticated = false;
+      window.queueMicrotask(() => renderLogin(error.message));
+    }
+  }
+}
+
+async function waitForBridge(socket: WebSocket): Promise<{ id: string }> {
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => reject(new Error("Computer connection timed out")), 15_000);
+    const cleanup = (): void => {
+      window.clearTimeout(timeout);
+      socket.removeEventListener("message", onMessage);
+      socket.removeEventListener("close", onClose);
+      socket.removeEventListener("error", onError);
+    };
+    const onMessage = (event: MessageEvent): void => {
+      if (typeof event.data !== "string") return;
+      try {
+        const value: unknown = JSON.parse(event.data);
+        if (!isRecord(value) || value.type !== "bridge_ready" || value.protocol !== "e2e-v1" || typeof value.id !== "string") return;
+        cleanup();
+        resolve({ id: value.id });
+      } catch { /* Wait for a valid bridge greeting. */ }
+    };
+    const onClose = (): void => { cleanup(); reject(new Error("Your computer is offline")); };
+    const onError = (): void => { cleanup(); reject(new Error("Could not reach your computer")); };
+    socket.addEventListener("message", onMessage);
+    socket.addEventListener("close", onClose);
+    socket.addEventListener("error", onError);
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string): HTMLElementTagNameMap[K] => {
   const node = document.createElement(tag);
@@ -42,6 +301,31 @@ const el = <K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, t
 };
 
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  if (encryptedPortal) {
+    if (!encryptedBridge) throw new Error("Encrypted portal is not connected");
+    const method = init.method ?? "GET";
+    const body = typeof init.body === "string" ? init.body : "";
+    const response = await encryptedBridge.request(method, path, body);
+    if (response.status === 401) {
+      state.authenticated = false;
+      closeConnection();
+      const bridge = encryptedBridge;
+      encryptedBridge = undefined;
+      bridge?.close();
+      renderLogin();
+      throw new Error("Your portal session expired");
+    }
+    if (response.status < 200 || response.status >= 300) {
+      let message = `Request failed (${response.status})`;
+      try {
+        const decoded: unknown = JSON.parse(response.body);
+        if (isRecord(decoded) && typeof decoded.error === "string") message = decoded.error;
+      } catch { /* Keep the HTTP status message. */ }
+      throw new Error(message);
+    }
+    if (response.status === 204) return undefined as T;
+    return JSON.parse(response.body) as T;
+  }
   const response = await fetch(path, {
     ...init,
     headers: { "Content-Type": "application/json", ...init.headers },
@@ -61,13 +345,22 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 async function boot(): Promise<void> {
+  if (encryptedPortal) {
+    renderLogin();
+    return;
+  }
   try {
     await api<{ authenticated: boolean }>("/api/me");
     state.authenticated = true;
     await loadSessions();
     renderSessions();
-  } catch {
-    if (!state.authenticated) renderLogin();
+  } catch (caught) {
+    if (!state.authenticated) {
+      const message = caught instanceof Error && caught.message.includes("offline")
+        ? "Your computer is offline. Start it with: termlinks cloud start"
+        : "";
+      renderLogin(message);
+    }
   }
 }
 
@@ -80,7 +373,7 @@ function renderLogin(message = ""): void {
   brand.append(el("span", "brand-mark", ">_"), el("span", "brand-name", "termlinks"));
   panel.append(
     brand,
-    el("p", "eyebrow", "PRIVATE TERMINAL BRIDGE"),
+    el("p", "eyebrow", encryptedPortal ? "END-TO-END ENCRYPTED BRIDGE" : "PRIVATE TERMINAL BRIDGE"),
     el("h1", "login-title", "Your terminal, still running."),
     el("p", "login-copy", "Enter the token from your computer to open its managed terminal sessions."),
   );
@@ -106,7 +399,14 @@ function renderLogin(message = ""): void {
     submit.textContent = "Checking…";
     error.textContent = "";
     try {
-      await api("/api/login", { method: "POST", body: JSON.stringify({ token: input.value }) });
+      if (encryptedPortal) {
+        encryptedBridge?.close();
+        const bridge = new EncryptedBridge();
+        await bridge.connect(input.value);
+        encryptedBridge = bridge;
+      } else {
+        await api("/api/login", { method: "POST", body: JSON.stringify({ token: input.value }) });
+      }
       input.value = "";
       state.authenticated = true;
       await loadSessions();
@@ -140,7 +440,7 @@ function renderSessions(): void {
   brand.append(el("span", "brand-mark", ">_"), el("span", "brand-name", "termlinks"));
   const status = el("div", "computer-status");
   status.id = "computer-status";
-  status.append(el("span", "online-dot"), el("span", "computer-status-label", "Computer online"));
+  status.append(el("span", "online-dot"), el("span", "computer-status-label", encryptedPortal ? "E2E · Computer online" : "Computer online"));
   const logout = el("button", "ghost-button", "Log out");
   logout.type = "button";
   logout.addEventListener("click", async () => {
@@ -148,6 +448,8 @@ function renderSessions(): void {
       await api("/api/logout", { method: "POST" });
     } finally {
       state.authenticated = false;
+      encryptedBridge?.close();
+      encryptedBridge = undefined;
       renderLogin();
     }
   });
@@ -163,15 +465,93 @@ function renderSessions(): void {
   refresh.title = "Refresh sessions";
   refresh.setAttribute("aria-label", "Refresh sessions");
   refresh.addEventListener("click", () => refreshSessions(true));
-  heading.append(titleGroup, refresh);
+  const create = el("button", "new-terminal-button", "+ New terminal");
+  create.type = "button";
+  create.setAttribute("aria-expanded", "false");
+  create.setAttribute("aria-controls", "create-terminal-panel");
+  const headingActions = el("div", "dashboard-actions");
+  headingActions.append(create, refresh);
+  heading.append(titleGroup, headingActions);
 
+  const createPanel = renderCreatePanel(() => {
+    createPanel.hidden = true;
+    create.setAttribute("aria-expanded", "false");
+    create.focus();
+  });
+  create.addEventListener("click", () => {
+    createPanel.hidden = !createPanel.hidden;
+    create.setAttribute("aria-expanded", String(!createPanel.hidden));
+    if (!createPanel.hidden) createPanel.querySelector<HTMLInputElement>("#new-session-name")?.focus();
+  });
   const list = el("section", "session-list");
   list.id = "session-list";
   renderSessionCards(list);
-  page.append(header, heading, list, renderStartHint());
+  page.append(header, heading, createPanel, list, renderStartHint());
   app.append(page);
   updateSessionSummary();
   startPolling();
+}
+
+function renderCreatePanel(close: () => void): HTMLElement {
+  const panel = el("section", "create-panel");
+  panel.id = "create-terminal-panel";
+  panel.hidden = true;
+  const intro = el("div", "create-intro");
+  intro.append(
+    el("h2", "create-title", "Open a new shell"),
+    el("p", "create-copy", "This creates a normal interactive terminal. Once open, type cd, ls, codex, npm, or any other command."),
+  );
+  const form = el("form", "create-form");
+  form.autocomplete = "off";
+
+  const nameField = el("label", "create-field");
+  nameField.append(el("span", "field-label", "Name (optional)"));
+  const name = el("input", "create-input");
+  name.id = "new-session-name";
+  name.name = "name";
+  name.maxLength = 80;
+  name.placeholder = "e.g. project shell";
+  nameField.append(name);
+
+  const cwdField = el("label", "create-field");
+  cwdField.append(el("span", "field-label", "Starting directory (optional)"));
+  const cwd = el("input", "create-input");
+  cwd.name = "cwd";
+  cwd.maxLength = 4096;
+  cwd.placeholder = "~ or /Volumes/MyWork/PH";
+  cwd.spellcheck = false;
+  cwdField.append(cwd);
+
+  const error = el("p", "form-error");
+  error.setAttribute("role", "alert");
+  const actions = el("div", "create-actions");
+  const cancel = el("button", "secondary-button", "Cancel");
+  cancel.type = "button";
+  cancel.addEventListener("click", close);
+  const submit = el("button", "create-submit", "Create & open");
+  submit.type = "submit";
+  actions.append(cancel, submit);
+  form.append(nameField, cwdField, error, actions);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    error.textContent = "";
+    submit.disabled = true;
+    submit.textContent = "Creating…";
+    try {
+      const created = await api<Session>("/api/sessions", {
+        method: "POST",
+        body: JSON.stringify({ name: name.value.trim(), cwd: cwd.value.trim() }),
+      });
+      state.sessions = [created, ...state.sessions.filter((item) => item.id !== created.id)];
+      renderTerminal(created.id);
+    } catch (caught) {
+      error.textContent = caught instanceof Error ? caught.message : "Could not create the terminal";
+      submit.disabled = false;
+      submit.textContent = "Create & open";
+    }
+  });
+  panel.append(intro, form);
+  return panel;
 }
 
 function renderStartHint(): HTMLElement {
@@ -179,8 +559,8 @@ function renderStartHint(): HTMLElement {
   const icon = el("span", "hint-icon", "+");
   const copy = el("div");
   copy.append(
-    el("strong", "hint-title", "Start sessions from your computer"),
-    el("p", "hint-copy", "Use termlinks <command>. Remote command creation is disabled for safety."),
+    el("strong", "hint-title", "Your shells stay managed"),
+    el("p", "hint-copy", "Leaving this page only disconnects the viewer. Running terminals remain here until you exit or stop them."),
     el("code", "hint-command", "termlinks list  ·  termlinks stop <id>"),
   );
   hint.append(icon, copy);
@@ -191,7 +571,7 @@ function renderSessionCards(container: HTMLElement): void {
   container.replaceChildren();
   if (state.sessions.length === 0) {
     const empty = el("div", "empty-state");
-    empty.append(el("span", "empty-prompt", "$_"), el("h2", "empty-title", "Nothing running yet"), el("p", "empty-copy", "Start a managed command on your computer and it will appear here."));
+    empty.append(el("span", "empty-prompt", "$_"), el("h2", "empty-title", "Nothing running yet"), el("p", "empty-copy", "Tap New terminal to open an interactive shell on your computer."));
     container.append(empty);
     return;
   }
@@ -246,7 +626,7 @@ function updateSessionSummary(): void {
   const summary = document.querySelector<HTMLElement>("#session-summary");
   if (summary) summary.textContent = `${running} running · ${finished} finished`;
   const status = document.querySelector<HTMLElement>("#computer-status .computer-status-label");
-  if (status) status.textContent = `Computer online · ${running} running`;
+  if (status) status.textContent = `${encryptedPortal ? "E2E · " : ""}Computer online · ${running} running`;
 }
 
 async function refreshSessions(showMotion = false): Promise<void> {
@@ -378,20 +758,17 @@ function connectTerminal(session: Session): void {
   state.socket?.close();
   state.terminal?.reset();
   setConnectionState("Connecting…", "connecting");
-  const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-  const socket = new WebSocket(`${scheme}//${location.host}/ws/sessions/${encodeURIComponent(session.id)}`);
-  socket.binaryType = "arraybuffer";
-  state.socket = socket;
-  socket.addEventListener("open", () => {
+  const opened = (): void => {
     if (state.socket !== socket) return;
-    setConnectionState(session.running ? "Live · input enabled" : "Session output", session.running ? "online" : "offline");
+    const prefix = encryptedPortal ? "E2E · " : "";
+    setConnectionState(session.running ? `${prefix}Live · input enabled` : `${prefix}Session output`, session.running ? "online" : "offline");
     fitTerminal();
-  });
-  socket.addEventListener("message", async (event) => {
+  };
+  const received = async (data: string | ArrayBuffer | Blob): Promise<void> => {
     if (state.socket !== socket) return;
-    if (typeof event.data === "string") {
+    if (typeof data === "string") {
       try {
-        const message = JSON.parse(event.data) as StatusMessage;
+        const message = JSON.parse(data) as StatusMessage;
         if (message.type === "status" && !message.running) {
           session.running = false;
           session.exitCode = message.exitCode;
@@ -400,21 +777,45 @@ function connectTerminal(session: Session): void {
       } catch { /* Ignore unknown text control messages. */ }
       return;
     }
-    const data = event.data instanceof Blob ? await event.data.arrayBuffer() : event.data as ArrayBuffer;
-    state.terminal?.write(new Uint8Array(data));
-  });
-  socket.addEventListener("close", (event) => {
+    const bytes = data instanceof Blob ? await data.arrayBuffer() : data;
+    state.terminal?.write(new Uint8Array(bytes));
+  };
+  const closed = (code: number): void => {
     if (state.socket !== socket) return;
-    if (event.code === 1008) {
+    if (code === 1008) {
       state.authenticated = false;
       renderLogin("Your portal session expired");
       return;
     }
     if (session.running) setConnectionState("Disconnected · tap ••• to reconnect", "offline");
-  });
-  socket.addEventListener("error", () => {
+  };
+  const failed = (): void => {
     if (state.socket === socket) setConnectionState("Connection failed", "offline");
-  });
+  };
+
+  let socket: TerminalLink;
+  if (encryptedPortal) {
+    if (!encryptedBridge) {
+      renderLogin("Encrypted portal is disconnected");
+      return;
+    }
+    socket = encryptedBridge.openTerminal(session.id, {
+      open: opened,
+      message: (data) => { void received(data); },
+      close: closed,
+      error: failed,
+    });
+  } else {
+    const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+    const nativeSocket = new WebSocket(`${scheme}//${location.host}/ws/sessions/${encodeURIComponent(session.id)}`);
+    nativeSocket.binaryType = "arraybuffer";
+    nativeSocket.addEventListener("open", opened);
+    nativeSocket.addEventListener("message", (event) => { void received(event.data as string | ArrayBuffer | Blob); });
+    nativeSocket.addEventListener("close", (event) => closed(event.code));
+    nativeSocket.addEventListener("error", failed);
+    socket = nativeSocket;
+  }
+  state.socket = socket;
 }
 
 function fitTerminal(): void {
@@ -437,7 +838,6 @@ function setConnectionState(label: string, kind: "connecting" | "online" | "offl
 
 function closeConnection(): void {
   if (state.socket) {
-    state.socket.onclose = null;
     state.socket.close();
   }
   state.socket = undefined;
