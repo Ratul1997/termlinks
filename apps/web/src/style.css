@@ -15,6 +15,9 @@
 
 * { box-sizing: border-box; }
 html, body, #app { min-height: 100%; margin: 0; }
+html.terminal-active, html.terminal-active body, html.terminal-active #app {
+  height: 100%; overflow: hidden;
+}
 
 body {
   min-width: 320px;
@@ -165,7 +168,12 @@ button { color: inherit; }
 .empty-title { margin: 16px 0 8px; font-size: 20px; }
 .empty-copy { max-width: 330px; margin: auto; color: var(--muted); font-size: 13px; line-height: 1.5; }
 
-.terminal-page { height: 100dvh; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; overflow: hidden; background: #070a09; }
+.terminal-page {
+  position: fixed; top: var(--terminal-viewport-top, 0px); right: 0; left: 0;
+  width: 100%; height: var(--terminal-viewport-height, 100dvh);
+  display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto;
+  overflow: hidden; background: #070a09;
+}
 .terminal-header {
   min-height: 60px; display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; align-items: center;
   padding: max(4px, env(safe-area-inset-top)) 8px 4px; border-bottom: 1px solid #202722; background: #0e1310;

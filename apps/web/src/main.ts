@@ -100,6 +100,7 @@ const state: {
   terminal?: Terminal;
   fit?: FitAddon;
   touchCleanup?: () => void;
+  layoutCleanup?: () => void;
   desktop?: RFB;
   desktopLink?: EncryptedDesktopLink;
   windowLink?: EncryptedWindowLink;
@@ -1771,8 +1772,8 @@ function renderTerminal(id: string): void {
     scrollOnUserInput: true,
     scrollSensitivity: 1.15,
     // xterm's animated wheel scrolling starts a new animation for every input
-    // event. Rapid trackpad/touch input can build up enough work to stutter on
-    // mobile Safari/WebKit, so touch momentum is handled below once per frame.
+    // event. Keep it disabled because touch devices use the native WebKit
+    // scroll container installed below.
     smoothScrollDuration: 0,
     theme: {
       background: "#070a09", foreground: "#d8e2dc", cursor: "#9fffb9", cursorAccent: "#070a09",
@@ -1786,6 +1787,7 @@ function renderTerminal(id: string): void {
   state.terminal = terminal;
   state.fit = fit;
   state.touchCleanup = enableTouchScroll(terminal);
+  state.layoutCleanup = installTerminalViewportSizing(page);
   fitTerminal();
   if (!window.matchMedia("(pointer: coarse)").matches) terminal.focus();
   terminal.onData((data) => {
@@ -1794,7 +1796,58 @@ function renderTerminal(id: string): void {
   connectTerminal(session);
   const resize = new ResizeObserver(fitTerminal);
   resize.observe(frame);
-  window.addEventListener("orientationchange", fitTerminal, { once: true });
+  const onOrientationChange = (): void => fitTerminal();
+  window.addEventListener("orientationchange", onOrientationChange);
+  const viewportCleanup = state.layoutCleanup;
+  state.layoutCleanup = () => {
+    resize.disconnect();
+    window.removeEventListener("orientationchange", onOrientationChange);
+    viewportCleanup?.();
+  };
+}
+
+function installTerminalViewportSizing(page: HTMLElement): () => void {
+  const viewport = window.visualViewport;
+  document.documentElement.classList.add("terminal-active");
+  let animationFrame = 0;
+  let settleTimer = 0;
+
+  const sync = (): void => {
+    animationFrame = 0;
+    const height = Math.max(1, viewport?.height ?? window.innerHeight);
+    const offsetTop = Math.max(0, viewport?.offsetTop ?? 0);
+    page.style.setProperty("--terminal-viewport-height", `${height}px`);
+    page.style.setProperty("--terminal-viewport-top", `${offsetTop}px`);
+    fitTerminal();
+  };
+  const schedule = (): void => {
+    if (!animationFrame) animationFrame = window.requestAnimationFrame(sync);
+  };
+  const settle = (): void => {
+    schedule();
+    if (settleTimer) window.clearTimeout(settleTimer);
+    // iOS animates its keyboard after focus has moved. Recheck once that
+    // animation settles in case the last VisualViewport event was skipped.
+    settleTimer = window.setTimeout(schedule, 350);
+  };
+
+  window.addEventListener("resize", schedule, { passive: true });
+  viewport?.addEventListener("resize", schedule, { passive: true });
+  viewport?.addEventListener("scroll", schedule, { passive: true });
+  page.addEventListener("focusin", settle);
+  page.addEventListener("focusout", settle);
+  sync();
+
+  return () => {
+    if (animationFrame) window.cancelAnimationFrame(animationFrame);
+    if (settleTimer) window.clearTimeout(settleTimer);
+    window.removeEventListener("resize", schedule);
+    viewport?.removeEventListener("resize", schedule);
+    viewport?.removeEventListener("scroll", schedule);
+    page.removeEventListener("focusin", settle);
+    page.removeEventListener("focusout", settle);
+    document.documentElement.classList.remove("terminal-active");
+  };
 }
 
 function enableTouchScroll(terminal: Terminal): () => void {
@@ -2114,6 +2167,8 @@ function closeConnection(): void {
   state.socket = undefined;
   state.touchCleanup?.();
   state.touchCleanup = undefined;
+  state.layoutCleanup?.();
+  state.layoutCleanup = undefined;
   state.terminal?.dispose();
   state.terminal = undefined;
   state.fit = undefined;
