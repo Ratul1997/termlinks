@@ -327,8 +327,9 @@ After login, the portal dashboard automatically shows every managed terminal and
 - Select **New terminal** to create one normal interactive shell. Termlinks immediately attaches the portal and opens a native Terminal window on the computer to the same PTY. Its optional starting directory may be `~`, `~/path`, or an absolute path.
 - Inside that shell, type `cd`, `ls`, `codex`, `npm run dev`, or any other command exactly as in a desktop terminal.
 - Terminal history uses native touch momentum on mobile and short smooth scrolling for mouse wheels and trackpads.
-- On a desktop browser, drag across terminal text normally to select and copy it. On iPhone/iPad or another touch device, tap **Select text** in the bottom toolbar. Termlinks opens the retained terminal history in a normal read-only text panel, where you can long-press to select exact text and tap **Copy selection**, or use **Copy visible screen**.
-- To paste reliably from a phone or installed PWA, tap **Paste** in the bottom toolbar, long-press in the text box, choose the system **Paste** action, and tap **Send to terminal**. Pasted text is sent to the active PTY exactly like keyboard input.
+- Use the persistent chat-style composer below the terminal to type or paste commands and agent messages. Press **Enter** or the arrow button to send and submit; press **Shift+Enter** to add another line before sending. Multiline content uses xterm's bracketed-paste behavior when the active terminal program supports it.
+- The Escape, Tab, Ctrl-C, Ctrl-D, arrow, and Enter controls remain above the composer for terminal-native interaction. Clicking the xterm screen still enables direct keyboard input for editors and other full-screen programs.
+- On a desktop browser, drag across terminal text normally to select and copy it. On iPhone/iPad or another touch device, tap **Copy output** above the composer. Termlinks opens the retained terminal history in a normal read-only text panel, where you can long-press to select exact text and tap **Copy selection**, or use **Copy visible screen**.
 - The header shows the number of running sessions. Finished and explicitly closed sessions are removed from the dashboard automatically.
 - Each card shows the session name, command, directory, runtime, and status.
 - Select **Open terminal** to view and type in that terminal.

@@ -1728,7 +1728,7 @@ function renderTerminal(id: string): void {
   const reconnect = el("button", "menu-button", "Reconnect");
   reconnect.type = "button";
   reconnect.addEventListener("click", () => connectTerminal(session));
-  const terminalText = el("button", "menu-button", "Select, copy or paste text");
+  const terminalText = el("button", "menu-button", "Select or copy terminal text");
   terminalText.type = "button";
   terminalText.addEventListener("click", () => {
     actions.classList.remove("open");
@@ -1758,7 +1758,7 @@ function renderTerminal(id: string): void {
   const mount = el("div", "terminal-mount");
   mount.id = "terminal";
   frame.append(mount);
-  page.append(header, actions, connection, frame, renderExtraKeys());
+  page.append(header, actions, connection, frame, renderTerminalComposer());
   app.append(page);
 
   const terminal = new Terminal({
@@ -1787,7 +1787,7 @@ function renderTerminal(id: string): void {
   state.fit = fit;
   state.touchCleanup = enableTouchScroll(terminal);
   fitTerminal();
-  terminal.focus();
+  if (!window.matchMedia("(pointer: coarse)").matches) terminal.focus();
   terminal.onData((data) => {
     if (state.socket?.readyState === WebSocket.OPEN) state.socket.send(new TextEncoder().encode(data));
   });
@@ -1919,7 +1919,68 @@ function enableTouchScroll(terminal: Terminal): () => void {
   };
 }
 
-function renderExtraKeys(): HTMLElement {
+function renderTerminalComposer(): HTMLElement {
+  const section = el("section", "terminal-composer");
+  section.dataset.connected = "false";
+  const input = el("textarea", "terminal-composer-input");
+  input.rows = 1;
+  input.placeholder = "Type a command or message…";
+  input.spellcheck = false;
+  input.autocapitalize = "off";
+  input.autocomplete = "off";
+  input.setAttribute("enterkeyhint", "send");
+  input.setAttribute("aria-label", "Terminal command or message");
+
+  const send = el("button", "terminal-composer-send", "↑");
+  send.type = "submit";
+  send.disabled = true;
+  send.setAttribute("aria-label", "Send to terminal");
+  const form = el("form", "terminal-composer-form");
+  form.append(input, send);
+  const status = el("div", "terminal-composer-meta");
+  status.append(
+    el("span", "terminal-composer-hint", "Enter to send · Shift+Enter for a new line"),
+    el("span", "terminal-composer-state", "Connecting…"),
+  );
+
+  const resizeInput = (): void => {
+    input.style.height = "0";
+    input.style.height = `${Math.min(128, Math.max(46, input.scrollHeight))}px`;
+  };
+  const syncSend = (): void => {
+    send.disabled = section.dataset.connected !== "true" || input.value.length === 0;
+  };
+  const submit = (): void => {
+    if (!input.value || section.dataset.connected !== "true") return;
+    const value = input.value;
+    // Use xterm's paste path so full-screen terminal programs receive bracketed
+    // paste markers when they have enabled that mode, then submit with Enter.
+    state.terminal?.paste(value);
+    sendTerminalInput("\r");
+    input.value = "";
+    resizeInput();
+    syncSend();
+    input.focus();
+  };
+  input.addEventListener("input", () => {
+    resizeInput();
+    syncSend();
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+    event.preventDefault();
+    submit();
+  });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submit();
+  });
+
+  section.append(renderExtraKeys(input), form, status);
+  return section;
+}
+
+function renderExtraKeys(focusTarget?: HTMLElement): HTMLElement {
   const bar = el("div", "extra-keys");
   const keys: Array<[string, string]> = [
     ["\u001b", "Esc"], ["\t", "Tab"], ["\u0003", "Ctrl C"], ["\u0004", "Ctrl D"],
@@ -1928,26 +1989,36 @@ function renderExtraKeys(): HTMLElement {
   for (const [value, label] of keys) {
     const button = el("button", "key-button", label);
     button.type = "button";
+    button.classList.add("terminal-control-key");
+    button.disabled = true;
     button.addEventListener("pointerdown", (event) => event.preventDefault());
     button.addEventListener("click", () => {
-      if (state.socket?.readyState === WebSocket.OPEN) state.socket.send(new TextEncoder().encode(value));
-      state.terminal?.focus();
+      sendTerminalInput(value);
+      focusTarget?.focus();
     });
     bar.append(button);
   }
-  const text = el("button", "key-button key-action", "Select text");
+  const text = el("button", "key-button key-action", "Copy output");
   text.type = "button";
   text.addEventListener("pointerdown", (event) => event.preventDefault());
   text.addEventListener("click", () => openTerminalTextPanel());
-  const paste = el("button", "key-button key-action", "Paste");
-  paste.type = "button";
-  paste.addEventListener("pointerdown", (event) => event.preventDefault());
-  paste.addEventListener("click", () => openTerminalTextPanel(true));
-  bar.prepend(text, paste);
+  bar.prepend(text);
   return bar;
 }
 
-function openTerminalTextPanel(focusPaste = false): void {
+function sendTerminalInput(value: string): boolean {
+  if (state.socket?.readyState !== WebSocket.OPEN) return false;
+  state.socket.send(new TextEncoder().encode(value));
+  return true;
+}
+
+function focusPreferredTerminalInput(): void {
+  const composer = document.querySelector<HTMLTextAreaElement>(".terminal-composer-input");
+  if (composer) composer.focus();
+  else state.terminal?.focus();
+}
+
+function openTerminalTextPanel(): void {
   const terminal = state.terminal;
   const page = document.querySelector<HTMLElement>(".terminal-page");
   if (!terminal || !page) return;
@@ -1965,7 +2036,7 @@ function openTerminalTextPanel(focusPaste = false): void {
   close.setAttribute("aria-label", "Close text panel");
   close.addEventListener("click", () => {
     overlay.remove();
-    terminal.focus();
+    focusPreferredTerminalInput();
   });
   heading.append(close);
 
@@ -1997,33 +2068,13 @@ function openTerminalTextPanel(focusPaste = false): void {
   });
   copyActions.append(copySelection, copyVisible);
 
-  const pasteLabel = el("label", "terminal-text-label", "Paste or type text to send into the terminal");
-  const pasteArea = el("textarea", "terminal-text-area terminal-paste-area");
-  pasteArea.placeholder = "Long-press here and choose Paste";
-  pasteArea.spellcheck = false;
-  pasteArea.autocapitalize = "off";
-  pasteLabel.append(pasteArea);
-  const send = el("button", "terminal-text-send", "Send to terminal");
-  send.type = "button";
-  send.addEventListener("click", () => {
-    if (!pasteArea.value) return;
-    if (state.socket?.readyState !== WebSocket.OPEN) {
-      copyStatus.textContent = "Terminal is disconnected.";
-      return;
-    }
-    state.socket.send(new TextEncoder().encode(pasteArea.value));
-    pasteArea.value = "";
-    copyStatus.textContent = "Text sent to the terminal.";
-  });
-
-  panel.append(heading, copyLabel, copyStatus, copyActions, pasteLabel, send);
+  panel.append(heading, copyLabel, copyStatus, copyActions);
   overlay.append(panel);
   overlay.addEventListener("click", (event) => {
     if (event.target === overlay) close.click();
   });
   page.append(overlay);
-  if (focusPaste) pasteArea.focus();
-  else copyArea.focus();
+  copyArea.focus();
 }
 
 function terminalBufferText(terminal: Terminal, first = 0, last = terminal.buffer.active.length): string {
@@ -2150,6 +2201,19 @@ function setConnectionState(label: string, kind: "connecting" | "online" | "offl
   bar.className = `connection-bar ${kind}`;
   const text = bar.querySelector<HTMLElement>(".connection-label");
   if (text) text.textContent = label;
+
+  const composer = document.querySelector<HTMLElement>(".terminal-composer");
+  if (!composer) return;
+  const connected = kind === "online";
+  composer.dataset.connected = String(connected);
+  const input = composer.querySelector<HTMLTextAreaElement>(".terminal-composer-input");
+  const send = composer.querySelector<HTMLButtonElement>(".terminal-composer-send");
+  const composerState = composer.querySelector<HTMLElement>(".terminal-composer-state");
+  if (send) send.disabled = !connected || !input?.value.length;
+  for (const button of composer.querySelectorAll<HTMLButtonElement>(".terminal-control-key")) button.disabled = !connected;
+  if (composerState) {
+    composerState.textContent = connected ? "Ready" : kind === "connecting" ? "Connecting…" : "Input unavailable";
+  }
 }
 
 function closeConnection(): void {

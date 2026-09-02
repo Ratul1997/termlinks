@@ -17,7 +17,7 @@ The daemon exposes two deliberately separate surfaces:
 
 ### Browser portal
 
-The portal is a mobile-first static TypeScript application embedded into the Go binary. xterm.js interprets ANSI terminal output and captures keyboard input. Extra mobile keys provide Escape, Tab, Ctrl-C, Ctrl-D, arrows, and Enter. The encrypted cloud view also includes noVNC for an opt-in full Mac framebuffer plus a native ScreenCaptureKit picker for one on-screen application window. Both modes support touch/mouse control, keyboard input, and clipboard transfer.
+The portal is a mobile-first static TypeScript application embedded into the Go binary. xterm.js interprets ANSI terminal output and still captures direct keyboard input for full-screen applications. A persistent chat-style composer provides mobile-friendly multiline typing and paste, uses xterm's bracketed-paste path, and submits with Enter; an extra-key row provides Escape, Tab, Ctrl-C, Ctrl-D, arrows, and Enter. The encrypted cloud view also includes noVNC for an opt-in full Mac framebuffer plus a native ScreenCaptureKit picker for one on-screen application window. Both modes support touch/mouse control, keyboard input, and clipboard transfer.
 
 The same app is installable as a PWA from the HTTPS Pages deployment or a trusted loopback origin. Its service worker uses network-first app-shell caching and explicitly bypasses API and WebSocket paths, so terminal/authentication data is never stored in Cache Storage. Native touch overflow provides mobile momentum scrolling; xterm's short animation handles wheel and trackpad scroll events.
 
