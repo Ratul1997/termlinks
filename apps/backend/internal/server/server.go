@@ -66,6 +66,9 @@ func (s *Server) ControlHandler() http.Handler {
 
 func (s *Server) WebHandler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/mode", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"mode": "direct"})
+	})
 	mux.HandleFunc("POST /api/login", s.login)
 	mux.HandleFunc("POST /api/logout", s.requireWebAuth(s.logout))
 	mux.HandleFunc("GET /api/me", s.requireWebAuth(func(w http.ResponseWriter, _ *http.Request) {

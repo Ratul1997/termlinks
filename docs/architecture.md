@@ -21,9 +21,11 @@ The portal is a mobile-first static TypeScript application embedded into the Go 
 
 The same app is installable as a PWA from the HTTPS Pages deployment or a trusted loopback origin. Its service worker uses network-first app-shell caching and explicitly bypasses API and WebSocket paths, so terminal/authentication data is never stored in Cache Storage. Native touch overflow provides mobile momentum scrolling; xterm's short animation handles wheel and trackpad scroll events.
 
-### Cloud bridge
+### Hosted bridge
 
-The optional public path consists of Cloudflare Pages, a Pages Function, a Worker with one Durable Object, and an outbound connector inside the same Go executable. The browser and connector derive the same AES-256-GCM key from the 256-bit portal token. The Worker routes ciphertext by a random channel ID but never receives the key or plaintext.
+The reference public path consists of Cloudflare Pages, a Pages Function, a Worker with one Durable Object, and an outbound connector inside the same Go executable. Cloudflare is the included default adapter, not a daemon dependency. The browser and connector derive the same AES-256-GCM key from the 256-bit portal token. The Worker routes ciphertext by a random channel ID but never receives the key or plaintext.
+
+The same static client auto-detects a directly served daemon through the public, data-free `/api/mode` endpoint. That lets SSH, private-VPN, and generic HTTPS reverse tunnels use the cookie-authenticated direct API without hostname-specific builds. Another provider can also replace Cloudflare while retaining application-layer encryption by implementing the channel relay described below.
 
 ## Session creation flow
 

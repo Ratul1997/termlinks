@@ -1,15 +1,19 @@
 # Termlinks
 
-Termlinks keeps terminal work running on your computer and lets you view and control it from a phone browser. It is command-agnostic: Codex, Claude, development servers, import scripts, shells, and other terminal programs all use the same PTY bridge. It can also carry an opt-in full Mac desktop or one selected macOS window through the encrypted portal.
+Termlinks is an open-source, self-hosted bridge that keeps terminal work running on your computer and lets you view and control it from a phone browser. It is command-agnostic: Codex, Claude, development servers, import scripts, shells, and other terminal programs all use the same PTY bridge. It can also carry an opt-in full Mac desktop or one selected macOS window through the encrypted portal.
 
-This first version is for one person and supports macOS and Linux. It controls sessions started through Termlinks; it does not take over unrelated Terminal/iTerm windows.
+No Termlinks-hosted account or service is required. Run it only on the local computer, reach it through SSH or a private VPN, expose it through an HTTPS tunnel provider, or deploy the included Cloudflare Pages + Workers relay. Cloudflare is the documented default public option, not a requirement.
+
+This first version is designed for one trusted owner and supports macOS and Linux. It controls sessions started through Termlinks; it does not take over unrelated Terminal/iTerm windows.
 
 ## Quick start
 
 Requirements: Go 1.22+, Node.js 20+, and npm.
 
 ```sh
-npm install
+git clone https://github.com/Ratul1997/termlinks.git
+cd termlinks
+npm ci
 make install
 termlinks token
 termlinks codex
@@ -17,9 +21,36 @@ termlinks codex
 
 The first managed command starts the background daemon automatically. Open `http://127.0.0.1:8787` on the computer and log in with the token. The compiled, self-contained executable is `dist/termlinks`; its portal assets are embedded in the binary.
 
-This personal deployment is also available at **https://termlinks.pages.dev** while the computer and cloud connector are online.
-
 The portal is an installable PWA. On Android/desktop, use the browser's **Install app** action (or the in-app button when available). On iPhone/iPad, open the Share menu and select **Add to Home Screen**. The installed app still asks for the portal token and still requires the computer and connector to be online for terminal access.
+
+## Open source
+
+Termlinks is released under the permissive [MIT License](LICENSE). You may use, inspect, modify, redistribute, and self-host it, including with a network or hosting provider of your choice. The repository contains the Go CLI/daemon, TypeScript PWA, Cloudflare relay, build scripts, tests, architecture notes, and security documentation—there is no required proprietary Termlinks backend.
+
+Third-party dependencies keep their own licenses. Contributions and security reports are welcome; read [SECURITY.md](SECURITY.md) before putting a terminal on any network.
+
+## Choose how to connect
+
+The terminal portal and its API are served by the local `termlinks` daemon. Pick the access method that fits your threat model:
+
+1. **Same computer:** keep the default loopback listener and open `http://127.0.0.1:8787`. Nothing leaves the machine.
+2. **SSH port forwarding:** keep Termlinks on loopback and forward it through a host you already trust:
+
+   ```sh
+   ssh -N -L 8787:127.0.0.1:8787 your-user@your-computer
+   ```
+
+   Then open `http://127.0.0.1:8787` on the SSH client device. A phone needs an SSH client capable of local port forwarding.
+3. **Private VPN/overlay:** connect the computer and phone with Tailscale, WireGuard, or another private network, then bind Termlinks to that private address:
+
+   ```sh
+   termlinks daemon --listen <private-vpn-ip>:8787
+   ```
+
+4. **Any HTTPS tunnel or reverse proxy:** point the provider at `http://127.0.0.1:8787`, preserve WebSocket upgrades, and require HTTPS. This exposes the direct portal through that provider, so the provider terminates TLS and the portal token is the application login boundary. Add the provider's identity/MFA gate when available.
+5. **Cloudflare Pages + Workers (default public setup):** deploy the included static PWA, Pages Function, Worker, and Durable Object. The computer makes an outbound connection; no router port is opened. Browser-to-computer terminal and desktop payloads are additionally encrypted with a key derived from the portal token, so the relay carries ciphertext.
+
+The local, SSH, VPN, and direct-tunnel paths provide managed terminals. The native remote-desktop/window picker currently uses the included encrypted connector-relay protocol; use the Cloudflare adapter or implement the same protocol on another provider. See [docs/cloudflare.md](docs/cloudflare.md) for the default deployment and [docs/architecture.md](docs/architecture.md) for the data flow.
 
 ## Important commands
 
@@ -134,12 +165,13 @@ Stopping or closing a session terminates its command. Simply closing the browser
 
 ## Phone access
 
-For this personal deployment:
+For the default Cloudflare deployment:
 
-1. Run `termlinks cloud start` once on the computer.
-2. Open **https://termlinks.pages.dev** on the phone or another computer.
-3. Enter the token printed by `termlinks token`.
-4. Select an existing session, or tap **New terminal** to create an interactive shell, and type with the device keyboard.
+1. Deploy your own relay and portal by following [docs/cloudflare.md](docs/cloudflare.md).
+2. Run `termlinks cloud start` on the computer.
+3. Open your Pages URL on the phone or another computer.
+4. Enter the token printed by `termlinks token`.
+5. Select an existing session, or tap **New terminal** to create an interactive shell, and type with the device keyboard.
 
 Nothing needs to be installed on the viewing device. Giving another person the portal URL and portal token gives them the same full terminal access, so share it only with someone you completely trust. The connector secret is separate and must never be shared.
 
@@ -204,7 +236,7 @@ The password is entered into the macOS dialog; Termlinks does not receive it. Re
 
 ### 4. Connect from the portal
 
-1. Open **https://termlinks.pages.dev**, enter the portal token, and select **Remote desktop**.
+1. Open your deployed HTTPS portal, enter the portal token, and select **Remote desktop**.
 2. Choose **Full Mac desktop** or choose an entry from the encrypted **Open windows** list.
 3. Full-desktop mode asks for Screen Sharing credentials; selected-window mode relies on the Mac's local privacy permissions and does not request a VNC password.
 4. The page starts in view-only mode. Tap **Enable control** before sending touch, mouse, or keyboard input.
@@ -244,7 +276,7 @@ Selected-window access also stops immediately when `termlinks desktop disable` d
 - **Window is visible but cannot be controlled:** allow Termlinks under **System Settings → Privacy & Security → Accessibility**, then restart the connector and explicitly tap **Enable control** in the portal.
 - **Window is missing from the list:** make sure it is open, on screen, not minimized, and has a normal title, then tap **Refresh**.
 - **Computer offline:** run `termlinks cloud start` and check `termlinks cloud status`. The connector is outbound-only; do not open or forward port 5900 on the router.
-- **PWA appears outdated:** fully close and reopen it. If necessary, reload `https://termlinks.pages.dev` in the browser or remove and add the Home Screen app again.
+- **PWA appears outdated:** fully close and reopen it. If necessary, reload your portal URL in the browser or remove and add the Home Screen app again.
 - **Connection stops while away:** the Mac must remain powered on, awake, and online. Terminal processes and desktop access are unavailable while it sleeps.
 
 ### Remote desktop security notes
@@ -257,7 +289,7 @@ Selected-window access also stops immediately when `termlinks desktop disable` d
 - macOS Screen Recording and Accessibility permissions apply to the installed Termlinks executable. Replacing it with an unsigned/differently signed build may require approval again; official local builds use the stable `dev.termlinks.cli` ad-hoc identifier.
 - View-only mode prevents accidental input in the UI; it is a safety control, not an authentication boundary.
 
-### Private-network alternative
+### Private-network access
 
 The default portal listens only on the computer itself. For access away from home, connect the computer and phone to the same private VPN/tailnet, then bind Termlinks to the computer's private VPN address:
 
@@ -267,7 +299,7 @@ termlinks daemon --listen 100.x.y.z:8787
 
 Open `http://100.x.y.z:8787` on the phone. Keep the daemon terminal open the first time; the address is saved, and later managed commands can auto-start the daemon with it.
 
-Do not port-forward Termlinks from your router or expose its local port directly to the public internet. The Cloudflare connector makes an authenticated outbound TLS connection; a Tailscale/WireGuard-style private network remains the lower-complexity alternative.
+Do not port-forward Termlinks from your router or expose its local port directly to the public internet. A private VPN or SSH tunnel is the lower-complexity private option; the included Cloudflare connector is the default public option and makes an authenticated outbound TLS connection.
 
 ## What happens when you run a command
 
@@ -283,7 +315,7 @@ termlinks CLI ──┴─ Unix socket ─► daemon ├─ WebSocket ─► pho
                          codex / claude / npm / bash / ...
 ```
 
-For public phone access, the browser derives an AES-256-GCM key from the portal token and opens one encrypted bridge through `termlinks.pages.dev`. Pages and the Worker relay only ciphertext; the local connector decrypts approved requests and terminal data, then talks to `127.0.0.1:8787`. The portal token itself never crosses the network, and the local port is never publicly bound.
+For the default Cloudflare public path, the browser derives an AES-256-GCM key from the portal token and opens one encrypted bridge through the owner's Pages deployment. Pages and the Worker relay only ciphertext; the local connector decrypts approved requests and terminal data, then talks to `127.0.0.1:8787`. The portal token itself never crosses the network, and the local port is never publicly bound.
 
 Remote desktop uses the same bridge. For a full desktop, browser-side noVNC speaks RFB/VNC through an in-memory WebSocket-like channel; Termlinks encrypts each byte chunk and the connector forwards it only to the configured loopback VNC address. For a selected window, the connector asks macOS ScreenCaptureKit for encrypted source metadata and bounded JPEG frames, then accepts only validated pointer, key, text, and clipboard messages. There is no public VNC port or generic TCP proxy.
 
@@ -317,6 +349,19 @@ npm audit
 
 See [docs/cloudflare.md](docs/cloudflare.md) for deployment, connector-secret rotation, and public smoke-test commands.
 
+## Related open-source projects
+
+Termlinks is not the only open-source way to reach a shell or desktop remotely. The closest options solve overlapping but different problems:
+
+- [ttyd](https://github.com/tsl0922/ttyd) is a small, mature tool for sharing one command-line program in a browser.
+- [Ptylon](https://github.com/alexfrmn/ptylon) is a self-hosted browser workspace with persistent PTYs, files, an editor, and server-side browser sessions, aimed at coding agents.
+- [ShellHub](https://github.com/shellhub-io/shellhub) focuses on centrally managed SSH access to devices.
+- [Apache Guacamole](https://guacamole.apache.org/) is a clientless gateway for established protocols such as SSH, VNC, and RDP.
+- [MeshCentral](https://github.com/Ylianst/MeshCentral) is a broader device-management platform with browser-based terminal, desktop, and file access.
+- [RustDesk](https://github.com/rustdesk/rustdesk) is a self-hostable AnyDesk/TeamViewer-style remote-desktop system.
+
+Termlinks' particular focus is a lightweight local executable that owns named, reconnectable PTYs for arbitrary commands, has a mobile/PWA interface, can create shells from the portal, and carries both terminal and opt-in macOS window/desktop control through the same application-encrypted outbound bridge. Choose an established project above if its narrower or broader model fits better.
+
 ## Current boundary
 
 - Only sessions managed by Termlinks can be opened. Launch them with `termlinks …` or create an interactive shell from the portal; unrelated Terminal/iTerm windows cannot be attached after the fact because their PTYs belong to another process.
@@ -324,7 +369,7 @@ See [docs/cloudflare.md](docs/cloudflare.md) for deployment, connector-secret ro
 - The portal supports the complete VNC framebuffer or one selected on-screen macOS window. A separate physical-display picker and minimized-window capture are not implemented yet.
 - Sessions live in daemon memory and do not survive a daemon or computer restart.
 - An authenticated browser can create a normal interactive shell, then type arbitrary commands into it. Treat the portal token as full access to your operating-system user account.
-- This personal version uses one shared portal identity. It does not yet provide per-person accounts, per-session permissions, or an audit trail.
-- The deployed relay represents one configured computer. Connecting a friend's machine safely requires a separate deployment today; shared multi-device pairing and device selection are not implemented.
+- One Termlinks installation uses one shared portal identity. It does not yet provide per-person accounts, per-session permissions, or an audit trail.
+- One relay deployment represents one configured computer. Each additional computer needs its own relay/portal deployment and secrets until multi-device pairing and device selection are implemented.
 
 Read [SECURITY.md](SECURITY.md) before enabling network access.

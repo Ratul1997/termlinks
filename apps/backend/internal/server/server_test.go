@@ -33,8 +33,22 @@ func TestWebAuthenticationAndInteractiveTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := &http.Client{Jar: jar}
+	response, err := client.Get(web.URL + "/api/mode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mode map[string]string
+	if err := json.NewDecoder(response.Body).Decode(&mode); err != nil {
+		response.Body.Close()
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || mode["mode"] != "direct" {
+		t.Fatalf("unexpected public portal mode response: status=%d body=%v", response.StatusCode, mode)
+	}
+
 	request, _ := http.NewRequest(http.MethodGet, web.URL+"/api/sessions", nil)
-	response, err := client.Do(request)
+	response, err = client.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}

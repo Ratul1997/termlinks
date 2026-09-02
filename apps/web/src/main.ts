@@ -100,7 +100,7 @@ const state: {
   closedSessions: Set<string>;
 } = { authenticated: false, sessions: [], closedSessions: new Set() };
 
-const encryptedPortal = location.hostname === "termlinks.pages.dev" || location.hostname.endsWith(".termlinks.pages.dev");
+let encryptedPortal = true;
 let encryptedBridge: EncryptedBridge | undefined;
 let installPrompt: BeforeInstallPromptEvent | undefined;
 
@@ -658,6 +658,7 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 async function boot(): Promise<void> {
+  encryptedPortal = !(await isDirectPortal());
   if (encryptedPortal) {
     renderLogin();
     return;
@@ -674,6 +675,20 @@ async function boot(): Promise<void> {
         : "";
       renderLogin(message);
     }
+  }
+}
+
+async function isDirectPortal(): Promise<boolean> {
+  try {
+    const response = await fetch("/api/mode", {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok || !response.headers.get("Content-Type")?.includes("application/json")) return false;
+    const result = await response.json() as { mode?: string };
+    return result.mode === "direct";
+  } catch {
+    return false;
   }
 }
 
