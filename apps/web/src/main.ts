@@ -136,6 +136,7 @@ class EncryptedDesktopLink implements RawDesktopChannel {
   onclose: ((event: CloseEvent) => void) | null = null;
   protocol = "";
   readyState: number = WebSocket.CONNECTING;
+  lastReason = "";
 
   constructor(readonly id: string, private readonly bridge: EncryptedBridge) {}
 
@@ -151,6 +152,7 @@ class EncryptedDesktopLink implements RawDesktopChannel {
 
   remoteClose(code: number, reason: string): void {
     if (this.readyState === WebSocket.CLOSED) return;
+    this.lastReason = reason;
     this.readyState = WebSocket.CLOSED;
     this.onclose?.(new CloseEvent("close", { code, reason, wasClean: code === 1000 }));
   }
@@ -545,13 +547,15 @@ function renderLogin(message = ""): void {
     submit.textContent = "Checking…";
     error.textContent = "";
     try {
+      const token = input.value.trim();
+      if (token.length < 32) throw new Error("Paste the complete portal token without backticks");
       if (encryptedPortal) {
         encryptedBridge?.close();
         const bridge = new EncryptedBridge();
-        await bridge.connect(input.value);
+        await bridge.connect(token);
         encryptedBridge = bridge;
       } else {
-        await api("/api/login", { method: "POST", body: JSON.stringify({ token: input.value }) });
+        await api("/api/login", { method: "POST", body: JSON.stringify({ token }) });
       }
       input.value = "";
       state.authenticated = true;
@@ -814,7 +818,7 @@ function renderDesktop(): void {
     rfb.addEventListener("disconnect", (event) => {
       if (state.desktop !== rfb) return;
       const clean = (event as CustomEvent<{ clean?: boolean }>).detail?.clean;
-      setConnectionState(clean ? "Remote desktop closed" : "Remote desktop disconnected", "offline");
+      setConnectionState(link.lastReason || (clean ? "Remote desktop closed" : "Remote desktop disconnected"), "offline");
     });
     credentialForm.addEventListener("submit", (event) => {
       event.preventDefault();
