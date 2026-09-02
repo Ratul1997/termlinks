@@ -29,6 +29,7 @@ Termlinks provides remote keyboard access to local processes and can optionally 
 - Public responses use HTTPS security headers, random AES-GCM nonces, direction/sequence/channel-bound authenticated encryption, bounded message sizes, a short unauthenticated timeout, and a Durable Object connection/viewer limit.
 - A directly tunneled portal advertises `/api/mode` so the same frontend can select its cookie-authenticated local API instead of assuming a particular hosted domain. This endpoint contains no session or user data.
 - `termlinks update` uses a fixed GitHub release API, accepts only HTTPS downloads from GitHub-controlled hosts, bounds metadata/archive/binary sizes, rejects unsafe archive entries and links, verifies the release SHA-256 entry, executes the staged binary only for an exact version check, and atomically replaces the invoking executable. It never restarts the daemon or active PTYs; only an already-running cloud connector is restarted.
+- The GitHub release workflow builds each supported target on a native runner and pins all GitHub Actions dependencies to full commit hashes.
 
 ## Safe deployment
 
