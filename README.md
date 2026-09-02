@@ -119,6 +119,8 @@ After login, the portal dashboard automatically shows every managed terminal and
 - Select **New terminal** to create and immediately open a normal interactive shell. Its optional starting directory may be `~`, `~/path`, or an absolute path.
 - Inside that shell, type `cd`, `ls`, `codex`, `npm run dev`, or any other command exactly as in a desktop terminal.
 - Terminal history uses native touch momentum on mobile and short smooth scrolling for mouse wheels and trackpads.
+- On a desktop browser, drag across terminal text normally to select and copy it. On iPhone/iPad or another touch device, tap **Select text** in the bottom toolbar. Termlinks opens the retained terminal history in a normal read-only text panel, where you can long-press to select exact text and tap **Copy selection**, or use **Copy visible screen**.
+- To paste reliably from a phone or installed PWA, tap **Paste** in the bottom toolbar, long-press in the text box, choose the system **Paste** action, and tap **Send to terminal**. Pasted text is sent to the active PTY exactly like keyboard input.
 - The header shows the number of running sessions. Finished and explicitly closed sessions are removed from the dashboard automatically.
 - Each card shows the session name, command, directory, runtime, and status.
 - Select **Open terminal** to view and type in that terminal.
@@ -143,32 +145,76 @@ If the computer sleeps, shuts down, loses internet access, or runs `termlinks cl
 
 ## Remote desktop (macOS-first)
 
-Remote desktop is disabled by default and must be enabled locally on the Mac. Termlinks does not change macOS privacy or sharing settings for you.
+Remote desktop is disabled by default. It has two independent switches: macOS **Screen Sharing** produces the desktop framebuffer, and the Termlinks desktop tunnel carries it through the encrypted portal. Both must be enabled locally on the Mac.
 
-1. On the Mac, open **System Settings → General → Sharing** and enable **Screen Sharing**.
-2. Open the Screen Sharing details, restrict allowed users, and enable VNC viewer access with a strong, unique password if macOS offers that option. Apple documents the current controls in its [Screen Sharing setup guide](https://support.apple.com/guide/mac-help/turn-screen-sharing-on-or-off-mh11848/mac).
-3. Enable the Termlinks loopback tunnel:
+### 1. Enable macOS Screen Sharing
 
-   ```sh
-   termlinks desktop enable
-   termlinks desktop status
-   ```
+The recommended method is **System Settings → General → Sharing → Screen Sharing**. Open its details, restrict access to only the intended macOS users, and configure strong credentials. Apple documents the current controls in its [Screen Sharing setup guide](https://support.apple.com/guide/mac-help/turn-screen-sharing-on-or-off-mh11848/mac).
 
-4. Open **Remote desktop** in the deployed portal. Enter the Screen Sharing credentials requested by the Mac. The page starts in view-only mode; tap **Enable control** to allow touch, mouse, and keyboard input.
+Alternatively, this command opens the native macOS administrator-authorization dialog and enables the system Screen Sharing service:
+
+```sh
+osascript -e 'do shell script "/bin/launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist" with administrator privileges'
+```
+
+The password is entered into the macOS dialog; Termlinks does not receive it. Review the allowed users afterward in System Settings. If ordinary macOS account authentication does not work with the browser viewer, configure the VNC-viewer password option shown by macOS and use a strong, unique password.
+
+### 2. Enable the Termlinks tunnel
+
+```sh
+termlinks desktop enable --address 127.0.0.1:5900
+termlinks desktop status
+termlinks cloud status
+```
+
+The expected desktop status is `Tunnel: enabled` and `VNC server: reachable`. The cloud status should say the connector is running and the computer is online.
+
+### 3. Connect from the portal
+
+1. Open **https://termlinks.pages.dev**, enter the portal token, and select **Remote desktop**.
+2. Enter the credentials requested by the Mac. They are used for that connection and are not written to Termlinks configuration or browser storage.
+3. The page starts in view-only mode. Tap **Enable control** before sending touch, mouse, or keyboard input.
+4. Use the toolbar for fullscreen, scaling, special keys, the mobile keyboard, and clipboard text sent to the Mac.
 
 The default target is `127.0.0.1:5900`. A different local VNC server can be selected with `termlinks desktop enable --address 127.0.0.1:<port>`. Non-loopback targets are rejected. The VNC password is entered into the browser only when requested and is never written to Termlinks configuration or browser storage.
 
 The viewer supports full-viewport scaling, fullscreen where the browser permits it, touch gestures, mouse input, hardware keyboards, an on-screen text/special-key panel, and clipboard text sent to the Mac. On iPhone/iPad, installing the PWA from **Share → Add to Home Screen** gives the largest persistent app view.
 
+The remote desktop is a video-like canvas of pixels, so its displayed text cannot be selected as normal webpage text. Select text inside the remote Mac application and use the remote clipboard controls where supported. This is separate from managed terminal pages, whose **Select text** panel provides reliable browser/PWA copying of retained terminal output.
+
 This version tunnels the framebuffer exposed by the local VNC server. It does not yet provide a Termlinks-native picker for one physical monitor or one application window. Which display layout is exposed depends on the local Screen Sharing/VNC server.
 
-To revoke GUI access immediately:
+### Disable or revoke remote desktop
+
+Disable the Internet-facing Termlinks tunnel without affecting terminal sessions:
 
 ```sh
 termlinks desktop disable
 ```
 
-That setting restarts only the cloud connector; managed terminal sessions and the terminal daemon continue running.
+That command restarts only the cloud connector; managed terminal sessions and the terminal daemon continue running. It does **not** turn off macOS Screen Sharing, which may still be reachable from the local network.
+
+To also turn off the macOS Screen Sharing service, use System Settings or run:
+
+```sh
+osascript -e 'do shell script "/bin/launchctl unload -w /System/Library/LaunchDaemons/com.apple.screensharing.plist" with administrator privileges'
+```
+
+### Remote desktop troubleshooting
+
+- **Tunnel disabled:** run `termlinks desktop enable --address 127.0.0.1:5900`.
+- **VNC server unreachable:** enable macOS Screen Sharing, then check the local port with `nc -z 127.0.0.1 5900` and rerun `termlinks desktop status`.
+- **Computer offline:** run `termlinks cloud start` and check `termlinks cloud status`. The connector is outbound-only; do not open or forward port 5900 on the router.
+- **PWA appears outdated:** fully close and reopen it. If necessary, reload `https://termlinks.pages.dev` in the browser or remove and add the Home Screen app again.
+- **Connection stops while away:** the Mac must remain powered on, awake, and online. Terminal processes and desktop access are unavailable while it sleeps.
+
+### Remote desktop security notes
+
+- Anyone with the portal token has full control of managed terminals and, while the desktop tunnel is enabled, can attempt to access the GUI. Treat the token like an administrator password and do not send it in chat, screenshots, source code, or logs.
+- Termlinks restricts its VNC destination to a loopback address, but enabling macOS Screen Sharing can also expose the service to the Mac's local network. Restrict allowed macOS users, use strong credentials, keep the firewall enabled, and disable Screen Sharing when it is not needed.
+- The portal token derives the AES-256-GCM bridge key in the browser. Cloudflare carries encrypted terminal and desktop payloads and cannot read their contents, although normal connection metadata remains visible.
+- VNC credentials are supplied directly to the in-browser VNC client for the live connection. Termlinks does not save them.
+- View-only mode prevents accidental input in the UI; it is a safety control, not an authentication boundary.
 
 ### Private-network alternative
 
