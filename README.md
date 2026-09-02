@@ -145,6 +145,162 @@ make install
 
 `make install` copies the executable to `~/.local/bin/termlinks`. Without installing, replace `termlinks` in the examples with `./dist/termlinks`.
 
+## Complete configuration reference
+
+Termlinks intentionally has a small configuration surface. There is no hidden application `.env` file: every runtime setting, persisted file, cloud binding, and test switch is listed below.
+
+### Local CLI and daemon
+
+| Configuration | Default | Meaning |
+| --- | --- | --- |
+| `termlinks [--name NAME] [--detach] [--] COMMAND [ARGS...]` | `$SHELL` when no command is supplied | Starts a managed PTY. `-n` aliases `--name`; `-d` aliases `--detach`; `--` ends Termlinks option parsing. |
+| Current working directory | Directory where the CLI was invoked | Becomes the managed command's starting directory. |
+| Process environment | Current environment; adds `TERM=xterm-256color` only when `TERM` is absent | Passed to locally started managed commands. Keep in mind that a child process can print environment secrets. |
+| `SHELL` | `/bin/zsh` for a command-less local launch; `/bin/sh` for a portal-created shell when `SHELL` is absent or not absolute | Selects the interactive shell. |
+| `TERMLINKS_STATE_DIR` | Operating-system user config directory plus `termlinks` | Overrides all local state paths. It must be an absolute path. Useful for isolated development/testing installations. |
+| `termlinks daemon --listen ADDR` | `127.0.0.1:8787` | Sets and persists the browser portal listener in `settings.json`. Loopback, RFC1918 private addresses, and Tailscale's `100.64.0.0/10` range are accepted by default. |
+| `termlinks daemon --allow-public-bind` | Off | Allows an unspecified/public bind such as `0.0.0.0`. This is dangerous and does not add TLS; prefer an SSH/VPN/tunnel setup. |
+| Portal **New terminal → Name** | Empty/generated display name | Optional label, at most 80 characters. |
+| Portal **New terminal → Starting directory** | Home directory | Accepts `~`, `~/path`, or an absolute accessible directory, at most 4096 characters. Browser creation always opens the configured shell; commands are typed afterward. |
+
+`--listen` is a daemon option, so if the daemon is already running, stop that foreground daemon before changing it. Later automatic daemon starts reuse the saved address. `termlinks doctor` shows the effective listener, state directory, daemon status, and version without revealing tokens.
+
+### Local state and secrets
+
+The state directory is created with mode `0700`; sensitive files are forced to `0600`:
+
+| File | Contents |
+| --- | --- |
+| `auth.token` | Random 256-bit portal login token created by `termlinks token` or the first daemon start. Treat it as full shell access. |
+| `settings.json` | Persisted `listen` address. |
+| `control.sock` | Private Unix socket used by the CLI and daemon; never expose or proxy it. |
+| `daemon.log` | Output from an automatically detached daemon. |
+| `cloud.json` | Relay URL, connector token, desktop-enabled flag, and loopback VNC address. It contains a secret. |
+| `cloud.pid` | PID of the detached connector. |
+| `cloud.log` | Detached connector diagnostics. It should not contain tokens, but still treat logs as private. |
+
+On macOS the default directory is normally `~/Library/Application Support/termlinks`. On Linux it follows the user config directory, normally `$XDG_CONFIG_HOME/termlinks` or `~/.config/termlinks`. Do not commit this directory.
+
+The portal token is not a configurable password string: Termlinks generates it, and `termlinks token` displays the same stored value. To rotate it, first stop the daemon so all in-memory sessions have ended, move `auth.token` to a private backup or trash, and start Termlinks to generate a new token. Existing browser sessions then stop authenticating after their current cookie expires or the daemon restarts.
+
+### Direct portal authentication and network behavior
+
+| Setting | Value |
+| --- | --- |
+| Local URL | `http://127.0.0.1:8787` unless `--listen` changed it. |
+| Login | Portal token exchanged for a random `HttpOnly`, `SameSite=Strict` cookie. |
+| Cookie lifetime | 12 hours. |
+| Direct login rate limit | Five attempts per direct peer IP per minute. Proxy forwarding headers are intentionally ignored. |
+| TLS | Not built into the daemon. Use loopback, SSH, an encrypted private network, or an HTTPS reverse tunnel/proxy. |
+| WebSockets | A proxy must preserve Upgrade/Connection headers and long-lived WebSocket connections. |
+| Portal mode detection | `GET /api/mode` returns `{"mode":"direct"}` from the daemon. A static hosted portal without that response uses the encrypted connector-relay mode. |
+
+### Cloud connector
+
+Configure cloud access only after deploying a compatible relay:
+
+```sh
+printf '%s' '<random-connector-secret>' | \
+  termlinks cloud configure \
+    --url https://<your-relay-host> \
+    --token-stdin
+```
+
+| Configuration | Requirements and behavior |
+| --- | --- |
+| `--url` | Required plain `https://` origin. Credentials, query strings, fragments, and non-root paths are rejected. The connector derives `/connector` and `/status` from it. |
+| `--token-stdin` | Required safety switch. Reads the connector credential from standard input so it need not appear in shell history; maximum input is 4096 bytes and the trimmed secret must be at least 32 characters. |
+| `termlinks cloud start` | Starts a detached outbound connector after ensuring the local daemon is running. |
+| `termlinks cloud status` | Reports configured relay, connector process, and remote online state. |
+| `termlinks cloud stop` | Stops only the connector; managed PTYs remain running. |
+| `termlinks cloud connect` | Internal foreground entry point used by `cloud start`; normally do not invoke it manually. |
+
+The connector token authenticates the computer to the relay. The portal token authenticates and derives the browser E2E key. They are deliberately different and must never be substituted for each other.
+
+### Remote desktop and selected windows
+
+| Configuration | Default | Meaning |
+| --- | --- | --- |
+| `termlinks desktop enable [--address HOST:PORT]` | Disabled; `127.0.0.1:5900` | Enables GUI messages in the encrypted connector. The VNC target must be `localhost` or a loopback IP and port `1–65535`. |
+| `termlinks desktop disable` | — | Revokes connector-side GUI access and restarts only the connector when it was running. It does not disable macOS Screen Sharing itself. |
+| `termlinks desktop status` | — | Shows tunnel, VNC reachability, window-picker support, Screen Recording, and Accessibility status. |
+| `termlinks desktop permissions` | — | On macOS, requests Screen Recording for viewing and Accessibility for control. |
+| `termlinks desktop windows` | — | Lists the normal titled on-screen windows that the portal can offer. |
+| Portal control toggle | View-only | **Enable control** must be selected before the UI sends pointer or keyboard input. It is an accident-prevention control, not another authentication layer. |
+
+Selected-window capture requires macOS 14+ and a cgo-enabled build. Full-desktop mode additionally requires a loopback VNC/Screen Sharing server. These GUI modes currently travel through the encrypted connector-relay protocol, not the direct local portal.
+
+### Cloudflare Worker and Pages settings
+
+These are used only by the included default Cloudflare adapter:
+
+| Name | Where | Purpose |
+| --- | --- | --- |
+| `CONNECTOR_TOKEN` | Worker secret | Must exactly match the value supplied to local `cloud configure`; minimum 32 characters. |
+| `RELAY` | Worker Durable Object binding | Bound to class `TermlinksRelay`; the included config provisions it with SQLite storage. |
+| `RELAY_ORIGIN` | Pages Function environment variable/secret | Plain HTTPS origin of the deployed relay Worker. The Pages Function refuses `/ws/bridge` with `503` when absent or invalid. |
+| `CLOUDFLARE_API_TOKEN` | Wrangler process environment | Optional non-interactive Cloudflare API credential. Never commit it. Interactive `wrangler login` is the alternative. |
+| `CLOUDFLARE_ACCOUNT_ID` | Wrangler process environment | Selects the Cloudflare account for non-interactive deployment. |
+| Worker `name` | `apps/relay/wrangler.jsonc` or Wrangler `--name` | Choose a unique relay Worker name for each deployment/computer. |
+| Pages project name | Wrangler `--project-name` | Choose a Pages project name; its generated `.pages.dev` URL becomes the portal URL. |
+
+The checked-in Worker configuration also sets `main` to `src/index.ts`, enables `workers.dev`, uses compatibility date `2026-09-02` with `nodejs_compat`, creates the `TermlinksRelay` SQLite Durable Object as migration `v1`, enables logs at sampling rate `1`, and enables traces at `0.01`. The reference Worker routes one computer through Durable Object key `personal-computer` with location hint `apac`; a fork serving multiple devices must replace that fixed key with authenticated device routing. Change these values in `apps/relay/wrangler.jsonc` or `apps/relay/src/index.ts` if a fork needs different Cloudflare behavior.
+
+For local Worker development, copy `apps/relay/.dev.vars.example` to the gitignored `apps/relay/.dev.vars` and replace its placeholder `CONNECTOR_TOKEN`. The `TERMLINKS_RELAY_NAME`, `TERMLINKS_PAGES_PROJECT`, `TERMLINKS_RELAY_URL`, `TERMLINKS_PORTAL_URL`, and `TERMLINKS_CONNECTOR_SECRET_FILE` names used in [docs/cloudflare.md](docs/cloudflare.md) are shell convenience variables for the documented commands; Termlinks itself does not read them.
+
+### Build, install, and development
+
+| Command or setting | Effect |
+| --- | --- |
+| `npm ci` | Reproducibly installs the locked root/web dependencies. |
+| `npm run typecheck` | Checks the portal TypeScript. |
+| `npm run typecheck:relay` | Checks the Cloudflare Worker TypeScript. |
+| `npm test` | Runs both typechecks and all Go tests. |
+| `npm run build:web` | Builds static portal/PWA assets into `apps/web/dist`. |
+| `npm run sync:web` | Copies built assets into the Go embed tree. |
+| `npm run build:backend` | Produces stripped `dist/termlinks`; macOS uses external linking and ad-hoc signs identifier `dev.termlinks.cli`. |
+| `npm run build` / `make build` | Runs web build, embed sync, and backend build in order. |
+| `make install` | Builds and installs to `$HOME/.local/bin/termlinks`. The Makefile currently has no `PREFIX` override. |
+| `npm run dev --workspace @termlinks/web` | Rebuilds on change and serves static UI assets on `127.0.0.1:5173`; it does not proxy the daemon API. |
+| `npm run types:relay` | Regenerates Cloudflare Worker types using `.dev.vars.example`. |
+| `npm run deploy:relay` | Convenience deployment using the checked-in Worker name. Use the explicit commands in the Cloudflare guide for a custom name. |
+| `npm run deploy:pages` | Convenience deployment to a Pages project named `termlinks`. Use the explicit guide for a custom project name. |
+| `npm audit` | Audits npm dependencies. |
+
+Standard Go build variables such as `GOOS`, `GOARCH`, and `CGO_ENABLED` are honored by Go. The native macOS selected-window module is compiled only on Darwin with cgo; unsupported builds retain terminal features and report the window picker as unavailable.
+
+### Optional integration-test environment variables
+
+These variables are for maintainers and CI; normal users do not need them:
+
+| Variable | Required/value | Effect |
+| --- | --- | --- |
+| `TERMLINKS_E2E_PORTAL` | HTTPS portal URL | Required by the public encrypted-bridge smoke tests. |
+| `TERMLINKS_E2E_TOKEN` | Portal token, at least 32 characters | Required with the portal URL. Do not place it in committed scripts or CI logs. |
+| `TERMLINKS_E2E_SESSION_NAME` | Exact session name | Selects a safe existing session; otherwise the first listed session is used. |
+| `TERMLINKS_E2E_SEND` | Text | Sends the text plus Enter and waits to see that text in terminal output. Use only against a disposable echo/test session. |
+| `TERMLINKS_E2E_CREATE_SHELL=1` | Boolean switch | Creates an isolated `portal-shell-smoke` in `/tmp`, verifies input/output, and stops it. |
+| `TERMLINKS_E2E_DESKTOP_DISABLED=1` | Boolean switch | Verifies that a disabled connector rejects desktop access. |
+| `TERMLINKS_E2E_DESKTOP_BRIDGE=1` | Boolean switch | Verifies an enabled test VNC/RFB byte bridge. |
+| `TERMLINKS_E2E_WINDOW_CAPTURE=1` | Boolean switch | Lists macOS windows, opens one source, and verifies a JPEG frame. |
+| `TERMLINKS_E2E_WINDOW_MATCH` | Case-insensitive substring | Chooses a window by combined application/title instead of the first source. |
+| `TERMLINKS_E2E_WINDOW_TEXT` | Text | Injects text into the deliberately selected test window. |
+| `TERMLINKS_E2E_WINDOW_SAVE=1` | Boolean switch | Sends Command-S after window text; use only with a disposable document. |
+| `TERMLINKS_WINDOW_INTEGRATION=1` | Boolean switch | Enables the native ScreenCaptureKit Go integration test, which is skipped by default. |
+
+### Fixed safety and capacity limits
+
+These limits and UI tuning values are compiled into this release rather than runtime-configurable:
+
+- 64 retained sessions; the oldest completed entry is pruned when room is needed, while 64 simultaneously running sessions reject another start.
+- PTYs default to 100 columns × 30 rows when no valid attached-terminal size is available, accept sizes from 20–500 columns and 5–300 rows, retain 2 MiB backend scrollback per session, and accept terminal input messages up to 64 KiB.
+- The browser terminal retains 10,000 rendered rows, uses 13 px text below 600 px viewport width and 14 px otherwise, and polls the dashboard every 2.5 seconds.
+- The relay permits eight simultaneous browser sockets and 5 MiB encrypted packets. Each browser channel permits either one VNC desktop or one selected-window stream.
+- noVNC uses viewport scaling, view-only startup, shared mode, and quality/compression level 6; it does not request remote framebuffer resizing.
+- Selected-window capture accepts bounds from 320×240 through 2560×1800, captures approximately every 150 ms, JPEG-encodes locally at quality `0.62`, caps a frame at 2 MiB, and caps text/clipboard messages at 16 KiB.
+
+Forks may change the corresponding source constants, but should reassess memory, bandwidth, latency, and denial-of-service exposure first.
+
 ## Managing sessions in the portal
 
 After login, the portal dashboard automatically shows every managed terminal and its current state:
