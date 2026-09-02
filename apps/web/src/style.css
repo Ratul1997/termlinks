@@ -196,10 +196,23 @@ button { color: inherit; }
 .connection-bar.warning .connection-dot { background: #e7b65a; }
 .terminal-frame { min-height: 0; overflow: hidden; padding: 10px 6px 4px 10px; }
 .terminal-mount, .terminal-mount .xterm { width: 100%; height: 100%; }
-.terminal-mount .xterm.touch-scroll {
-  touch-action: none;
-  overscroll-behavior: contain;
+.terminal-mount .xterm.native-touch-terminal {
+  overflow-y: auto; overscroll-behavior-y: contain; touch-action: pan-y;
+  -webkit-overflow-scrolling: touch; -webkit-user-select: text; user-select: text;
 }
+.terminal-mount .xterm.native-touch-terminal .xterm-screen {
+  position: sticky; z-index: 2; top: 0; touch-action: pan-y;
+  -webkit-user-select: text; user-select: text;
+}
+.terminal-mount .xterm.native-touch-terminal .xterm-rows,
+.terminal-mount .xterm.native-touch-terminal .xterm-rows * {
+  pointer-events: auto !important; -webkit-user-select: text !important; user-select: text !important;
+  -webkit-touch-callout: default;
+}
+.terminal-mount .xterm.native-touch-terminal .xterm-rows *::selection {
+  color: #e8fff0; background: #39724d;
+}
+.terminal-native-scroll-spacer { width: 1px; min-height: 0; pointer-events: none; }
 .terminal-mount .xterm-viewport {
   overscroll-behavior-y: contain; scrollbar-color: #344139 transparent; scrollbar-width: thin;
 }
@@ -247,38 +260,6 @@ button { color: inherit; }
 }
 .terminal-composer-state { flex: 0 0 auto; color: #7f9687; }
 .terminal-composer[data-connected="true"] .terminal-composer-state { color: #78c68d; }
-
-.terminal-text-overlay {
-  position: fixed; z-index: 20; inset: 0; display: grid; align-items: end; padding-top: env(safe-area-inset-top);
-  background: rgba(2, 4, 3, .78); backdrop-filter: blur(7px);
-}
-.terminal-text-panel {
-  width: min(100%, 720px); max-height: calc(100dvh - env(safe-area-inset-top)); margin: 0 auto; overflow-y: auto;
-  padding: 16px max(14px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
-  border: 1px solid #344039; border-bottom: 0; border-radius: 17px 17px 0 0; background: #101613;
-  box-shadow: 0 -20px 70px #000b;
-}
-.terminal-text-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.terminal-text-title { margin: 0; font-size: 18px; }
-.terminal-text-close {
-  width: 38px; height: 38px; border: 1px solid #303a35; border-radius: 9px; color: #aeb9b3;
-  background: #171e1a; font-size: 24px; line-height: 1; cursor: pointer;
-}
-.terminal-text-label { display: block; margin-top: 14px; color: #aebbb4; font-size: 12px; font-weight: 620; }
-.terminal-text-area {
-  display: block; width: 100%; padding: 11px; border: 1px solid #303c35; border-radius: 9px; outline: none;
-  color: var(--ink); background: #070b09; font: 12px/1.45 ui-monospace, monospace; resize: vertical;
-  -webkit-user-select: text; user-select: text; touch-action: auto;
-}
-.terminal-copy-area { height: min(36dvh, 300px); margin-top: 7px; white-space: pre; overflow: auto; }
-.terminal-text-area:focus { border-color: #6cc88a; box-shadow: 0 0 0 3px rgba(108, 200, 138, .1); }
-.terminal-text-status { min-height: 18px; margin: 7px 0 0; color: #7f8d85; font-size: 11px; }
-.terminal-text-actions { display: flex; gap: 7px; margin-top: 8px; }
-.terminal-text-button {
-  min-height: 40px; padding: 0 12px; border: 1px solid #344039; border-radius: 8px;
-  color: #b7c2bc; background: #171e1a; font-size: 11px; font-weight: 700; cursor: pointer;
-}
-.terminal-text-button { flex: 1; }
 
 .desktop-page {
   width: 100%; height: 100dvh; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto auto;

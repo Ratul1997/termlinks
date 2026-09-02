@@ -329,7 +329,7 @@ After login, the portal dashboard automatically shows every managed terminal and
 - Terminal history uses native touch momentum on mobile and short smooth scrolling for mouse wheels and trackpads.
 - Use the persistent chat-style composer below the terminal to type or paste commands and agent messages. Press **Enter** or the arrow button to send and submit; press **Shift+Enter** to add another line before sending. Multiline content uses xterm's bracketed-paste behavior when the active terminal program supports it.
 - The Escape, Tab, Ctrl-C, Ctrl-D, arrow, and Enter controls remain above the composer for terminal-native interaction. Clicking the xterm screen still enables direct keyboard input for editors and other full-screen programs.
-- On a desktop browser, drag across terminal text normally to select and copy it. On iPhone/iPad or another touch device, press and hold the terminal output or tap **Copy output** above the composer. Termlinks opens the retained terminal history in a normal read-only text panel, where you can long-press to select exact text and tap **Copy selection**, or use **Copy visible screen**.
+- Terminal text stays in the terminal—there is no copy popup. Press and hold rendered output to use the browser's native text selection and Copy action. Tap **Copy screen** above the composer to copy the currently visible terminal output immediately.
 - The header shows the number of running sessions. Finished and explicitly closed sessions are removed from the dashboard automatically.
 - Each card shows the session name, command, directory, runtime, and status.
 - Select **Open terminal** to view and type in that terminal.
@@ -424,7 +424,7 @@ The default target is `127.0.0.1:5900`. A different local VNC server can be sele
 
 The viewer supports full-viewport scaling, fullscreen where the browser permits it, touch gestures, mouse input, hardware keyboards, an on-screen text/special-key panel, and clipboard text sent to the Mac. On iPhone/iPad, installing the PWA from **Share → Add to Home Screen** gives the largest persistent app view.
 
-The remote desktop and selected-window views are video-like canvases of pixels, so their displayed text cannot be selected as normal webpage text. Select text inside the remote Mac application and use the remote clipboard controls where supported. This is separate from managed terminal pages, whose **Select text** panel provides reliable browser/PWA copying of retained terminal output.
+The remote desktop and selected-window views are video-like canvases of pixels, so their displayed text cannot be selected as normal webpage text. Select text inside the remote Mac application and use the remote clipboard controls where supported. This is separate from managed terminal pages, where rendered text supports the browser's native selection and **Copy screen** copies the visible output.
 
 The selected-window picker lists individual on-screen application windows. It does not currently offer a separate physical-display picker, capture minimized windows, capture menus or transient popovers as separate sources, or control a window without bringing it into the real Mac's active UI. Full-desktop display layout still depends on the local Screen Sharing/VNC server.
 

@@ -1728,11 +1728,11 @@ function renderTerminal(id: string): void {
   const reconnect = el("button", "menu-button", "Reconnect");
   reconnect.type = "button";
   reconnect.addEventListener("click", () => connectTerminal(session));
-  const terminalText = el("button", "menu-button", "Select or copy terminal text");
+  const terminalText = el("button", "menu-button", "Copy visible terminal output");
   terminalText.type = "button";
   terminalText.addEventListener("click", () => {
     actions.classList.remove("open");
-    openTerminalTextPanel();
+    void copyVisibleTerminalOutput();
   });
   const stop = el("button", "menu-button danger", "Stop & close session");
   stop.type = "button";
@@ -1799,177 +1799,58 @@ function renderTerminal(id: string): void {
 
 function enableTouchScroll(terminal: Terminal): () => void {
   const root = terminal.element;
+  const screen = root?.querySelector<HTMLElement>(".xterm-screen");
   const hasTouchInput = navigator.maxTouchPoints > 0 || window.matchMedia("(pointer: coarse)").matches;
-  if (!root || !hasTouchInput) return () => undefined;
+  if (!root || !screen || !hasTouchInput) return () => undefined;
 
-  const longPressDelay = 520;
-  const longPressMoveLimit = 10;
-  let activeTouch: number | undefined;
-  let startX = 0;
-  let startY = 0;
-  let lastY = 0;
-  let lastTime = 0;
-  let velocity = 0;
-  let pendingDelta = 0;
-  let pixelRemainder = 0;
-  let scrollFrame = 0;
-  let momentumFrame = 0;
-  let longPressTimer = 0;
-  let longPressActivated = false;
+  const spacer = el("div", "terminal-native-scroll-spacer");
+  spacer.setAttribute("aria-hidden", "true");
+  root.append(spacer);
+  root.classList.add("native-touch-terminal");
+  terminal.options.cursorBlink = false;
+  let syncFrame = 0;
+  let disposed = false;
 
-  const cancelMomentum = (): void => {
-    if (momentumFrame) window.cancelAnimationFrame(momentumFrame);
-    momentumFrame = 0;
+  const rowHeight = (): number => screen.clientHeight / terminal.rows;
+  const syncNativeScroller = (): void => {
+    syncFrame = 0;
+    if (disposed) return;
+    const height = rowHeight();
+    if (!Number.isFinite(height) || height <= 0) return;
+    const buffer = terminal.buffer.active;
+    spacer.style.height = `${Math.max(0, buffer.length - terminal.rows) * height}px`;
+    const target = buffer.viewportY * height;
+    // A nearby difference means this scroll originated from the finger. Do
+    // not snap WebKit's fractional momentum position back to a terminal row.
+    if (Math.abs(root.scrollTop - target) > height * 1.5) root.scrollTop = target;
   };
-  const cancelLongPress = (): void => {
-    if (longPressTimer) window.clearTimeout(longPressTimer);
-    longPressTimer = 0;
+  const scheduleSync = (): void => {
+    if (!syncFrame) syncFrame = window.requestAnimationFrame(syncNativeScroller);
   };
-  const applyPendingScroll = (): boolean | undefined => {
-    scrollFrame = 0;
-    if (!pendingDelta) return undefined;
-    const rowHeight = root.clientHeight / terminal.rows;
-    if (!Number.isFinite(rowHeight) || rowHeight <= 0) return undefined;
-    const pixels = pixelRemainder + pendingDelta;
-    pendingDelta = 0;
-    const lines = pixels < 0 ? Math.ceil(pixels / rowHeight) : Math.floor(pixels / rowHeight);
-    pixelRemainder = pixels - lines * rowHeight;
-    if (!lines) return undefined;
-    const before = terminal.buffer.active.viewportY;
-    terminal.scrollLines(lines);
-    const moved = terminal.buffer.active.viewportY !== before;
-    if (!moved) pixelRemainder = 0;
-    return moved;
-  };
-  const findTouch = (touches: TouchList): Touch | undefined => {
-    if (activeTouch === undefined) return undefined;
-    for (let index = 0; index < touches.length; index += 1) {
-      const touch = touches.item(index);
-      if (touch?.identifier === activeTouch) return touch;
-    }
-    return undefined;
-  };
-  const onTouchStart = (event: TouchEvent): void => {
-    if (event.touches.length !== 1) {
-      cancelLongPress();
-      return;
-    }
-    const touch = event.touches.item(0);
-    if (!touch) return;
-    cancelMomentum();
-    activeTouch = touch.identifier;
-    startX = touch.clientX;
-    startY = touch.clientY;
-    lastY = touch.clientY;
-    lastTime = performance.now();
-    velocity = 0;
-    pendingDelta = 0;
-    pixelRemainder = 0;
-    longPressActivated = false;
-    cancelLongPress();
-    longPressTimer = window.setTimeout(() => {
-      longPressTimer = 0;
-      if (activeTouch !== touch.identifier) return;
-      longPressActivated = true;
-      velocity = 0;
-      pendingDelta = 0;
-      pixelRemainder = 0;
-      if (scrollFrame) window.cancelAnimationFrame(scrollFrame);
-      scrollFrame = 0;
-      openTerminalTextPanel();
-    }, longPressDelay);
-    // Capture the gesture and translate pixels to terminal rows once per frame.
-    // This avoids relying on xterm's private viewport DOM, which changed in v6.
-    event.stopImmediatePropagation();
-  };
-  const onTouchMove = (event: TouchEvent): void => {
-    const touch = findTouch(event.touches);
-    if (!touch) return;
-    if (Math.hypot(touch.clientX - startX, touch.clientY - startY) > longPressMoveLimit) cancelLongPress();
-    if (longPressActivated) {
-      if (event.cancelable) event.preventDefault();
-      event.stopImmediatePropagation();
-      return;
-    }
-    const now = performance.now();
-    const elapsed = Math.max(1, now - lastTime);
-    const delta = lastY - touch.clientY;
-    lastY = touch.clientY;
-    lastTime = now;
-    velocity = Math.max(-3, Math.min(3, velocity * 0.72 + (delta / elapsed) * 0.28));
-    pendingDelta += delta;
-    if (!scrollFrame) scrollFrame = window.requestAnimationFrame(applyPendingScroll);
-    if (event.cancelable) event.preventDefault();
-    event.stopImmediatePropagation();
-  };
-  const startMomentum = (): void => {
-    if (Math.abs(velocity) < 0.03) return;
-    let previous = performance.now();
-    const step = (now: number): void => {
-      const elapsed = Math.min(32, now - previous);
-      previous = now;
-      pendingDelta += velocity * elapsed;
-      const moved = applyPendingScroll();
-      velocity *= Math.pow(0.95, elapsed / 16.67);
-      if (moved !== false && Math.abs(velocity) >= 0.03) {
-        momentumFrame = window.requestAnimationFrame(step);
-      } else {
-        momentumFrame = 0;
-      }
-    };
-    momentumFrame = window.requestAnimationFrame(step);
-  };
-  const onTouchEnd = (event: TouchEvent): void => {
-    if (!findTouch(event.changedTouches)) return;
-    cancelLongPress();
-    if (longPressActivated) {
-      longPressActivated = false;
-      activeTouch = undefined;
-      pendingDelta = 0;
-      pixelRemainder = 0;
-      velocity = 0;
-      if (event.cancelable) event.preventDefault();
-      event.stopImmediatePropagation();
-      return;
-    }
-    if (scrollFrame) {
-      window.cancelAnimationFrame(scrollFrame);
-      applyPendingScroll();
-    }
-    activeTouch = undefined;
-    startMomentum();
-  };
-  const onTouchCancel = (): void => {
-    cancelLongPress();
-    longPressActivated = false;
-    activeTouch = undefined;
-    pendingDelta = 0;
-    pixelRemainder = 0;
-    velocity = 0;
-    if (scrollFrame) window.cancelAnimationFrame(scrollFrame);
-    scrollFrame = 0;
-    cancelMomentum();
-  };
-  const onContextMenu = (event: MouseEvent): void => {
-    event.preventDefault();
-    cancelLongPress();
-    openTerminalTextPanel();
+  const onNativeScroll = (): void => {
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed && selection.anchorNode && root.contains(selection.anchorNode)) return;
+    const height = rowHeight();
+    if (!Number.isFinite(height) || height <= 0) return;
+    const buffer = terminal.buffer.active;
+    const line = Math.max(0, Math.min(buffer.length - terminal.rows, Math.round(root.scrollTop / height)));
+    if (line !== buffer.viewportY) terminal.scrollToLine(line);
   };
 
-  root.classList.add("touch-scroll");
-  root.addEventListener("touchstart", onTouchStart, { capture: true, passive: true });
-  root.addEventListener("touchmove", onTouchMove, { capture: true, passive: false });
-  root.addEventListener("touchend", onTouchEnd, { capture: true, passive: false });
-  root.addEventListener("touchcancel", onTouchCancel, { capture: true, passive: true });
-  root.addEventListener("contextmenu", onContextMenu);
+  root.addEventListener("scroll", onNativeScroll, { passive: true });
+  const renderSubscription = terminal.onRender(scheduleSync);
+  const scrollSubscription = terminal.onScroll(scheduleSync);
+  const resizeSubscription = terminal.onResize(scheduleSync);
+  scheduleSync();
   return () => {
-    onTouchCancel();
-    root.classList.remove("touch-scroll");
-    root.removeEventListener("touchstart", onTouchStart, true);
-    root.removeEventListener("touchmove", onTouchMove, true);
-    root.removeEventListener("touchend", onTouchEnd, true);
-    root.removeEventListener("touchcancel", onTouchCancel, true);
-    root.removeEventListener("contextmenu", onContextMenu);
+    disposed = true;
+    if (syncFrame) window.cancelAnimationFrame(syncFrame);
+    renderSubscription.dispose();
+    scrollSubscription.dispose();
+    resizeSubscription.dispose();
+    root.removeEventListener("scroll", onNativeScroll);
+    root.classList.remove("native-touch-terminal");
+    spacer.remove();
   };
 }
 
@@ -2052,10 +1933,10 @@ function renderExtraKeys(focusTarget?: HTMLElement): HTMLElement {
     });
     bar.append(button);
   }
-  const text = el("button", "key-button key-action", "Copy output");
+  const text = el("button", "key-button key-action", "Copy screen");
   text.type = "button";
   text.addEventListener("pointerdown", (event) => event.preventDefault());
-  text.addEventListener("click", () => openTerminalTextPanel());
+  text.addEventListener("click", () => { void copyVisibleTerminalOutput(); });
   bar.prepend(text);
   return bar;
 }
@@ -2066,69 +1947,17 @@ function sendTerminalInput(value: string): boolean {
   return true;
 }
 
-function focusPreferredTerminalInput(): void {
-  const composer = document.querySelector<HTMLTextAreaElement>(".terminal-composer-input");
-  if (composer) composer.focus();
-  else state.terminal?.focus();
-}
-
-function openTerminalTextPanel(): void {
+async function copyVisibleTerminalOutput(): Promise<void> {
   const terminal = state.terminal;
-  const page = document.querySelector<HTMLElement>(".terminal-page");
-  if (!terminal || !page) return;
-  if (page.querySelector(".terminal-text-overlay")) return;
-
-  const overlay = el("section", "terminal-text-overlay");
-  overlay.setAttribute("role", "dialog");
-  overlay.setAttribute("aria-modal", "true");
-  overlay.setAttribute("aria-label", "Terminal text and clipboard");
-  const panel = el("div", "terminal-text-panel");
-  const heading = el("div", "terminal-text-heading");
-  heading.append(el("h2", "terminal-text-title", "Terminal text & clipboard"));
-  const close = el("button", "terminal-text-close", "×");
-  close.type = "button";
-  close.setAttribute("aria-label", "Close text panel");
-  close.addEventListener("click", () => {
-    overlay.remove();
-    focusPreferredTerminalInput();
-  });
-  heading.append(close);
-
-  const copyLabel = el("label", "terminal-text-label", "Terminal history — select any exact text below");
-  const copyArea = el("textarea", "terminal-text-area terminal-copy-area");
-  copyArea.readOnly = true;
-  copyArea.spellcheck = false;
-  copyArea.value = terminalBufferText(terminal);
-  copyLabel.append(copyArea);
-  const copyStatus = el("p", "terminal-text-status", "Long-press inside the box for native iPhone selection handles.");
-  copyStatus.setAttribute("role", "status");
-  const copyActions = el("div", "terminal-text-actions");
-  const copySelection = el("button", "terminal-text-button", "Copy selection");
-  copySelection.type = "button";
-  copySelection.addEventListener("click", async () => {
-    const selected = copyArea.value.slice(copyArea.selectionStart, copyArea.selectionEnd);
-    if (!selected) {
-      copyStatus.textContent = "Select some text first, or use Copy visible screen.";
-      copyArea.focus();
-      return;
-    }
-    copyStatus.textContent = await copyToDeviceClipboard(selected, copyArea) ? "Selection copied." : "Use the iPhone Copy action above the selected text.";
-  });
-  const copyVisible = el("button", "terminal-text-button", "Copy visible screen");
-  copyVisible.type = "button";
-  copyVisible.addEventListener("click", async () => {
-    const visible = terminalVisibleText(terminal);
-    copyStatus.textContent = await copyToDeviceClipboard(visible, copyArea) ? "Visible terminal screen copied." : "Could not access the device clipboard.";
-  });
-  copyActions.append(copySelection, copyVisible);
-
-  panel.append(heading, copyLabel, copyStatus, copyActions);
-  overlay.append(panel);
-  overlay.addEventListener("click", (event) => {
-    if (event.target === overlay) close.click();
-  });
-  page.append(overlay);
-  copyArea.focus();
+  if (!terminal) return;
+  const copied = await copyToDeviceClipboard(terminalVisibleText(terminal));
+  const status = document.querySelector<HTMLElement>(".terminal-composer-state");
+  if (!status) return;
+  const message = copied ? "Screen copied" : "Hold terminal text to select";
+  status.textContent = message;
+  window.setTimeout(() => {
+    if (status.textContent === message) status.textContent = state.socket?.readyState === WebSocket.OPEN ? "Ready" : "Input unavailable";
+  }, 1800);
 }
 
 function terminalBufferText(terminal: Terminal, first = 0, last = terminal.buffer.active.length): string {
