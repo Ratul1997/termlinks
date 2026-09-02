@@ -56,6 +56,35 @@ type RawDesktopChannel = {
   close(): void;
 };
 
+type WindowSource = {
+  id: number;
+  title: string;
+  application: string;
+  bundleId?: string;
+  width: number;
+  height: number;
+};
+
+type WindowPermissions = {
+  supported: boolean;
+  screenRecording: boolean;
+  accessibility: boolean;
+};
+
+type WindowSourcesResponse = {
+  permissions: WindowPermissions;
+  sources: WindowSource[];
+  error?: string;
+};
+
+type WindowCallbacks = {
+  open: () => void;
+  frame: (data: Uint8Array, width: number, height: number) => void;
+  notice: (reason: string) => void;
+  close: (code: number, reason: string) => void;
+  error: () => void;
+};
+
 const state: {
   authenticated: boolean;
   sessions: Session[];
@@ -66,6 +95,7 @@ const state: {
   touchCleanup?: () => void;
   desktop?: RFB;
   desktopLink?: EncryptedDesktopLink;
+  windowLink?: EncryptedWindowLink;
   polling?: number;
   closedSessions: Set<string>;
 } = { authenticated: false, sessions: [], closedSessions: new Set() };
@@ -176,6 +206,50 @@ class EncryptedDesktopLink implements RawDesktopChannel {
   }
 }
 
+class EncryptedWindowLink {
+  readyState: number = WebSocket.CONNECTING;
+
+  constructor(readonly id: string, private readonly bridge: EncryptedBridge, private readonly callbacks: WindowCallbacks) {}
+
+  markOpen(): void {
+    if (this.readyState !== WebSocket.CONNECTING) return;
+    this.readyState = WebSocket.OPEN;
+    this.callbacks.open();
+  }
+
+  receive(data: Uint8Array, width: number, height: number): void {
+    if (this.readyState === WebSocket.OPEN) this.callbacks.frame(data, width, height);
+  }
+
+  notice(reason: string): void {
+    if (this.readyState === WebSocket.OPEN) this.callbacks.notice(reason);
+  }
+
+  remoteClose(code: number, reason: string): void {
+    if (this.readyState === WebSocket.CLOSED) return;
+    this.readyState = WebSocket.CLOSED;
+    this.callbacks.close(code, reason);
+  }
+
+  fail(): void {
+    if (this.readyState === WebSocket.CLOSED) return;
+    this.callbacks.error();
+    this.remoteClose(1011, "Encrypted selected-window stream failed");
+  }
+
+  send(value: Record<string, unknown>): void {
+    if (this.readyState !== WebSocket.OPEN) return;
+    void this.bridge.sendWindowInput(this.id, value).catch(() => this.fail());
+  }
+
+  close(): void {
+    if (this.readyState === WebSocket.CLOSED) return;
+    this.readyState = WebSocket.CLOSING;
+    void this.bridge.closeWindow(this.id);
+    this.readyState = WebSocket.CLOSED;
+  }
+}
+
 class EncryptedBridge {
   private socket?: WebSocket;
   private key?: CryptoKey;
@@ -187,6 +261,8 @@ class EncryptedBridge {
   private readonly requests = new Map<string, { resolve: (value: { status: number; body: string }) => void; reject: (error: Error) => void; timeout: number }>();
   private readonly terminals = new Map<string, EncryptedTerminalLink>();
   private readonly desktops = new Map<string, EncryptedDesktopLink>();
+  private readonly windows = new Map<string, EncryptedWindowLink>();
+  private readonly windowLists = new Map<string, { resolve: (value: WindowSourcesResponse) => void; reject: (error: Error) => void; timeout: number }>();
   private authResolve?: () => void;
   private authReject?: (error: Error) => void;
   private challenge = "";
@@ -250,6 +326,37 @@ class EncryptedBridge {
     return link;
   }
 
+  async listWindows(): Promise<WindowSourcesResponse> {
+    const id = crypto.randomUUID();
+    const response = new Promise<WindowSourcesResponse>((resolve, reject) => {
+      const timeout = window.setTimeout(() => {
+        this.windowLists.delete(id);
+        reject(new Error("Your Mac did not return its window list"));
+      }, 15_000);
+      this.windowLists.set(id, { resolve, reject, timeout });
+    });
+    await this.sendEncrypted({ v: 1, type: "window_sources_request", id });
+    return response;
+  }
+
+  openWindow(windowId: number, maxWidth: number, maxHeight: number, callbacks: WindowCallbacks): EncryptedWindowLink {
+    const link = new EncryptedWindowLink(crypto.randomUUID(), this, callbacks);
+    this.windows.set(link.id, link);
+    void this.sendEncrypted({ v: 1, type: "window_open", id: link.id, windowId, maxWidth, maxHeight }).catch(() => link.fail());
+    return link;
+  }
+
+  async sendWindowInput(id: string, value: Record<string, unknown>): Promise<void> {
+    await this.sendEncrypted({ v: 1, type: "window_input", id, ...value });
+  }
+
+  async closeWindow(id: string): Promise<void> {
+    this.windows.delete(id);
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      await this.sendEncrypted({ v: 1, type: "window_close", id, code: 1000, reason: "Viewer closed" });
+    }
+  }
+
   async sendDesktopData(id: string, data: string | ArrayBuffer | ArrayBufferView): Promise<void> {
     if (typeof data === "string") throw new Error("Remote desktop data must be binary");
     const bytes = data instanceof ArrayBuffer
@@ -309,6 +416,47 @@ class EncryptedBridge {
       return;
     }
     if (typeof value.id !== "string") throw new Error("Invalid encrypted stream response");
+    if (value.type === "window_sources") {
+      const pending = this.windowLists.get(value.id);
+      if (!pending) return;
+      if (!isRecord(value.permissions) || !Array.isArray(value.sources)) throw new Error("Invalid encrypted window list");
+      const sources = value.sources.filter(isWindowSource);
+      if (sources.length !== value.sources.length) throw new Error("Invalid encrypted window source");
+      window.clearTimeout(pending.timeout);
+      this.windowLists.delete(value.id);
+      pending.resolve({
+        permissions: {
+          supported: value.permissions.supported === true,
+          screenRecording: value.permissions.screenRecording === true,
+          accessibility: value.permissions.accessibility === true,
+        },
+        sources,
+        error: typeof value.error === "string" ? value.error : undefined,
+      });
+      return;
+    }
+    const windowLink = this.windows.get(value.id);
+    if (windowLink) {
+      if (value.type === "window_opened") {
+        windowLink.markOpen();
+        return;
+      }
+      if (value.type === "window_frame") {
+        if (typeof value.data !== "string" || typeof value.width !== "number" || typeof value.height !== "number") throw new Error("Invalid selected-window frame");
+        windowLink.receive(base64URLToBytes(value.data), value.width, value.height);
+        return;
+      }
+      if (value.type === "window_notice") {
+        windowLink.notice(typeof value.reason === "string" ? value.reason : "macOS rejected that input");
+        return;
+      }
+      if (value.type === "window_close") {
+        this.windows.delete(value.id);
+        windowLink.remoteClose(typeof value.code === "number" ? value.code : 1000, typeof value.reason === "string" ? value.reason : "Selected window closed");
+        return;
+      }
+      throw new Error("Unsupported selected-window message");
+    }
     const desktop = this.desktops.get(value.id);
     if (desktop) {
       if (value.type === "desktop_opened") {
@@ -379,6 +527,13 @@ class EncryptedBridge {
     this.terminals.clear();
     for (const desktop of this.desktops.values()) desktop.remoteClose(1012, error.message);
     this.desktops.clear();
+    for (const windowLink of this.windows.values()) windowLink.remoteClose(1012, error.message);
+    this.windows.clear();
+    for (const [id, pending] of this.windowLists) {
+      window.clearTimeout(pending.timeout);
+      pending.reject(error);
+      this.windowLists.delete(id);
+    }
     if (encryptedBridge === this && state.authenticated) {
       encryptedBridge = undefined;
       state.authenticated = false;
@@ -415,6 +570,16 @@ async function waitForBridge(socket: WebSocket): Promise<{ id: string }> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isWindowSource(value: unknown): value is WindowSource {
+  return isRecord(value)
+    && Number.isInteger(value.id) && (value.id as number) > 0
+    && typeof value.title === "string" && value.title.length > 0
+    && typeof value.application === "string" && value.application.length > 0
+    && typeof value.width === "number" && value.width > 0
+    && typeof value.height === "number" && value.height > 0
+    && (value.bundleId === undefined || typeof value.bundleId === "string");
 }
 
 function createInstallButton(): HTMLButtonElement {
@@ -665,7 +830,8 @@ function renderDesktop(): void {
   back.setAttribute("aria-label", "Back to sessions");
   back.addEventListener("click", renderSessions);
   const identity = el("div", "terminal-identity");
-  identity.append(el("strong", "terminal-name", "Remote desktop"), el("span", "terminal-subtitle", "Full Mac screen · E2E tunnel"));
+  const subtitle = el("span", "terminal-subtitle", "Choose a desktop or window · E2E");
+  identity.append(el("strong", "terminal-name", "Remote desktop"), subtitle);
   const fullscreen = el("button", "desktop-header-action", "Full screen");
   fullscreen.type = "button";
   fullscreen.addEventListener("click", async () => {
@@ -687,18 +853,40 @@ function renderDesktop(): void {
   const mount = el("div", "desktop-mount");
   mount.id = "remote-desktop";
   const empty = el("div", "desktop-waiting");
-  empty.append(el("span", "desktop-waiting-icon", "▣"), el("span", "desktop-waiting-copy", "Waiting for your Mac…"));
+  empty.append(el("span", "desktop-waiting-icon", "▣"), el("span", "desktop-waiting-copy", "Choose what you want to view"));
   mount.append(empty);
   frame.append(mount);
 
+  const sourcePicker = el("section", "desktop-source-picker");
+  const sourceCard = el("div", "desktop-source-card");
+  sourceCard.append(
+    el("h2", "desktop-source-title", "Choose what to share"),
+    el("p", "desktop-source-copy", "Use Screen Sharing for the complete Mac, or stream one selected window with macOS ScreenCaptureKit."),
+  );
+  const fullDesktop = el("button", "desktop-source-full", "▣  Full Mac desktop");
+  fullDesktop.type = "button";
+  const windowHeading = el("div", "desktop-window-heading");
+  windowHeading.append(el("strong", "desktop-window-label", "Open windows"));
+  const refreshWindows = el("button", "desktop-window-refresh", "Refresh");
+  refreshWindows.type = "button";
+  windowHeading.append(refreshWindows);
+  const permission = el("p", "desktop-permission", "Reading encrypted window list…");
+  const windowList = el("div", "desktop-window-list");
+  sourceCard.append(fullDesktop, windowHeading, permission, windowList);
+  sourcePicker.append(sourceCard);
+  frame.append(sourcePicker);
+
   const controls = el("div", "desktop-controls");
+  controls.hidden = true;
   const control = el("button", "desktop-control primary-control", "Enable control");
   control.type = "button";
   const keyboard = el("button", "desktop-control", "Keyboard");
   keyboard.type = "button";
   const clipboard = el("button", "desktop-control", "Clipboard");
   clipboard.type = "button";
-  controls.append(control, keyboard, clipboard);
+  const chooseSource = el("button", "desktop-control", "Sources");
+  chooseSource.type = "button";
+  controls.append(control, keyboard, clipboard, chooseSource);
 
   const typingPanel = el("section", "desktop-typing");
   typingPanel.hidden = true;
@@ -723,7 +911,13 @@ function renderDesktop(): void {
     const button = el("button", "desktop-key", label);
     button.type = "button";
     button.disabled = true;
-    button.addEventListener("click", () => state.desktop?.sendKey(keysym, code));
+    button.addEventListener("click", () => {
+      if (mode === "desktop") state.desktop?.sendKey(keysym, code);
+      else {
+        state.windowLink?.send({ kind: "key", code, down: true });
+        state.windowLink?.send({ kind: "key", code, down: false });
+      }
+    });
     keys.append(button);
   }
   typingPanel.append(typingForm, keys);
@@ -751,88 +945,172 @@ function renderDesktop(): void {
   app.append(page);
 
   let controlEnabled = false;
+  let mode: "none" | "desktop" | "window" = "none";
+  const setControls = (enabled: boolean): void => {
+    controlEnabled = enabled;
+    if (state.desktop) state.desktop.viewOnly = !enabled;
+    control.textContent = enabled ? "Control enabled" : "Enable control";
+    control.classList.toggle("enabled", enabled);
+    typingInput.disabled = !enabled;
+    sendText.disabled = !enabled;
+    for (const key of keys.querySelectorAll<HTMLButtonElement>("button")) key.disabled = !enabled;
+    setConnectionState(enabled ? "E2E · Live · touch and keyboard control enabled" : "E2E · Live · view only", "online");
+  };
   control.addEventListener("click", () => {
-    const rfb = state.desktop;
-    if (!rfb) return;
-    controlEnabled = !controlEnabled;
-    rfb.viewOnly = !controlEnabled;
-    control.textContent = controlEnabled ? "Control enabled" : "Enable control";
-    control.classList.toggle("enabled", controlEnabled);
-    typingInput.disabled = !controlEnabled;
-    sendText.disabled = !controlEnabled;
-    for (const key of keys.querySelectorAll<HTMLButtonElement>("button")) key.disabled = !controlEnabled;
-    setConnectionState(controlEnabled ? "E2E · Live · touch and keyboard control enabled" : "E2E · Live · view only", "online");
+    if (mode === "none") return;
+    setControls(!controlEnabled);
   });
   keyboard.addEventListener("click", () => {
     typingPanel.hidden = !typingPanel.hidden;
     if (!typingPanel.hidden) typingInput.focus();
   });
   clipboard.addEventListener("click", () => {
-    if (!controlEnabled || !state.desktop) {
+    if (!controlEnabled || mode === "none") {
       setConnectionState("Enable control before sending clipboard text", "warning");
       return;
     }
     const text = window.prompt("Text to copy into the Mac clipboard");
-    if (text !== null) state.desktop.clipboardPasteFrom(text);
+    if (text === null) return;
+    if (mode === "desktop") state.desktop?.clipboardPasteFrom(text);
+    else state.windowLink?.send({ kind: "clipboard", text });
   });
   typingForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    if (!controlEnabled || !state.desktop || !typingInput.value) return;
-    sendDesktopText(state.desktop, typingInput.value);
+    if (!controlEnabled || mode === "none" || !typingInput.value) return;
+    if (mode === "desktop" && state.desktop) sendDesktopText(state.desktop, typingInput.value);
+    else state.windowLink?.send({ kind: "text", text: typingInput.value });
     typingInput.value = "";
     typingInput.focus();
   });
 
-  const link = encryptedBridge.openDesktop();
-  state.desktopLink = link;
-  try {
-    const rfb = new RFB(mount, link, { shared: true });
-    state.desktop = rfb;
-    rfb.viewOnly = true;
-    rfb.scaleViewport = true;
-    rfb.resizeSession = false;
-    rfb.clipViewport = false;
-    rfb.qualityLevel = 6;
-    rfb.compressionLevel = 6;
-    rfb.addEventListener("connect", () => {
-      if (state.desktop !== rfb) return;
-      empty.remove();
-      credentials.hidden = true;
-      setConnectionState("E2E · Live · view only", "online");
+  const startFullDesktop = (): void => {
+    mode = "desktop";
+    sourcePicker.hidden = true;
+    controls.hidden = false;
+    subtitle.textContent = "Full Mac desktop · E2E VNC";
+    empty.querySelector<HTMLElement>(".desktop-waiting-copy")!.textContent = "Waiting for Mac Screen Sharing…";
+    setConnectionState("Opening encrypted full-desktop tunnel…", "connecting");
+    const link = encryptedBridge!.openDesktop();
+    state.desktopLink = link;
+    try {
+      const rfb = new RFB(mount, link, { shared: true });
+      state.desktop = rfb;
+      rfb.viewOnly = true;
+      rfb.scaleViewport = true;
+      rfb.resizeSession = false;
+      rfb.clipViewport = false;
+      rfb.qualityLevel = 6;
+      rfb.compressionLevel = 6;
+      rfb.addEventListener("connect", () => {
+        if (state.desktop !== rfb) return;
+        empty.remove();
+        credentials.hidden = true;
+        setControls(false);
+      });
+      rfb.addEventListener("credentialsrequired", (event) => {
+        if (state.desktop !== rfb) return;
+        const detail = (event as CustomEvent<{ types?: string[] }>).detail;
+        username.hidden = !detail?.types?.includes("username");
+        password.required = detail?.types?.includes("password") ?? true;
+        credentials.hidden = false;
+        setConnectionState("Mac authentication required", "warning");
+        (username.hidden ? password : username).focus();
+      });
+      rfb.addEventListener("securityfailure", (event) => {
+        const detail = (event as CustomEvent<{ reason?: string }>).detail;
+        password.value = "";
+        credentials.hidden = false;
+        setConnectionState(detail?.reason || "Screen Sharing rejected those credentials", "offline");
+      });
+      rfb.addEventListener("disconnect", (event) => {
+        if (state.desktop !== rfb) return;
+        const clean = (event as CustomEvent<{ clean?: boolean }>).detail?.clean;
+        setConnectionState(link.lastReason || (clean ? "Remote desktop closed" : "Remote desktop disconnected"), "offline");
+      });
+      credentialForm.addEventListener("submit", (event) => {
+        event.preventDefault();
+        credentialSubmit.disabled = true;
+        rfb.sendCredentials({ username: username.value, password: password.value });
+        password.value = "";
+        credentials.hidden = true;
+        credentialSubmit.disabled = false;
+        setConnectionState("Authenticating with your Mac…", "connecting");
+      });
+    } catch (caught) {
+      link.close();
+      setConnectionState(caught instanceof Error ? caught.message : "Could not start remote desktop", "offline");
+    }
+  };
+
+  const startWindow = (source: WindowSource): void => {
+    mode = "window";
+    sourcePicker.hidden = true;
+    controls.hidden = false;
+    subtitle.textContent = `${source.application} · ${source.title}`;
+    mount.replaceChildren();
+    const canvas = document.createElement("canvas");
+    canvas.className = "window-canvas";
+    canvas.tabIndex = 0;
+    canvas.setAttribute("aria-label", `Remote window: ${source.application}, ${source.title}`);
+    mount.append(canvas);
+    const renderer = createWindowRenderer(canvas);
+    setConnectionState("Opening encrypted selected-window stream…", "connecting");
+    const link = encryptedBridge!.openWindow(source.id, 1600, 1200, {
+      open: () => {
+        if (state.windowLink !== link) return;
+        setControls(false);
+        canvas.focus({ preventScroll: true });
+      },
+      frame: (data, width, height) => renderer.draw(data, width, height),
+      notice: (reason) => setConnectionState(reason, "warning"),
+      close: (_code, reason) => {
+        if (state.windowLink === link) setConnectionState(reason || "Selected window closed", "offline");
+      },
+      error: () => setConnectionState("Selected-window stream failed", "offline"),
     });
-    rfb.addEventListener("credentialsrequired", (event) => {
-      if (state.desktop !== rfb) return;
-      const detail = (event as CustomEvent<{ types?: string[] }>).detail;
-      username.hidden = !detail?.types?.includes("username");
-      password.required = detail?.types?.includes("password") ?? true;
-      credentials.hidden = false;
-      setConnectionState("Mac authentication required", "warning");
-      (username.hidden ? password : username).focus();
-    });
-    rfb.addEventListener("securityfailure", (event) => {
-      const detail = (event as CustomEvent<{ reason?: string }>).detail;
-      password.value = "";
-      credentials.hidden = false;
-      setConnectionState(detail?.reason || "Screen Sharing rejected those credentials", "offline");
-    });
-    rfb.addEventListener("disconnect", (event) => {
-      if (state.desktop !== rfb) return;
-      const clean = (event as CustomEvent<{ clean?: boolean }>).detail?.clean;
-      setConnectionState(link.lastReason || (clean ? "Remote desktop closed" : "Remote desktop disconnected"), "offline");
-    });
-    credentialForm.addEventListener("submit", (event) => {
-      event.preventDefault();
-      credentialSubmit.disabled = true;
-      rfb.sendCredentials({ username: username.value, password: password.value });
-      password.value = "";
-      credentials.hidden = true;
-      credentialSubmit.disabled = false;
-      setConnectionState("Authenticating with your Mac…", "connecting");
-    });
-  } catch (caught) {
-    link.close();
-    setConnectionState(caught instanceof Error ? caught.message : "Could not start remote desktop", "offline");
-  }
+    state.windowLink = link;
+    state.touchCleanup = installWindowInput(canvas, link, () => controlEnabled);
+  };
+
+  const loadWindows = async (): Promise<void> => {
+    refreshWindows.disabled = true;
+    permission.textContent = "Reading encrypted window list…";
+    windowList.replaceChildren();
+    try {
+      const response = await encryptedBridge!.listWindows();
+      if (!response.permissions.supported) {
+        permission.textContent = "Selected-window mode requires macOS 14 or newer.";
+        return;
+      }
+      if (!response.permissions.screenRecording) {
+        permission.textContent = "Screen Recording is not allowed. Run “termlinks desktop permissions” on the Mac, approve it, then restart the connector.";
+        return;
+      }
+      permission.textContent = response.permissions.accessibility
+        ? `${response.sources.length} windows available · viewing and control allowed`
+        : `${response.sources.length} windows available · viewing allowed; Accessibility permission is required for control`;
+      if (response.error) permission.textContent = response.error;
+      if (response.sources.length === 0 && !response.error) permission.textContent = "No shareable on-screen windows found.";
+      for (const source of response.sources) {
+        const button = el("button", "desktop-window-item");
+        button.type = "button";
+        const copy = el("span", "desktop-window-copy");
+        copy.append(el("strong", "desktop-window-app", source.application), el("span", "desktop-window-title", source.title));
+        button.append(copy, el("span", "desktop-window-size", `${source.width}×${source.height}`));
+        button.addEventListener("click", () => startWindow(source));
+        windowList.append(button);
+      }
+    } catch (caught) {
+      permission.textContent = caught instanceof Error ? caught.message : "Could not read the Mac window list";
+    } finally {
+      refreshWindows.disabled = false;
+    }
+  };
+
+  fullDesktop.addEventListener("click", startFullDesktop);
+  refreshWindows.addEventListener("click", () => { void loadWindows(); });
+  chooseSource.addEventListener("click", renderDesktop);
+  void loadWindows();
 }
 
 function sendDesktopText(rfb: RFB, text: string): void {
@@ -842,6 +1120,123 @@ function sendDesktopText(rfb: RFB, text: string): void {
     const keysym = codePoint <= 0xff ? codePoint : 0x01000000 | codePoint;
     rfb.sendKey(keysym, null);
   }
+}
+
+function createWindowRenderer(canvas: HTMLCanvasElement): { draw: (data: Uint8Array, width: number, height: number) => void } {
+  const context = canvas.getContext("2d", { alpha: false });
+  let drawing = false;
+  let pending: { data: Uint8Array; width: number; height: number } | undefined;
+
+  const renderNext = async (): Promise<void> => {
+    if (!context || drawing || !pending) return;
+    drawing = true;
+    const frame = pending;
+    pending = undefined;
+    try {
+      const bitmap = await createImageBitmap(new Blob([frame.data], { type: "image/jpeg" }));
+      if (canvas.width !== frame.width || canvas.height !== frame.height) {
+        canvas.width = frame.width;
+        canvas.height = frame.height;
+      }
+      context.drawImage(bitmap, 0, 0, frame.width, frame.height);
+      bitmap.close();
+    } catch {
+      setConnectionState("Could not decode a selected-window frame", "warning");
+    } finally {
+      drawing = false;
+      if (pending) void renderNext();
+    }
+  };
+
+  return {
+    draw: (data, width, height) => {
+      pending = { data, width, height };
+      void renderNext();
+    },
+  };
+}
+
+function installWindowInput(canvas: HTMLCanvasElement, link: EncryptedWindowLink, controlEnabled: () => boolean): () => void {
+  const normalized = (event: PointerEvent): { x: number; y: number } => {
+    const bounds = canvas.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(1, (event.clientX - bounds.left) / Math.max(1, bounds.width))),
+      y: Math.max(0, Math.min(1, (event.clientY - bounds.top) / Math.max(1, bounds.height))),
+    };
+  };
+  const pointerButton = (event: PointerEvent): number => event.button === 2 ? 2 : event.button === 1 ? 1 : 0;
+  let pendingMove: PointerEvent | undefined;
+  let animationFrame = 0;
+
+  const flushMove = (): void => {
+    animationFrame = 0;
+    const event = pendingMove;
+    pendingMove = undefined;
+    if (!event || !controlEnabled()) return;
+    const point = normalized(event);
+    link.send({ kind: "pointer", action: event.buttons ? "drag" : "move", ...point, button: event.buttons & 2 ? 2 : event.buttons & 4 ? 1 : 0 });
+  };
+  const onPointerDown = (event: PointerEvent): void => {
+    if (!controlEnabled()) return;
+    event.preventDefault();
+    canvas.focus({ preventScroll: true });
+    canvas.setPointerCapture(event.pointerId);
+    link.send({ kind: "pointer", action: "down", ...normalized(event), button: pointerButton(event) });
+  };
+  const onPointerMove = (event: PointerEvent): void => {
+    if (!controlEnabled()) return;
+    event.preventDefault();
+    pendingMove = event;
+    if (!animationFrame) animationFrame = requestAnimationFrame(flushMove);
+  };
+  const onPointerUp = (event: PointerEvent): void => {
+    if (!controlEnabled()) return;
+    event.preventDefault();
+    link.send({ kind: "pointer", action: "up", ...normalized(event), button: pointerButton(event) });
+    if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+  };
+  const onWheel = (event: WheelEvent): void => {
+    if (!controlEnabled()) return;
+    event.preventDefault();
+    const bounds = canvas.getBoundingClientRect();
+    link.send({
+      kind: "pointer",
+      action: "scroll",
+      x: Math.max(0, Math.min(1, (event.clientX - bounds.left) / Math.max(1, bounds.width))),
+      y: Math.max(0, Math.min(1, (event.clientY - bounds.top) / Math.max(1, bounds.height))),
+      button: 0,
+      deltaX: Math.max(-4000, Math.min(4000, event.deltaX)),
+      deltaY: Math.max(-4000, Math.min(4000, event.deltaY)),
+    });
+  };
+  const onKey = (event: KeyboardEvent): void => {
+    if (!controlEnabled() || event.isComposing || !event.code) return;
+    event.preventDefault();
+    link.send({ kind: "key", code: event.code, down: event.type === "keydown", shift: event.shiftKey, ctrl: event.ctrlKey, alt: event.altKey, meta: event.metaKey });
+  };
+  const preventMenu = (event: Event): void => {
+    if (controlEnabled()) event.preventDefault();
+  };
+
+  canvas.addEventListener("pointerdown", onPointerDown);
+  canvas.addEventListener("pointermove", onPointerMove);
+  canvas.addEventListener("pointerup", onPointerUp);
+  canvas.addEventListener("pointercancel", onPointerUp);
+  canvas.addEventListener("wheel", onWheel, { passive: false });
+  canvas.addEventListener("keydown", onKey);
+  canvas.addEventListener("keyup", onKey);
+  canvas.addEventListener("contextmenu", preventMenu);
+  return () => {
+    if (animationFrame) cancelAnimationFrame(animationFrame);
+    canvas.removeEventListener("pointerdown", onPointerDown);
+    canvas.removeEventListener("pointermove", onPointerMove);
+    canvas.removeEventListener("pointerup", onPointerUp);
+    canvas.removeEventListener("pointercancel", onPointerUp);
+    canvas.removeEventListener("wheel", onWheel);
+    canvas.removeEventListener("keydown", onKey);
+    canvas.removeEventListener("keyup", onKey);
+    canvas.removeEventListener("contextmenu", preventMenu);
+  };
 }
 
 function renderCreatePanel(close: () => void): HTMLElement {
@@ -1465,6 +1860,8 @@ function closeConnection(): void {
   state.desktop = undefined;
   state.desktopLink?.close();
   state.desktopLink = undefined;
+  state.windowLink?.close();
+  state.windowLink = undefined;
   if (state.socket) {
     state.socket.close();
   }

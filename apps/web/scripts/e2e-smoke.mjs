@@ -9,6 +9,10 @@ let expectedOutput = input;
 const createShell = process.env.TERMLINKS_E2E_CREATE_SHELL === "1";
 const testDesktopDisabled = process.env.TERMLINKS_E2E_DESKTOP_DISABLED === "1";
 const testDesktopBridge = process.env.TERMLINKS_E2E_DESKTOP_BRIDGE === "1";
+const testWindowCapture = process.env.TERMLINKS_E2E_WINDOW_CAPTURE === "1";
+const wantedWindow = process.env.TERMLINKS_E2E_WINDOW_MATCH || "";
+const windowText = process.env.TERMLINKS_E2E_WINDOW_TEXT || "";
+const saveWindowText = process.env.TERMLINKS_E2E_WINDOW_SAVE === "1";
 
 if (!portal.startsWith("https://") || token.length < 32) {
   throw new Error("Set TERMLINKS_E2E_PORTAL and TERMLINKS_E2E_TOKEN");
@@ -136,7 +140,45 @@ if (testDesktopBridge) {
     id: desktopID,
     data: bytesToBase64URL(new TextEncoder().encode("RFB 003.008\n")),
   });
+  await sendEncrypted({ v: 1, type: "desktop_close", id: desktopID, code: 1000, reason: "Smoke test complete" });
   desktopBridge = true;
+}
+let windowCapture = false;
+if (testWindowCapture) {
+  const listID = crypto.randomUUID();
+  await sendEncrypted({ v: 1, type: "window_sources_request", id: listID });
+  let listed;
+  do {
+    listed = await receiveEncrypted();
+  } while (listed.id !== listID);
+  if (listed.type !== "window_sources" || listed.error || !listed.permissions?.screenRecording || !Array.isArray(listed.sources) || listed.sources.length === 0) {
+    throw new Error(`Selected-window list failed: ${listed.error || "no permitted sources"}`);
+  }
+  const source = wantedWindow
+    ? listed.sources.find((item) => `${item.application} ${item.title}`.toLowerCase().includes(wantedWindow.toLowerCase()))
+    : listed.sources[0];
+  if (!source) throw new Error(`Selected-window source did not match: ${wantedWindow}`);
+  const windowID = crypto.randomUUID();
+  await sendEncrypted({ v: 1, type: "window_open", id: windowID, windowId: source.id, maxWidth: 960, maxHeight: 720 });
+  let windowOpened = false;
+  let frame;
+  while (!windowOpened || !frame) {
+    const windowResponse = await receiveEncrypted();
+    if (windowResponse.id !== windowID) continue;
+    if (windowResponse.type === "window_close") throw new Error(`Selected window closed during capture test: ${windowResponse.reason || "unknown reason"}`);
+    if (windowResponse.type === "window_opened") windowOpened = true;
+    if (windowResponse.type === "window_frame") frame = base64URLToBytes(windowResponse.data);
+  }
+  if (frame.length < 4 || frame[0] !== 0xff || frame[1] !== 0xd8 || frame[2] !== 0xff) throw new Error("Selected-window stream returned an invalid JPEG frame");
+  if (windowText) {
+    await sendEncrypted({ v: 1, type: "window_input", id: windowID, kind: "text", text: windowText });
+    if (saveWindowText) {
+      await sendEncrypted({ v: 1, type: "window_input", id: windowID, kind: "key", code: "KeyS", down: true, meta: true });
+      await sendEncrypted({ v: 1, type: "window_input", id: windowID, kind: "key", code: "KeyS", down: false, meta: true });
+    }
+  }
+  await sendEncrypted({ v: 1, type: "window_close", id: windowID, code: 1000, reason: "Smoke test complete" });
+  windowCapture = true;
 }
 let session = wantedSession ? sessions.find((item) => item.name === wantedSession) : sessions[0];
 if (createShell) {
@@ -204,7 +246,7 @@ if (createShell) {
   }
 }
 socket.close(1000, "Smoke test complete");
-console.log(JSON.stringify({ authenticated: true, sessions: sessions.length, terminalOutput: true, keyboardInput: Boolean(input), interactiveShell: createShell, desktopDenied, desktopBridge, encryption: "AES-256-GCM e2e-v1" }));
+console.log(JSON.stringify({ authenticated: true, sessions: sessions.length, terminalOutput: true, keyboardInput: Boolean(input), interactiveShell: createShell, desktopDenied, desktopBridge, windowCapture, encryption: "AES-256-GCM e2e-v1" }));
 // Node's built-in WebSocket can retain the Cloudflare close handshake handle
 // after the protocol assertions have completed successfully.
 setTimeout(() => process.exit(0), 50);

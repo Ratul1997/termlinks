@@ -1,6 +1,6 @@
 # Termlinks
 
-Termlinks keeps terminal work running on your computer and lets you view and control it from a phone browser. It is command-agnostic: Codex, Claude, development servers, import scripts, shells, and other terminal programs all use the same PTY bridge. It can also carry an opt-in full Mac desktop through the encrypted portal.
+Termlinks keeps terminal work running on your computer and lets you view and control it from a phone browser. It is command-agnostic: Codex, Claude, development servers, import scripts, shells, and other terminal programs all use the same PTY bridge. It can also carry an opt-in full Mac desktop or one selected macOS window through the encrypted portal.
 
 This first version is for one person and supports macOS and Linux. It controls sessions started through Termlinks; it does not take over unrelated Terminal/iTerm windows.
 
@@ -98,6 +98,8 @@ Control the optional remote desktop tunnel:
 ```sh
 termlinks desktop enable
 termlinks desktop status
+termlinks desktop permissions
+termlinks desktop windows
 termlinks desktop disable
 ```
 
@@ -145,9 +147,50 @@ If the computer sleeps, shuts down, loses internet access, or runs `termlinks cl
 
 ## Remote desktop (macOS-first)
 
-Remote desktop is disabled by default. It has two independent switches: macOS **Screen Sharing** produces the desktop framebuffer, and the Termlinks desktop tunnel carries it through the encrypted portal. Both must be enabled locally on the Mac.
+Remote desktop is disabled by default. Termlinks 0.4 offers two source modes in the portal:
 
-### 1. Enable macOS Screen Sharing
+- **Full Mac desktop** uses macOS Screen Sharing/VNC and shows the complete framebuffer.
+- **Selected window** uses Apple's ScreenCaptureKit to show a live list of on-screen application windows and streams only the one you choose. Screen Sharing does not need to be enabled for this mode.
+
+Both modes use the same locally enabled, end-to-end encrypted Termlinks tunnel.
+
+### 1. Enable the Termlinks tunnel
+
+```sh
+termlinks desktop enable --address 127.0.0.1:5900
+termlinks desktop status
+termlinks cloud status
+```
+
+The expected status is `Tunnel: enabled`. `termlinks desktop status` reports the full-desktop VNC server and the selected-window permission state independently.
+
+### 2. Configure selected-window viewing and control
+
+Selected-window mode requires macOS 14 or newer. Run this locally once:
+
+```sh
+termlinks desktop permissions
+```
+
+Approve **Screen & System Audio Recording** to view selected windows and **Accessibility** to control them. Restart only the connector after changing either permission:
+
+```sh
+termlinks cloud stop
+termlinks cloud start
+termlinks desktop status
+```
+
+You can verify exactly what the portal will offer without opening it:
+
+```sh
+termlinks desktop windows
+```
+
+The command prints each shareable window's ID, application, dimensions, and title. The same list appears under **Remote desktop → Open windows** in the portal. Tap **Refresh** after opening, closing, minimizing, or renaming a window. Selecting a window starts an independent capture of only that window; other desktop content is not included. The window must be on screen when the list is loaded.
+
+Viewing requires Screen Recording permission. **Enable control** additionally requires Accessibility permission and lets Termlinks raise the real window and send pointer, scrolling, keyboard, text, shortcut, and clipboard input to the Mac. These actions affect the actual local application, not a copy.
+
+### 3. Configure the full Mac desktop
 
 The recommended method is **System Settings → General → Sharing → Screen Sharing**. Open its details, restrict access to only the intended macOS users, and configure strong credentials. Apple documents the current controls in its [Screen Sharing setup guide](https://support.apple.com/guide/mac-help/turn-screen-sharing-on-or-off-mh11848/mac).
 
@@ -157,32 +200,23 @@ Alternatively, this command opens the native macOS administrator-authorization d
 osascript -e 'do shell script "/bin/launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist" with administrator privileges'
 ```
 
-The password is entered into the macOS dialog; Termlinks does not receive it. Review the allowed users afterward in System Settings. If ordinary macOS account authentication does not work with the browser viewer, configure the VNC-viewer password option shown by macOS and use a strong, unique password.
+The password is entered into the macOS dialog; Termlinks does not receive it. Review the allowed users afterward in System Settings. If ordinary macOS account authentication does not work with the browser viewer, configure the VNC-viewer password option shown by macOS and use a strong, unique password. The expected full-desktop status is `VNC server: reachable`.
 
-### 2. Enable the Termlinks tunnel
-
-```sh
-termlinks desktop enable --address 127.0.0.1:5900
-termlinks desktop status
-termlinks cloud status
-```
-
-The expected desktop status is `Tunnel: enabled` and `VNC server: reachable`. The cloud status should say the connector is running and the computer is online.
-
-### 3. Connect from the portal
+### 4. Connect from the portal
 
 1. Open **https://termlinks.pages.dev**, enter the portal token, and select **Remote desktop**.
-2. Enter the credentials requested by the Mac. They are used for that connection and are not written to Termlinks configuration or browser storage.
-3. The page starts in view-only mode. Tap **Enable control** before sending touch, mouse, or keyboard input.
-4. Use the toolbar for fullscreen, scaling, special keys, the mobile keyboard, and clipboard text sent to the Mac.
+2. Choose **Full Mac desktop** or choose an entry from the encrypted **Open windows** list.
+3. Full-desktop mode asks for Screen Sharing credentials; selected-window mode relies on the Mac's local privacy permissions and does not request a VNC password.
+4. The page starts in view-only mode. Tap **Enable control** before sending touch, mouse, or keyboard input.
+5. Use the toolbar for fullscreen, scaling, special keys, the mobile keyboard, and clipboard text sent to the Mac.
 
 The default target is `127.0.0.1:5900`. A different local VNC server can be selected with `termlinks desktop enable --address 127.0.0.1:<port>`. Non-loopback targets are rejected. The VNC password is entered into the browser only when requested and is never written to Termlinks configuration or browser storage.
 
 The viewer supports full-viewport scaling, fullscreen where the browser permits it, touch gestures, mouse input, hardware keyboards, an on-screen text/special-key panel, and clipboard text sent to the Mac. On iPhone/iPad, installing the PWA from **Share → Add to Home Screen** gives the largest persistent app view.
 
-The remote desktop is a video-like canvas of pixels, so its displayed text cannot be selected as normal webpage text. Select text inside the remote Mac application and use the remote clipboard controls where supported. This is separate from managed terminal pages, whose **Select text** panel provides reliable browser/PWA copying of retained terminal output.
+The remote desktop and selected-window views are video-like canvases of pixels, so their displayed text cannot be selected as normal webpage text. Select text inside the remote Mac application and use the remote clipboard controls where supported. This is separate from managed terminal pages, whose **Select text** panel provides reliable browser/PWA copying of retained terminal output.
 
-This version tunnels the framebuffer exposed by the local VNC server. It does not yet provide a Termlinks-native picker for one physical monitor or one application window. Which display layout is exposed depends on the local Screen Sharing/VNC server.
+The selected-window picker lists individual on-screen application windows. It does not currently offer a separate physical-display picker, capture minimized windows, capture menus or transient popovers as separate sources, or control a window without bringing it into the real Mac's active UI. Full-desktop display layout still depends on the local Screen Sharing/VNC server.
 
 ### Disable or revoke remote desktop
 
@@ -200,10 +234,15 @@ To also turn off the macOS Screen Sharing service, use System Settings or run:
 osascript -e 'do shell script "/bin/launchctl unload -w /System/Library/LaunchDaemons/com.apple.screensharing.plist" with administrator privileges'
 ```
 
+Selected-window access also stops immediately when `termlinks desktop disable` disconnects the tunnel. To revoke its local OS permissions too, turn Termlinks off under **System Settings → Privacy & Security → Screen & System Audio Recording** and **Accessibility**.
+
 ### Remote desktop troubleshooting
 
 - **Tunnel disabled:** run `termlinks desktop enable --address 127.0.0.1:5900`.
 - **VNC server unreachable:** enable macOS Screen Sharing, then check the local port with `nc -z 127.0.0.1 5900` and rerun `termlinks desktop status`.
+- **Window list says permission is missing:** run `termlinks desktop permissions`, approve Termlinks under **System Settings → Privacy & Security → Screen & System Audio Recording**, then restart the connector.
+- **Window is visible but cannot be controlled:** allow Termlinks under **System Settings → Privacy & Security → Accessibility**, then restart the connector and explicitly tap **Enable control** in the portal.
+- **Window is missing from the list:** make sure it is open, on screen, not minimized, and has a normal title, then tap **Refresh**.
 - **Computer offline:** run `termlinks cloud start` and check `termlinks cloud status`. The connector is outbound-only; do not open or forward port 5900 on the router.
 - **PWA appears outdated:** fully close and reopen it. If necessary, reload `https://termlinks.pages.dev` in the browser or remove and add the Home Screen app again.
 - **Connection stops while away:** the Mac must remain powered on, awake, and online. Terminal processes and desktop access are unavailable while it sleeps.
@@ -214,6 +253,8 @@ osascript -e 'do shell script "/bin/launchctl unload -w /System/Library/LaunchDa
 - Termlinks restricts its VNC destination to a loopback address, but enabling macOS Screen Sharing can also expose the service to the Mac's local network. Restrict allowed macOS users, use strong credentials, keep the firewall enabled, and disable Screen Sharing when it is not needed.
 - The portal token derives the AES-256-GCM bridge key in the browser. Cloudflare carries encrypted terminal and desktop payloads and cannot read their contents, although normal connection metadata remains visible.
 - VNC credentials are supplied directly to the in-browser VNC client for the live connection. Termlinks does not save them.
+- Selected-window titles, application names, captured frames, and control events are encrypted inside the same bridge. Cloudflare receives ciphertext, sizes, timing, and ordinary connection metadata only.
+- macOS Screen Recording and Accessibility permissions apply to the installed Termlinks executable. Replacing it with an unsigned/differently signed build may require approval again; official local builds use the stable `dev.termlinks.cli` ad-hoc identifier.
 - View-only mode prevents accidental input in the UI; it is a safety control, not an authentication boundary.
 
 ### Private-network alternative
@@ -244,7 +285,7 @@ termlinks CLI ──┴─ Unix socket ─► daemon ├─ WebSocket ─► pho
 
 For public phone access, the browser derives an AES-256-GCM key from the portal token and opens one encrypted bridge through `termlinks.pages.dev`. Pages and the Worker relay only ciphertext; the local connector decrypts approved requests and terminal data, then talks to `127.0.0.1:8787`. The portal token itself never crosses the network, and the local port is never publicly bound.
 
-Remote desktop uses the same bridge. Browser-side noVNC speaks the RFB/VNC protocol through an in-memory WebSocket-like channel; Termlinks encrypts each byte chunk and the connector forwards it only to the configured loopback VNC address. There is no public VNC port or generic TCP proxy.
+Remote desktop uses the same bridge. For a full desktop, browser-side noVNC speaks RFB/VNC through an in-memory WebSocket-like channel; Termlinks encrypts each byte chunk and the connector forwards it only to the configured loopback VNC address. For a selected window, the connector asks macOS ScreenCaptureKit for encrypted source metadata and bounded JPEG frames, then accepts only validated pointer, key, text, and clipboard messages. There is no public VNC port or generic TCP proxy.
 
 1. `termlinks <command>` asks the local daemon to create a real pseudo-terminal (PTY).
    The authenticated portal can also request a new interactive shell; it cannot submit a hidden one-shot command or custom environment.
@@ -280,7 +321,7 @@ See [docs/cloudflare.md](docs/cloudflare.md) for deployment, connector-secret ro
 
 - Only sessions managed by Termlinks can be opened. Launch them with `termlinks …` or create an interactive shell from the portal; unrelated Terminal/iTerm windows cannot be attached after the fact because their PTYs belong to another process.
 - Remote desktop is an explicitly enabled, macOS-first subsystem. The terminal features remain usable without it.
-- The current desktop viewer shows the framebuffer supplied by the VNC server; native per-monitor and per-window selection are not implemented yet.
+- The portal supports the complete VNC framebuffer or one selected on-screen macOS window. A separate physical-display picker and minimized-window capture are not implemented yet.
 - Sessions live in daemon memory and do not survive a daemon or computer restart.
 - An authenticated browser can create a normal interactive shell, then type arbitrary commands into it. Treat the portal token as full access to your operating-system user account.
 - This personal version uses one shared portal identity. It does not yet provide per-person accounts, per-session permissions, or an audit trail.

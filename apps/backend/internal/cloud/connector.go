@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -27,6 +28,7 @@ import (
 	"termlinks/backend/internal/client"
 	"termlinks/backend/internal/config"
 	"termlinks/backend/internal/remote"
+	"termlinks/backend/internal/windowcapture"
 )
 
 const (
@@ -40,6 +42,8 @@ const (
 	maxTerminalInput   = 64 << 10
 	maxTerminalOutput  = 2 << 20
 	maxDesktopInput    = 256 << 10
+	maxWindowFrame     = 2 << 20
+	maxWindowText      = 16 << 10
 	desktopReadBuffer  = 64 << 10
 	authenticateWithin = 15 * time.Second
 )
@@ -156,6 +160,73 @@ type desktopCloseMessage struct {
 	Reason  string `json:"reason,omitempty"`
 }
 
+type windowSourcesRequestMessage struct {
+	Version int    `json:"v"`
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+}
+
+type windowSourcesMessage struct {
+	Version     int                       `json:"v"`
+	Type        string                    `json:"type"`
+	ID          string                    `json:"id"`
+	Permissions windowcapture.Permissions `json:"permissions"`
+	Sources     []windowcapture.Source    `json:"sources"`
+	Error       string                    `json:"error,omitempty"`
+}
+
+type windowOpenMessage struct {
+	Version   int    `json:"v"`
+	Type      string `json:"type"`
+	ID        string `json:"id"`
+	WindowID  uint32 `json:"windowId"`
+	MaxWidth  int    `json:"maxWidth"`
+	MaxHeight int    `json:"maxHeight"`
+}
+
+type windowOpenedMessage struct {
+	Version int    `json:"v"`
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+}
+
+type windowFrameMessage struct {
+	Version int    `json:"v"`
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+	Width   int    `json:"width"`
+	Height  int    `json:"height"`
+	Data    string `json:"data"`
+}
+
+type windowInputMessage struct {
+	Version int     `json:"v"`
+	Type    string  `json:"type"`
+	ID      string  `json:"id"`
+	Kind    string  `json:"kind"`
+	Action  string  `json:"action,omitempty"`
+	X       float64 `json:"x,omitempty"`
+	Y       float64 `json:"y,omitempty"`
+	Button  int     `json:"button,omitempty"`
+	DeltaX  float64 `json:"deltaX,omitempty"`
+	DeltaY  float64 `json:"deltaY,omitempty"`
+	Code    string  `json:"code,omitempty"`
+	Down    bool    `json:"down,omitempty"`
+	Shift   bool    `json:"shift,omitempty"`
+	Ctrl    bool    `json:"ctrl,omitempty"`
+	Alt     bool    `json:"alt,omitempty"`
+	Meta    bool    `json:"meta,omitempty"`
+	Text    string  `json:"text,omitempty"`
+}
+
+type windowCloseMessage struct {
+	Version int    `json:"v"`
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+	Code    int    `json:"code,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+}
+
 type localSocket struct {
 	connection *websocket.Conn
 	writeMu    sync.Mutex
@@ -166,6 +237,12 @@ type desktopSocket struct {
 	writeMu    sync.Mutex
 }
 
+type windowSocket struct {
+	capture *windowcapture.Capture
+	cancel  context.CancelFunc
+	mu      sync.Mutex
+}
+
 type browserChannel struct {
 	mu            sync.Mutex
 	sendMu        sync.Mutex
@@ -173,6 +250,7 @@ type browserChannel struct {
 	httpClient    *http.Client
 	sockets       map[string]*localSocket
 	desktops      map[string]*desktopSocket
+	windows       map[string]*windowSocket
 	authTimer     *time.Timer
 	receiveSeq    uint32
 	sendSeq       uint32
@@ -380,6 +458,7 @@ func (state *connectionState) openChannel(id string) {
 		httpClient: &http.Client{Jar: jar, Timeout: 12 * time.Second},
 		sockets:    make(map[string]*localSocket),
 		desktops:   make(map[string]*desktopSocket),
+		windows:    make(map[string]*windowSocket),
 	}
 	channel.authTimer = time.AfterFunc(authenticateWithin, func() {
 		channel.mu.Lock()
@@ -489,6 +568,34 @@ func (state *connectionState) handleEncrypted(channelID, packet string) {
 			return
 		}
 		state.closeDesktop(channel, message.ID)
+	case "window_sources_request":
+		var message windowSourcesRequestMessage
+		if json.Unmarshal(plaintext, &message) != nil || !validMessageID(message.ID) {
+			state.closeChannel(channelID, websocket.CloseUnsupportedData, "Invalid window-list request", true)
+			return
+		}
+		go state.listWindows(channelID, message)
+	case "window_open":
+		var message windowOpenMessage
+		if json.Unmarshal(plaintext, &message) != nil || !validMessageID(message.ID) || message.WindowID == 0 || message.MaxWidth < 320 || message.MaxWidth > 2560 || message.MaxHeight < 240 || message.MaxHeight > 1800 {
+			state.closeChannel(channelID, websocket.CloseUnsupportedData, "Invalid selected-window request", true)
+			return
+		}
+		go state.openWindow(channelID, channel, message)
+	case "window_input":
+		var message windowInputMessage
+		if json.Unmarshal(plaintext, &message) != nil || !validMessageID(message.ID) || !validWindowInput(message) {
+			state.closeChannel(channelID, websocket.CloseUnsupportedData, "Invalid selected-window input", true)
+			return
+		}
+		state.writeWindow(channelID, channel, message)
+	case "window_close":
+		var message windowCloseMessage
+		if json.Unmarshal(plaintext, &message) != nil || !validMessageID(message.ID) {
+			state.closeChannel(channelID, websocket.CloseUnsupportedData, "Invalid selected-window close", true)
+			return
+		}
+		state.closeWindow(channel, message.ID)
 	default:
 		state.closeChannel(channelID, websocket.CloseUnsupportedData, "Unsupported encrypted message", true)
 	}
@@ -504,7 +611,7 @@ func (state *connectionState) openDesktop(channelID string, channel *browserChan
 		return
 	}
 	channel.mu.Lock()
-	if len(channel.desktops) != 0 {
+	if len(channel.desktops) != 0 || len(channel.windows) != 0 {
 		channel.mu.Unlock()
 		_ = state.sendEncrypted(channelID, desktopCloseMessage{Version: protocolVersion, Type: "desktop_close", ID: message.ID, Code: websocket.ClosePolicyViolation, Reason: "A remote desktop is already open in this portal connection"})
 		return
@@ -519,7 +626,7 @@ func (state *connectionState) openDesktop(channelID string, channel *browserChan
 	}
 	socket := &desktopSocket{connection: connection}
 	channel.mu.Lock()
-	if len(channel.desktops) != 0 {
+	if len(channel.desktops) != 0 || len(channel.windows) != 0 {
 		channel.mu.Unlock()
 		_ = connection.Close()
 		_ = state.sendEncrypted(channelID, desktopCloseMessage{Version: protocolVersion, Type: "desktop_close", ID: message.ID, Code: websocket.ClosePolicyViolation, Reason: "A remote desktop is already open in this portal connection"})
@@ -532,6 +639,149 @@ func (state *connectionState) openDesktop(channelID string, channel *browserChan
 		return
 	}
 	go state.readDesktop(channelID, channel, message.ID, socket)
+}
+
+func (state *connectionState) listWindows(channelID string, message windowSourcesRequestMessage) {
+	response := windowSourcesMessage{
+		Version:     protocolVersion,
+		Type:        "window_sources",
+		ID:          message.ID,
+		Permissions: windowcapture.PermissionStatus(),
+		Sources:     []windowcapture.Source{},
+	}
+	if !state.desktopEnabled {
+		response.Error = "Remote desktop is disabled on this computer"
+		_ = state.sendEncrypted(channelID, response)
+		return
+	}
+	sources, err := windowcapture.List()
+	response.Permissions = windowcapture.PermissionStatus()
+	if err != nil {
+		response.Error = boundedReason(err.Error())
+	} else {
+		response.Sources = sources
+	}
+	_ = state.sendEncrypted(channelID, response)
+}
+
+func (state *connectionState) openWindow(channelID string, channel *browserChannel, message windowOpenMessage) {
+	closeWith := func(code int, reason string) {
+		_ = state.sendEncrypted(channelID, windowCloseMessage{Version: protocolVersion, Type: "window_close", ID: message.ID, Code: code, Reason: boundedReason(reason)})
+	}
+	if !state.desktopEnabled {
+		closeWith(websocket.ClosePolicyViolation, "Remote desktop is disabled on this computer")
+		return
+	}
+	permissions := windowcapture.PermissionStatus()
+	if !permissions.Supported {
+		closeWith(websocket.ClosePolicyViolation, windowcapture.ErrUnsupported.Error())
+		return
+	}
+	if !permissions.ScreenRecording {
+		closeWith(websocket.ClosePolicyViolation, "Screen Recording permission is required; run termlinks desktop permissions locally")
+		return
+	}
+	channel.mu.Lock()
+	if len(channel.desktops) != 0 || len(channel.windows) != 0 {
+		channel.mu.Unlock()
+		closeWith(websocket.ClosePolicyViolation, "Another remote view is already open in this portal connection")
+		return
+	}
+	channel.mu.Unlock()
+
+	capture, err := windowcapture.Open(message.WindowID, message.MaxWidth, message.MaxHeight)
+	if err != nil {
+		closeWith(websocket.CloseTryAgainLater, err.Error())
+		return
+	}
+	captureContext, cancel := context.WithCancel(state.ctx)
+	socket := &windowSocket{capture: capture, cancel: cancel}
+	channel.mu.Lock()
+	if len(channel.desktops) != 0 || len(channel.windows) != 0 {
+		channel.mu.Unlock()
+		cancel()
+		capture.Close()
+		closeWith(websocket.ClosePolicyViolation, "Another remote view is already open in this portal connection")
+		return
+	}
+	channel.windows[message.ID] = socket
+	channel.mu.Unlock()
+	if err := state.sendEncrypted(channelID, windowOpenedMessage{Version: protocolVersion, Type: "window_opened", ID: message.ID}); err != nil {
+		state.closeWindow(channel, message.ID)
+		return
+	}
+	state.streamWindow(captureContext, channelID, channel, message.ID, socket)
+}
+
+func (state *connectionState) streamWindow(ctx context.Context, channelID string, channel *browserChannel, id string, socket *windowSocket) {
+	defer state.removeWindow(channel, id, socket)
+	ticker := time.NewTicker(150 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		socket.mu.Lock()
+		frame, err := socket.capture.Frame()
+		socket.mu.Unlock()
+		if err != nil {
+			_ = state.sendEncrypted(channelID, windowCloseMessage{Version: protocolVersion, Type: "window_close", ID: id, Code: websocket.CloseTryAgainLater, Reason: boundedReason(err.Error())})
+			return
+		}
+		if len(frame.Data) == 0 || len(frame.Data) > maxWindowFrame || frame.Width < 1 || frame.Height < 1 {
+			_ = state.sendEncrypted(channelID, windowCloseMessage{Version: protocolVersion, Type: "window_close", ID: id, Code: websocket.CloseMessageTooBig, Reason: "Selected-window frame is invalid or too large"})
+			return
+		}
+		if err := state.sendEncrypted(channelID, windowFrameMessage{
+			Version: protocolVersion, Type: "window_frame", ID: id,
+			Width: frame.Width, Height: frame.Height, Data: base64.RawURLEncoding.EncodeToString(frame.Data),
+		}); err != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (state *connectionState) writeWindow(channelID string, channel *browserChannel, message windowInputMessage) {
+	channel.mu.Lock()
+	socket := channel.windows[message.ID]
+	channel.mu.Unlock()
+	if socket == nil {
+		return
+	}
+	socket.mu.Lock()
+	var err error
+	switch message.Kind {
+	case "pointer":
+		err = socket.capture.Pointer(windowcapture.PointerEvent{Action: message.Action, X: message.X, Y: message.Y, Button: message.Button, DeltaX: message.DeltaX, DeltaY: message.DeltaY})
+	case "key":
+		err = socket.capture.Key(windowcapture.KeyEvent{Code: message.Code, Down: message.Down, Shift: message.Shift, Ctrl: message.Ctrl, Alt: message.Alt, Meta: message.Meta})
+	case "text":
+		err = socket.capture.Text(message.Text)
+	case "clipboard":
+		err = socket.capture.Clipboard(message.Text)
+	}
+	socket.mu.Unlock()
+	if err != nil {
+		_ = state.sendEncrypted(channelID, windowCloseMessage{Version: protocolVersion, Type: "window_notice", ID: message.ID, Code: websocket.ClosePolicyViolation, Reason: boundedReason(err.Error())})
+	}
+}
+
+func validWindowInput(message windowInputMessage) bool {
+	switch message.Kind {
+	case "pointer":
+		if message.Action != "move" && message.Action != "drag" && message.Action != "down" && message.Action != "up" && message.Action != "scroll" {
+			return false
+		}
+		return !math.IsNaN(message.X) && !math.IsNaN(message.Y) && message.X >= 0 && message.X <= 1 && message.Y >= 0 && message.Y <= 1 && message.Button >= 0 && message.Button <= 2 && math.Abs(message.DeltaX) <= 4000 && math.Abs(message.DeltaY) <= 4000
+	case "key":
+		return len(message.Code) > 0 && len(message.Code) <= 32
+	case "text", "clipboard":
+		return len(message.Text) > 0 && len(message.Text) <= maxWindowText && utf8.ValidString(message.Text)
+	default:
+		return false
+	}
 }
 
 func (state *connectionState) readDesktop(channelID string, channel *browserChannel, desktopID string, socket *desktopSocket) {
@@ -851,12 +1101,17 @@ func (state *connectionState) closeChannel(id string, code int, reason string, n
 		channel.sockets = make(map[string]*localSocket)
 		desktops := channel.desktops
 		channel.desktops = make(map[string]*desktopSocket)
+		windows := channel.windows
+		channel.windows = make(map[string]*windowSocket)
 		channel.mu.Unlock()
 		for _, socket := range sockets {
 			_ = socket.connection.Close()
 		}
 		for _, socket := range desktops {
 			_ = socket.connection.Close()
+		}
+		for _, socket := range windows {
+			socket.cancel()
 		}
 	}
 	if notifyRelay {
@@ -881,6 +1136,28 @@ func (state *connectionState) removeDesktop(channel *browserChannel, id string, 
 	}
 	channel.mu.Unlock()
 	_ = expected.connection.Close()
+}
+
+func (state *connectionState) closeWindow(channel *browserChannel, id string) {
+	channel.mu.Lock()
+	socket := channel.windows[id]
+	delete(channel.windows, id)
+	channel.mu.Unlock()
+	if socket != nil {
+		socket.cancel()
+	}
+}
+
+func (state *connectionState) removeWindow(channel *browserChannel, id string, expected *windowSocket) {
+	channel.mu.Lock()
+	if channel.windows[id] == expected {
+		delete(channel.windows, id)
+	}
+	channel.mu.Unlock()
+	expected.cancel()
+	expected.mu.Lock()
+	expected.capture.Close()
+	expected.mu.Unlock()
 }
 
 func (state *connectionState) closeAllChannels() {

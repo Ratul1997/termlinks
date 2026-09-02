@@ -26,9 +26,10 @@ import (
 	"termlinks/backend/internal/config"
 	"termlinks/backend/internal/server"
 	"termlinks/backend/internal/session"
+	"termlinks/backend/internal/windowcapture"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -156,8 +157,18 @@ func runDesktop(args []string) error {
 			return errors.New("usage: termlinks desktop status")
 		}
 		return desktopStatus()
+	case "permissions":
+		if len(args) != 1 {
+			return errors.New("usage: termlinks desktop permissions")
+		}
+		return requestDesktopPermissions()
+	case "windows":
+		if len(args) != 1 {
+			return errors.New("usage: termlinks desktop windows")
+		}
+		return listDesktopWindows()
 	default:
-		return errors.New("usage: termlinks desktop <enable|disable|status>")
+		return errors.New("usage: termlinks desktop <enable|disable|status|permissions|windows>")
 	}
 }
 
@@ -227,7 +238,48 @@ func desktopStatus() error {
 			server = "unreachable (enable macOS Screen Sharing and VNC access)"
 		}
 	}
-	fmt.Printf("Tunnel:     %s\nVNC target:  %s\nVNC server:  %s\n", status, settings.VNCAddress, server)
+	permissions := windowcapture.PermissionStatus()
+	windowSupport := "unavailable (requires macOS 14+ with cgo)"
+	if permissions.Supported {
+		windowSupport = "available"
+	}
+	fmt.Printf("Tunnel:            %s\nVNC target:         %s\nVNC server:         %s\nWindow picker:      %s\nScreen Recording:   %s\nAccessibility:      %s\n",
+		status, settings.VNCAddress, server, windowSupport, permissionLabel(permissions.ScreenRecording), permissionLabel(permissions.Accessibility))
+	return nil
+}
+
+func requestDesktopPermissions() error {
+	permissions := windowcapture.RequestPermissions()
+	if !permissions.Supported {
+		return windowcapture.ErrUnsupported
+	}
+	fmt.Println("macOS permission requests opened. Approve Termlinks in Privacy & Security if prompted.")
+	fmt.Printf("Screen Recording: %s\nAccessibility:    %s\n", permissionLabel(permissions.ScreenRecording), permissionLabel(permissions.Accessibility))
+	if !permissions.ScreenRecording || !permissions.Accessibility {
+		fmt.Println("After approving, restart the cloud connector with: termlinks cloud stop && termlinks cloud start")
+	}
+	return nil
+}
+
+func permissionLabel(allowed bool) string {
+	if allowed {
+		return "allowed"
+	}
+	return "not allowed"
+}
+
+func listDesktopWindows() error {
+	windows, err := windowcapture.List()
+	if err != nil {
+		return err
+	}
+	if len(windows) == 0 {
+		fmt.Println("No shareable on-screen windows found.")
+		return nil
+	}
+	for _, window := range windows {
+		fmt.Printf("%-10d  %-22s  %4dx%-4d  %s\n", window.ID, truncate(window.Application, 22), window.Width, window.Height, window.Title)
+	}
 	return nil
 }
 
@@ -791,6 +843,8 @@ Usage:
   termlinks cloud stop              Disconnect the cloud portal
   termlinks desktop enable          Allow encrypted remote desktop access
   termlinks desktop status          Check the desktop tunnel and VNC server
+  termlinks desktop permissions     Request window view/control permissions
+  termlinks desktop windows         List shareable Mac windows locally
   termlinks desktop disable         Revoke remote desktop access
   termlinks daemon [--listen addr]  Run the daemon in the foreground
 
@@ -807,11 +861,14 @@ func printDesktopHelp() {
 Usage:
   termlinks desktop enable [--address 127.0.0.1:5900]
   termlinks desktop status
+  termlinks desktop permissions
+  termlinks desktop windows
   termlinks desktop disable
 
 The address must be localhost or a loopback IP. Remote desktop is disabled by
-default. Enabling the tunnel does not change macOS sharing permissions: enable
-Screen Sharing and VNC viewer access locally in System Settings first.
+default. Full-desktop mode also needs macOS Screen Sharing. Selected-window mode
+needs macOS 14+ plus Screen Recording permission for viewing and Accessibility
+permission for control. Request those local permissions with the command above.
 `)
 }
 

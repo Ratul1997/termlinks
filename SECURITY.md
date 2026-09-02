@@ -21,6 +21,8 @@ Termlinks provides remote keyboard access to local processes and can optionally 
 - The local connector decrypts and accepts only the exact logout, session-list, create-interactive-shell, stop, and terminal operations. It cannot proxy arbitrary localhost paths. Shell creation is forwarded over the private Unix control socket.
 - Remote desktop is disabled by default, can be enabled or revoked only through the local CLI, and takes effect by restarting only the connector. The configured VNC target must be `localhost` or a loopback IP, each browser channel is limited to one desktop socket, and byte sizes are bounded.
 - The remote desktop framebuffer, VNC authentication exchange, clipboard content, pointer events, and keystrokes use the same end-to-end encrypted channel. VNC credentials are neither stored nor sent to Cloudflare as plaintext.
+- On macOS 14+, selected-window mode obtains its encrypted window list and bounded JPEG frames through ScreenCaptureKit. Viewing requires the operating system's Screen Recording permission; control additionally requires Accessibility. The connector accepts only an existing numeric window ID plus bounded dimensions and validated pointer, keyboard, text, or clipboard events.
+- Selected-window capture is limited to one active capture per authenticated browser channel. Window titles, application names, frames, and input remain inside the end-to-end encrypted payload. The connector does not expose a generic macOS automation or screenshot API.
 - The connector secret and browser portal token are independent random credentials. The connector secret is stored locally in a `0600` file and as a Cloudflare Worker secret.
 - Public responses use HTTPS security headers, random AES-GCM nonces, direction/sequence/channel-bound authenticated encryption, bounded message sizes, a short unauthenticated timeout, and a Durable Object connection/viewer limit.
 
@@ -32,7 +34,8 @@ Termlinks provides remote keyboard access to local processes and can optionally 
 4. Keep both tokens private. Enter the portal token only on your Termlinks portal and never share the connector secret.
 5. Treat anyone given the portal token as having full access to your managed terminals.
 6. Stop the daemon before rotating the browser portal token. Remove the token file from the state directory, then restart to generate a new one.
-7. If remote desktop is enabled, use a strong unique Screen Sharing/VNC password and limit Screen Sharing to specific macOS users. macOS Screen Sharing itself may be reachable from the local network depending on system firewall and sharing settings; Termlinks' loopback restriction does not change the operating system service's LAN exposure.
+7. If full-desktop mode is enabled, use a strong unique Screen Sharing/VNC password and limit Screen Sharing to specific macOS users. macOS Screen Sharing itself may be reachable from the local network depending on system firewall and sharing settings; Termlinks' loopback restriction does not change the operating system service's LAN exposure.
+8. Grant Screen Recording and Accessibility only to the installed Termlinks binary. Revoke them in macOS Privacy & Security and run `termlinks desktop disable` when selected-window access is no longer needed.
 
 The state directory is shown by `termlinks doctor`. On macOS it normally lives under `~/Library/Application Support/termlinks`; on Linux it follows the user config directory.
 
@@ -43,7 +46,8 @@ The state directory is shown by `termlinks doctor`. On macOS it normally lives u
 - One deployment represents one configured computer. Reusing its connector credential on a second computer is unsupported and can cause connector replacement; multi-device pairing and routing are not implemented.
 - Any authenticated browser can create an interactive shell, send arbitrary bytes to every managed running terminal, and request that a session stop.
 - Once remote desktop is locally enabled, any authenticated portal client must be treated as capable of full RFB control. The view-only toggle is a safety affordance, not an authorization boundary.
-- This version relies on the local Screen Sharing/VNC server for capture, authentication, display layout, and OS input permissions. It does not provide native per-monitor/per-window selection or independent per-viewer OS permissions.
+- Full-desktop mode relies on the local Screen Sharing/VNC server for capture, authentication, display layout, and input permissions. Selected-window mode uses native ScreenCaptureKit but currently lists only normal titled on-screen windows; it has no separate physical-display picker or minimized-window capture.
+- Selected-window control raises and interacts with the real local window. Accessibility permission is process-wide, and this personal version does not provide independent per-window or per-viewer OS permissions.
 - Terminal output and command arguments may themselves contain secrets. The most recent 2 MiB per session remains in daemon memory for reconnects.
 - Termlinks inherits the launching environment for the child command. Environment variables are passed only over the private local socket and are not returned by the web API, but the child may print them.
 - Security depends on the operating-system user account, the private-network account, the phone, and the token remaining uncompromised.

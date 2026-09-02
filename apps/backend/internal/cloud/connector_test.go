@@ -259,6 +259,32 @@ func TestEncryptedDesktopIsDisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestValidWindowInput(t *testing.T) {
+	tests := []struct {
+		name    string
+		message windowInputMessage
+		valid   bool
+	}{
+		{name: "pointer", message: windowInputMessage{Kind: "pointer", Action: "down", X: 0.5, Y: 1, Button: 0}, valid: true},
+		{name: "scroll", message: windowInputMessage{Kind: "pointer", Action: "scroll", X: 0, Y: 0, DeltaY: 120}, valid: true},
+		{name: "pointer outside", message: windowInputMessage{Kind: "pointer", Action: "move", X: 1.1, Y: 0.5}, valid: false},
+		{name: "large scroll", message: windowInputMessage{Kind: "pointer", Action: "scroll", X: 0.5, Y: 0.5, DeltaY: 5000}, valid: false},
+		{name: "key", message: windowInputMessage{Kind: "key", Code: "KeyC", Down: true, Meta: true}, valid: true},
+		{name: "missing key", message: windowInputMessage{Kind: "key"}, valid: false},
+		{name: "text", message: windowInputMessage{Kind: "text", Text: "hello 👋"}, valid: true},
+		{name: "clipboard", message: windowInputMessage{Kind: "clipboard", Text: "copy me"}, valid: true},
+		{name: "empty text", message: windowInputMessage{Kind: "text"}, valid: false},
+		{name: "unknown", message: windowInputMessage{Kind: "shell", Text: "id"}, valid: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := validWindowInput(test.message); got != test.valid {
+				t.Fatalf("validWindowInput() = %v, want %v", got, test.valid)
+			}
+		})
+	}
+}
+
 func assertEncryptedDesktopMessageType(t *testing.T, outerData []byte, key [32]byte, channelID string, sequence uint32, want string) {
 	t.Helper()
 	plaintext := decryptOutgoingForTest(t, outerData, key, channelID, sequence)

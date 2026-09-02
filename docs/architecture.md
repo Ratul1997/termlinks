@@ -17,7 +17,7 @@ The daemon exposes two deliberately separate surfaces:
 
 ### Browser portal
 
-The portal is a mobile-first static TypeScript application embedded into the Go binary. xterm.js interprets ANSI terminal output and captures keyboard input. Extra mobile keys provide Escape, Tab, Ctrl-C, Ctrl-D, arrows, and Enter. The encrypted cloud view also includes noVNC for an opt-in Mac framebuffer, touch/mouse control, keyboard input, and clipboard transfer.
+The portal is a mobile-first static TypeScript application embedded into the Go binary. xterm.js interprets ANSI terminal output and captures keyboard input. Extra mobile keys provide Escape, Tab, Ctrl-C, Ctrl-D, arrows, and Enter. The encrypted cloud view also includes noVNC for an opt-in full Mac framebuffer plus a native ScreenCaptureKit picker for one on-screen application window. Both modes support touch/mouse control, keyboard input, and clipboard transfer.
 
 The same app is installable as a PWA from the HTTPS Pages deployment or a trusted loopback origin. Its service worker uses network-first app-shell caching and explicitly bypasses API and WebSocket paths, so terminal/authentication data is never stored in Cache Storage. Native touch overflow provides mobile momentum scrolling; xterm's short animation handles wheel and trackpad scroll events.
 
@@ -101,6 +101,22 @@ Remote desktop reuses the authenticated channel and its direction/sequence/chann
 
 The VNC authentication conversation remains inside the RFB stream, so its credentials exist only in the browser page and the local Screen Sharing server. Termlinks does not persist them. View-only is the portal's initial UI state, but the portal token remains the true authorization boundary because an authenticated client can request control-capable RFB access.
 
+### Selected-window flow
+
+```text
+Phone / PWA                 Cloudflare relay                 Local Mac
+    │                              │                             │
+    │ encrypted source request ───►│── opaque ciphertext ──────►│ ScreenCaptureKit window list
+    │◄── encrypted IDs/titles ─────│◄────────────────────────────│
+    │ select one numeric ID ──────►│────────────────────────────►│ independent SCContentFilter
+    │◄── encrypted JPEG frames ────│◄────────────────────────────│ bounded screenshots (~6 fps)
+    │── encrypted pointer/keys ───►│────────────────────────────►│ CGEvent + Accessibility focus
+```
+
+The connector gates this path behind the same local desktop-enabled setting. macOS Screen Recording permission is required before the source list or pixels are available, while Accessibility is required before control events are accepted by the OS. The selected window must be a normal titled on-screen window when enumerated. Only one VNC desktop or one native window capture may be active in a browser channel at a time.
+
+Frames are scaled to a bounded browser-requested maximum, JPEG encoded locally, capped before encryption, and never decoded by Cloudflare. Input validation restricts normalized pointer coordinates, buttons, scroll deltas, known-size browser key codes, UTF-8 text, and clipboard payloads. The native bridge cannot launch commands, choose arbitrary processes, read files, or open network addresses.
+
 ## Disconnect behavior
 
 - Local terminal closes: its socket disappears; the daemon and PTY continue.
@@ -109,5 +125,6 @@ The VNC authentication conversation remains inside the RFB stream, so its creden
 - Child exits: the daemon records the exit code and retained output remains viewable.
 - Dashboard refreshes: completed sessions are omitted, so exited or explicitly stopped terminals do not clutter the portal list.
 - Remote desktop viewer closes: its loopback VNC socket is closed; Screen Sharing remains governed by macOS and terminal sessions are unaffected.
+- Selected-window viewer closes: its native capture object is released; macOS Screen Recording and Accessibility grants remain until revoked in System Settings.
 - `termlinks desktop disable`: the connector restarts with GUI tunneling revoked; the terminal daemon and managed PTYs remain running.
 - Daemon/computer stops: in-memory sessions end. Persistence across restart is outside this MVP.
