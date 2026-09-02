@@ -14,9 +14,9 @@
 }
 
 * { box-sizing: border-box; }
-html, body, #app { min-height: 100%; margin: 0; }
+html, body, #app { width: 100%; max-width: 100%; min-height: 100%; margin: 0; overflow-x: hidden; }
 html.terminal-active, html.terminal-active body, html.terminal-active #app {
-  height: 100%; overflow: hidden;
+  width: 100%; max-width: 100%; height: 100%; overflow: hidden;
 }
 
 body {
@@ -178,8 +178,8 @@ button { color: inherit; }
 .empty-copy { max-width: 330px; margin: auto; color: var(--muted); font-size: 13px; line-height: 1.5; }
 
 .terminal-page {
-  position: fixed; top: var(--terminal-viewport-top, 0px); right: 0; left: 0;
-  width: 100%; height: var(--terminal-viewport-height, 100dvh);
+  position: fixed; top: var(--terminal-viewport-top, 0px); left: var(--terminal-viewport-left, 0px);
+  width: var(--terminal-viewport-width, 100vw); max-width: 100vw; height: var(--terminal-viewport-height, 100dvh);
   display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto;
   overflow: hidden; background: #070a09;
 }
@@ -239,12 +239,13 @@ button { color: inherit; }
   overscroll-behavior-y: contain; scrollbar-color: #344139 transparent; scrollbar-width: thin;
 }
 .terminal-composer {
-  min-width: 0; padding: 0 max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+  width: 100%; max-width: 100%; min-width: 0; overflow: hidden;
+  padding: 0 max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
   border-top: 1px solid #202722; background: linear-gradient(180deg, #101613, #0c110e);
   box-shadow: 0 -12px 30px rgba(0, 0, 0, .18);
 }
 .terminal-attachment-list {
-  display: flex; gap: 7px; overflow-x: auto; padding: 7px 0 2px; scrollbar-width: none;
+  display: flex; width: 100%; max-width: 100%; min-width: 0; gap: 7px; overflow-x: auto; padding: 7px 0 2px; scrollbar-width: none;
 }
 .terminal-attachment-list[hidden] { display: none; }
 .terminal-attachment-list::-webkit-scrollbar { display: none; }
@@ -257,7 +258,7 @@ button { color: inherit; }
 .terminal-attachment-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .terminal-attachment-ready { color: var(--green); }
 .extra-keys {
-  display: flex; gap: 6px; overflow-x: auto; padding: 7px 0 5px;
+  display: flex; width: 100%; max-width: 100%; min-width: 0; gap: 6px; overflow-x: auto; padding: 7px 0 5px;
   background: transparent; scrollbar-width: none;
 }
 .extra-keys::-webkit-scrollbar { display: none; }
@@ -269,7 +270,8 @@ button { color: inherit; }
 .key-button.key-action { min-width: 76px; color: #a8d8ff; border-color: #3d566a; background: #111d25; }
 .key-button:disabled { opacity: .38; cursor: not-allowed; }
 .terminal-composer-form {
-  display: grid; grid-template-columns: 40px minmax(0, 1fr) 44px; align-items: center; gap: 5px;
+  display: grid; width: 100%; max-width: 100%; min-width: 0; overflow: hidden;
+  grid-template-columns: 40px minmax(0, 1fr) 44px; align-items: center; gap: 5px;
   padding: 4px; border: 1px solid #344139; border-radius: 15px; background: #090e0b;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025);
 }
@@ -278,8 +280,9 @@ button { color: inherit; }
 }
 .terminal-composer-input {
   display: block; width: 100%; min-width: 0; height: 46px; min-height: 46px; max-height: 46px; padding: 12px 8px;
-  overflow-y: auto; border: 0; border-radius: 11px; outline: none; resize: none;
+  overflow-x: hidden; overflow-y: auto; border: 0; border-radius: 11px; outline: none; resize: none;
   color: var(--ink); background: transparent; font: 14px/1.45 ui-monospace, "SFMono-Regular", "Cascadia Code", monospace;
+  white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
   caret-color: var(--green); -webkit-user-select: text; user-select: text; touch-action: manipulation;
 }
 .terminal-attach-button {
@@ -295,9 +298,10 @@ button { color: inherit; }
 .terminal-composer-send:active:not(:disabled) { transform: translateY(1px); }
 .terminal-composer-send:disabled { color: #6c7770; background: #222b26; cursor: not-allowed; }
 .terminal-composer-meta {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 23px; padding: 2px 4px 0;
+  display: flex; width: 100%; max-width: 100%; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; min-height: 23px; padding: 2px 4px 0;
   color: #69766e; font: 9px/1.2 ui-monospace, monospace;
 }
+.terminal-composer-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .terminal-composer-state { flex: 0 0 auto; color: #7f9687; }
 .terminal-composer[data-connected="true"] .terminal-composer-state { color: #78c68d; }
 
@@ -410,6 +414,12 @@ button { color: inherit; }
   .new-terminal-button, .desktop-button { flex: 1; }
   .termads-description { white-space: normal; }
   .termads-status { max-width: 74px; text-align: center; line-height: 1.3; }
+}
+
+@media (max-width: 679px) {
+  /* iOS zooms the visual viewport when a focused form control is below 16px. */
+  .token-input, .create-input, .terminal-composer-input,
+  .desktop-typing-input, .desktop-credential-input { font-size: 16px; }
 }
 
 @media (min-width: 680px) {

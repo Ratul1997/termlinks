@@ -104,12 +104,14 @@ const state: {
   layoutCleanup?: () => void;
   resizeTimer?: number;
   lastResize?: string;
+  terminalReconnectTimer?: number;
+  terminalReconnectAttempts: number;
   desktop?: RFB;
   desktopLink?: EncryptedDesktopLink;
   windowLink?: EncryptedWindowLink;
   polling?: number;
   closedSessions: Set<string>;
-} = { authenticated: false, sessions: [], closedSessions: new Set() };
+} = { authenticated: false, sessions: [], terminalReconnectAttempts: 0, closedSessions: new Set() };
 
 let encryptedPortal = true;
 let encryptedBridge: EncryptedBridge | undefined;
@@ -1979,12 +1981,16 @@ function installTerminalViewportSizing(page: HTMLElement): () => void {
     animationFrame = 0;
     if (document.visibilityState === "hidden") return;
     const height = viewport?.height ?? window.innerHeight;
+    const width = viewport?.width ?? document.documentElement.clientWidth;
     // WebKit can briefly report zero while a standalone PWA is suspended.
     // Keeping the last valid layout prevents the composer from collapsing.
-    if (!Number.isFinite(height) || height < 160) return;
+    if (!Number.isFinite(height) || height < 160 || !Number.isFinite(width) || width < 240) return;
     const offsetTop = Math.max(0, viewport?.offsetTop ?? 0);
+    const offsetLeft = Math.max(0, viewport?.offsetLeft ?? 0);
     page.style.setProperty("--terminal-viewport-height", `${height}px`);
     page.style.setProperty("--terminal-viewport-top", `${offsetTop}px`);
+    page.style.setProperty("--terminal-viewport-width", `${width}px`);
+    page.style.setProperty("--terminal-viewport-left", `${offsetLeft}px`);
     fitTerminal();
   };
   const schedule = (): void => {
@@ -2114,6 +2120,7 @@ function renderTerminalComposer(): HTMLElement {
   attachmentList.hidden = true;
   const input = el("textarea", "terminal-composer-input");
   input.rows = 1;
+  input.wrap = "soft";
   input.placeholder = "Type a command or message…";
   input.spellcheck = false;
   input.autocapitalize = "off";
@@ -2322,7 +2329,10 @@ async function copyToDeviceClipboard(text: string, fallback?: HTMLTextAreaElemen
   }
 }
 
-function connectTerminal(session: Session): void {
+function connectTerminal(session: Session, automatic = false): void {
+  if (state.terminalReconnectTimer !== undefined) window.clearTimeout(state.terminalReconnectTimer);
+  state.terminalReconnectTimer = undefined;
+  if (!automatic) state.terminalReconnectAttempts = 0;
   state.socket?.close();
   if (state.resizeTimer !== undefined) window.clearTimeout(state.resizeTimer);
   state.resizeTimer = undefined;
@@ -2331,6 +2341,7 @@ function connectTerminal(session: Session): void {
   setConnectionState("Connecting…", "connecting");
   const opened = (): void => {
     if (state.socket !== socket) return;
+    state.terminalReconnectAttempts = 0;
     const prefix = encryptedPortal ? "E2E · " : "";
     setConnectionState(session.running ? `${prefix}Live · input enabled` : `${prefix}Session output`, session.running ? "online" : "offline");
     fitTerminal();
@@ -2358,10 +2369,10 @@ function connectTerminal(session: Session): void {
       renderLogin("Your portal session expired");
       return;
     }
-    if (session.running) setConnectionState("Disconnected · tap ••• to reconnect", "offline");
+    if (session.running) scheduleTerminalReconnect(session);
   };
   const failed = (): void => {
-    if (state.socket === socket) setConnectionState("Connection failed", "offline");
+    if (state.socket === socket) scheduleTerminalReconnect(session);
   };
 
   let socket: TerminalLink;
@@ -2387,6 +2398,25 @@ function connectTerminal(session: Session): void {
     socket = nativeSocket;
   }
   state.socket = socket;
+}
+
+function scheduleTerminalReconnect(session: Session): void {
+  if (!session.running || state.selected !== session.id || !document.querySelector(".terminal-page")) return;
+  if (state.terminalReconnectTimer !== undefined) return;
+  const delay = Math.min(500 * (2 ** Math.min(state.terminalReconnectAttempts, 3)), 4_000);
+  state.terminalReconnectAttempts += 1;
+  setConnectionState("Disconnected · reconnecting…", "connecting");
+  state.terminalReconnectTimer = window.setTimeout(() => {
+    state.terminalReconnectTimer = undefined;
+    if (!session.running || state.selected !== session.id || !document.querySelector(".terminal-page")) return;
+    if (state.socket?.readyState === WebSocket.OPEN) return;
+    if (encryptedPortal && (!state.authenticated || !encryptedBridge)) {
+      void resumeEncryptedPortal();
+      scheduleTerminalReconnect(session);
+      return;
+    }
+    connectTerminal(session, true);
+  }, delay);
 }
 
 function fitTerminal(): void {
@@ -2454,6 +2484,9 @@ function closeConnection(): void {
   if (state.resizeTimer !== undefined) window.clearTimeout(state.resizeTimer);
   state.resizeTimer = undefined;
   state.lastResize = undefined;
+  if (state.terminalReconnectTimer !== undefined) window.clearTimeout(state.terminalReconnectTimer);
+  state.terminalReconnectTimer = undefined;
+  state.terminalReconnectAttempts = 0;
   state.touchCleanup?.();
   state.touchCleanup = undefined;
   state.touchSync = undefined;
