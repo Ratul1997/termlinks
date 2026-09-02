@@ -100,6 +100,7 @@ const state: {
   terminal?: Terminal;
   fit?: FitAddon;
   touchCleanup?: () => void;
+  touchSync?: () => void;
   layoutCleanup?: () => void;
   desktop?: RFB;
   desktopLink?: EncryptedDesktopLink;
@@ -1786,7 +1787,9 @@ function renderTerminal(id: string): void {
   terminal.open(mount);
   state.terminal = terminal;
   state.fit = fit;
-  state.touchCleanup = enableTouchScroll(terminal);
+  const touchScroll = enableTouchScroll(terminal);
+  state.touchCleanup = touchScroll.cleanup;
+  state.touchSync = touchScroll.align;
   state.layoutCleanup = installTerminalViewportSizing(page);
   fitTerminal();
   if (!window.matchMedia("(pointer: coarse)").matches) terminal.focus();
@@ -1850,11 +1853,13 @@ function installTerminalViewportSizing(page: HTMLElement): () => void {
   };
 }
 
-function enableTouchScroll(terminal: Terminal): () => void {
+function enableTouchScroll(terminal: Terminal): { cleanup: () => void; align: () => void } {
   const root = terminal.element;
   const screen = root?.querySelector<HTMLElement>(".xterm-screen");
   const hasTouchInput = navigator.maxTouchPoints > 0 || window.matchMedia("(pointer: coarse)").matches;
-  if (!root || !screen || !hasTouchInput) return () => undefined;
+  if (!root || !screen || !hasTouchInput) {
+    return { cleanup: () => undefined, align: () => undefined };
+  }
 
   const spacer = el("div", "terminal-native-scroll-spacer");
   spacer.setAttribute("aria-hidden", "true");
@@ -1863,10 +1868,10 @@ function enableTouchScroll(terminal: Terminal): () => void {
   terminal.options.cursorBlink = false;
   let syncFrame = 0;
   let disposed = false;
+  let ignoreNativeScrollUntil = 0;
 
   const rowHeight = (): number => screen.clientHeight / terminal.rows;
-  const syncNativeScroller = (): void => {
-    syncFrame = 0;
+  const syncNativeScroller = (force = false): void => {
     if (disposed) return;
     const height = rowHeight();
     if (!Number.isFinite(height) || height <= 0) return;
@@ -1875,12 +1880,18 @@ function enableTouchScroll(terminal: Terminal): () => void {
     const target = buffer.viewportY * height;
     // A nearby difference means this scroll originated from the finger. Do
     // not snap WebKit's fractional momentum position back to a terminal row.
-    if (Math.abs(root.scrollTop - target) > height * 1.5) root.scrollTop = target;
+    if (force || Math.abs(root.scrollTop - target) > height * 1.5) root.scrollTop = target;
   };
   const scheduleSync = (): void => {
-    if (!syncFrame) syncFrame = window.requestAnimationFrame(syncNativeScroller);
+    if (!syncFrame) {
+      syncFrame = window.requestAnimationFrame(() => {
+        syncFrame = 0;
+        syncNativeScroller();
+      });
+    }
   };
   const onNativeScroll = (): void => {
+    if (performance.now() < ignoreNativeScrollUntil) return;
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed && selection.anchorNode && root.contains(selection.anchorNode)) return;
     const height = rowHeight();
@@ -1895,15 +1906,25 @@ function enableTouchScroll(terminal: Terminal): () => void {
   const scrollSubscription = terminal.onScroll(scheduleSync);
   const resizeSubscription = terminal.onResize(scheduleSync);
   scheduleSync();
-  return () => {
-    disposed = true;
-    if (syncFrame) window.cancelAnimationFrame(syncFrame);
-    renderSubscription.dispose();
-    scrollSubscription.dispose();
-    resizeSubscription.dispose();
-    root.removeEventListener("scroll", onNativeScroll);
-    root.classList.remove("native-touch-terminal");
-    spacer.remove();
+  return {
+    align: () => {
+      // Changing terminal rows can make WebKit emit a scroll event for the old
+      // geometry. Ignore it briefly and align the browser to xterm instead.
+      ignoreNativeScrollUntil = performance.now() + 120;
+      if (syncFrame) window.cancelAnimationFrame(syncFrame);
+      syncFrame = 0;
+      syncNativeScroller(true);
+    },
+    cleanup: () => {
+      disposed = true;
+      if (syncFrame) window.cancelAnimationFrame(syncFrame);
+      renderSubscription.dispose();
+      scrollSubscription.dispose();
+      resizeSubscription.dispose();
+      root.removeEventListener("scroll", onNativeScroll);
+      root.classList.remove("native-touch-terminal");
+      spacer.remove();
+    },
   };
 }
 
@@ -2124,7 +2145,10 @@ function connectTerminal(session: Session): void {
 function fitTerminal(): void {
   if (!state.fit || !state.terminal) return;
   try {
+    const wasAtBottom = state.terminal.buffer.active.viewportY >= state.terminal.buffer.active.baseY;
     state.fit.fit();
+    if (wasAtBottom) state.terminal.scrollToBottom();
+    state.touchSync?.();
     if (state.socket?.readyState === WebSocket.OPEN) {
       state.socket.send(JSON.stringify({ type: "resize", cols: state.terminal.cols, rows: state.terminal.rows }));
     }
@@ -2167,6 +2191,7 @@ function closeConnection(): void {
   state.socket = undefined;
   state.touchCleanup?.();
   state.touchCleanup = undefined;
+  state.touchSync = undefined;
   state.layoutCleanup?.();
   state.layoutCleanup = undefined;
   state.terminal?.dispose();
