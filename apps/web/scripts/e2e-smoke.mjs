@@ -244,7 +244,9 @@ while (!opened || output.length === 0 || (expectedOutput && !new TextDecoder().d
         type: "terminal_data",
         id: terminalID,
         binary: true,
-        data: bytesToBase64URL(new TextEncoder().encode(`${input}\n`)),
+        // Match xterm's Enter key. A PTY expects carriage return here; line
+        // feed can be treated as pasted data by interactive line editors.
+        data: bytesToBase64URL(new TextEncoder().encode(`${input}\r`)),
       });
     }
     continue;
