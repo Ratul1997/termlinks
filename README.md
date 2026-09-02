@@ -329,7 +329,7 @@ After login, the portal dashboard automatically shows every managed terminal and
 - Terminal history uses native touch momentum on mobile and short smooth scrolling for mouse wheels and trackpads.
 - Use the persistent chat-style composer below the terminal to type or paste commands and agent messages. Press **Enter** or the arrow button to send and submit; press **Shift+Enter** to add another line before sending. Multiline content uses xterm's bracketed-paste behavior when the active terminal program supports it.
 - The Escape, Tab, Ctrl-C, Ctrl-D, arrow, and Enter controls remain above the composer for terminal-native interaction. Clicking the xterm screen still enables direct keyboard input for editors and other full-screen programs.
-- On a desktop browser, drag across terminal text normally to select and copy it. On iPhone/iPad or another touch device, tap **Copy output** above the composer. Termlinks opens the retained terminal history in a normal read-only text panel, where you can long-press to select exact text and tap **Copy selection**, or use **Copy visible screen**.
+- On a desktop browser, drag across terminal text normally to select and copy it. On iPhone/iPad or another touch device, press and hold the terminal output or tap **Copy output** above the composer. Termlinks opens the retained terminal history in a normal read-only text panel, where you can long-press to select exact text and tap **Copy selection**, or use **Copy visible screen**.
 - The header shows the number of running sessions. Finished and explicitly closed sessions are removed from the dashboard automatically.
 - Each card shows the session name, command, directory, runtime, and status.
 - Select **Open terminal** to view and type in that terminal.

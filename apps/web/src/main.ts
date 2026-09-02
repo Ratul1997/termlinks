@@ -1802,7 +1802,11 @@ function enableTouchScroll(terminal: Terminal): () => void {
   const hasTouchInput = navigator.maxTouchPoints > 0 || window.matchMedia("(pointer: coarse)").matches;
   if (!root || !hasTouchInput) return () => undefined;
 
+  const longPressDelay = 520;
+  const longPressMoveLimit = 10;
   let activeTouch: number | undefined;
+  let startX = 0;
+  let startY = 0;
   let lastY = 0;
   let lastTime = 0;
   let velocity = 0;
@@ -1810,10 +1814,16 @@ function enableTouchScroll(terminal: Terminal): () => void {
   let pixelRemainder = 0;
   let scrollFrame = 0;
   let momentumFrame = 0;
+  let longPressTimer = 0;
+  let longPressActivated = false;
 
   const cancelMomentum = (): void => {
     if (momentumFrame) window.cancelAnimationFrame(momentumFrame);
     momentumFrame = 0;
+  };
+  const cancelLongPress = (): void => {
+    if (longPressTimer) window.clearTimeout(longPressTimer);
+    longPressTimer = 0;
   };
   const applyPendingScroll = (): boolean | undefined => {
     scrollFrame = 0;
@@ -1840,16 +1850,34 @@ function enableTouchScroll(terminal: Terminal): () => void {
     return undefined;
   };
   const onTouchStart = (event: TouchEvent): void => {
-    if (event.touches.length !== 1) return;
+    if (event.touches.length !== 1) {
+      cancelLongPress();
+      return;
+    }
     const touch = event.touches.item(0);
     if (!touch) return;
     cancelMomentum();
     activeTouch = touch.identifier;
+    startX = touch.clientX;
+    startY = touch.clientY;
     lastY = touch.clientY;
     lastTime = performance.now();
     velocity = 0;
     pendingDelta = 0;
     pixelRemainder = 0;
+    longPressActivated = false;
+    cancelLongPress();
+    longPressTimer = window.setTimeout(() => {
+      longPressTimer = 0;
+      if (activeTouch !== touch.identifier) return;
+      longPressActivated = true;
+      velocity = 0;
+      pendingDelta = 0;
+      pixelRemainder = 0;
+      if (scrollFrame) window.cancelAnimationFrame(scrollFrame);
+      scrollFrame = 0;
+      openTerminalTextPanel();
+    }, longPressDelay);
     // Capture the gesture and translate pixels to terminal rows once per frame.
     // This avoids relying on xterm's private viewport DOM, which changed in v6.
     event.stopImmediatePropagation();
@@ -1857,6 +1885,12 @@ function enableTouchScroll(terminal: Terminal): () => void {
   const onTouchMove = (event: TouchEvent): void => {
     const touch = findTouch(event.touches);
     if (!touch) return;
+    if (Math.hypot(touch.clientX - startX, touch.clientY - startY) > longPressMoveLimit) cancelLongPress();
+    if (longPressActivated) {
+      if (event.cancelable) event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
     const now = performance.now();
     const elapsed = Math.max(1, now - lastTime);
     const delta = lastY - touch.clientY;
@@ -1887,6 +1921,17 @@ function enableTouchScroll(terminal: Terminal): () => void {
   };
   const onTouchEnd = (event: TouchEvent): void => {
     if (!findTouch(event.changedTouches)) return;
+    cancelLongPress();
+    if (longPressActivated) {
+      longPressActivated = false;
+      activeTouch = undefined;
+      pendingDelta = 0;
+      pixelRemainder = 0;
+      velocity = 0;
+      if (event.cancelable) event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
     if (scrollFrame) {
       window.cancelAnimationFrame(scrollFrame);
       applyPendingScroll();
@@ -1895,6 +1940,8 @@ function enableTouchScroll(terminal: Terminal): () => void {
     startMomentum();
   };
   const onTouchCancel = (): void => {
+    cancelLongPress();
+    longPressActivated = false;
     activeTouch = undefined;
     pendingDelta = 0;
     pixelRemainder = 0;
@@ -1903,12 +1950,18 @@ function enableTouchScroll(terminal: Terminal): () => void {
     scrollFrame = 0;
     cancelMomentum();
   };
+  const onContextMenu = (event: MouseEvent): void => {
+    event.preventDefault();
+    cancelLongPress();
+    openTerminalTextPanel();
+  };
 
   root.classList.add("touch-scroll");
   root.addEventListener("touchstart", onTouchStart, { capture: true, passive: true });
   root.addEventListener("touchmove", onTouchMove, { capture: true, passive: false });
-  root.addEventListener("touchend", onTouchEnd, { capture: true, passive: true });
+  root.addEventListener("touchend", onTouchEnd, { capture: true, passive: false });
   root.addEventListener("touchcancel", onTouchCancel, { capture: true, passive: true });
+  root.addEventListener("contextmenu", onContextMenu);
   return () => {
     onTouchCancel();
     root.classList.remove("touch-scroll");
@@ -1916,6 +1969,7 @@ function enableTouchScroll(terminal: Terminal): () => void {
     root.removeEventListener("touchmove", onTouchMove, true);
     root.removeEventListener("touchend", onTouchEnd, true);
     root.removeEventListener("touchcancel", onTouchCancel, true);
+    root.removeEventListener("contextmenu", onContextMenu);
   };
 }
 
@@ -2022,7 +2076,7 @@ function openTerminalTextPanel(): void {
   const terminal = state.terminal;
   const page = document.querySelector<HTMLElement>(".terminal-page");
   if (!terminal || !page) return;
-  page.querySelector(".terminal-text-overlay")?.remove();
+  if (page.querySelector(".terminal-text-overlay")) return;
 
   const overlay = el("section", "terminal-text-overlay");
   overlay.setAttribute("role", "dialog");
