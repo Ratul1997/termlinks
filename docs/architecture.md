@@ -90,4 +90,5 @@ The public flow asks for the portal token after each page load and retains only 
 - Phone locks or changes network: its WebSocket disappears; the PTY continues.
 - Phone reconnects: retained scrollback is sent first, followed by live bytes.
 - Child exits: the daemon records the exit code and retained output remains viewable.
+- Dashboard refreshes: completed sessions are omitted, so exited or explicitly stopped terminals do not clutter the portal list.
 - Daemon/computer stops: in-memory sessions end. Persistence across restart is outside this MVP.

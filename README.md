@@ -108,12 +108,12 @@ After login, the portal dashboard automatically shows every managed terminal and
 
 - Select **New terminal** to create and immediately open a normal interactive shell. Its optional starting directory may be `~`, `~/path`, or an absolute path.
 - Inside that shell, type `cd`, `ls`, `codex`, `npm run dev`, or any other command exactly as in a desktop terminal.
-- The header shows the number of running and finished sessions.
+- The header shows the number of running sessions. Finished and explicitly closed sessions are removed from the dashboard automatically.
 - Each card shows the session name, command, directory, runtime, and status.
 - Select **Open terminal** to view and type in that terminal.
 - Select **Stop & close** to terminate a running command after confirmation.
 - The terminal screen also has **Stop & close session** in its `•••` menu.
-- Finished sessions remain available for viewing their retained output.
+- While a terminal is open, its final output remains visible after the process exits. Returning to the dashboard clears that finished card.
 
 Stopping or closing a session terminates its command. Simply closing the browser or local Terminal window only disconnects that viewer; the managed command continues running.
 

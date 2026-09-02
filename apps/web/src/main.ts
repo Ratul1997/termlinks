@@ -46,7 +46,8 @@ const state: {
   terminal?: Terminal;
   fit?: FitAddon;
   polling?: number;
-} = { authenticated: false, sessions: [] };
+  closedSessions: Set<string>;
+} = { authenticated: false, sessions: [], closedSessions: new Set() };
 
 const encryptedPortal = location.hostname === "termlinks.pages.dev" || location.hostname.endsWith(".termlinks.pages.dev");
 let encryptedBridge: EncryptedBridge | undefined;
@@ -426,11 +427,12 @@ function renderLogin(message = ""): void {
 
 async function loadSessions(): Promise<void> {
   const response = await api<{ sessions: Session[] }>("/api/sessions");
-  state.sessions = response.sessions;
+  state.sessions = response.sessions.filter((session) => session.running && !state.closedSessions.has(session.id));
 }
 
 function renderSessions(): void {
   closeConnection();
+  state.sessions = state.sessions.filter((session) => session.running && !state.closedSessions.has(session.id));
   state.selected = undefined;
   app.replaceChildren();
   const page = el("main", "dashboard");
@@ -560,7 +562,7 @@ function renderStartHint(): HTMLElement {
   const copy = el("div");
   copy.append(
     el("strong", "hint-title", "Your shells stay managed"),
-    el("p", "hint-copy", "Leaving this page only disconnects the viewer. Running terminals remain here until you exit or stop them."),
+    el("p", "hint-copy", "Leaving this page only disconnects the viewer. A terminal disappears from this list after it exits or you stop it."),
     el("code", "hint-command", "termlinks list  ·  termlinks stop <id>"),
   );
   hint.append(icon, copy);
@@ -583,8 +585,8 @@ function renderSessionCards(container: HTMLElement): void {
     open.addEventListener("click", () => renderTerminal(session.id));
     const row = el("div", "session-card-row");
     const identity = el("div", "session-identity");
-    identity.append(el("span", `session-dot ${session.running ? "live" : "ended"}`), el("h2", "session-name", session.name));
-    const badge = el("span", `status-badge ${session.running ? "running" : "finished"}`, session.running ? "RUNNING" : exitLabel(session));
+    identity.append(el("span", "session-dot live"), el("h2", "session-name", session.name));
+    const badge = el("span", "status-badge running", "RUNNING");
     row.append(identity, badge);
     const command = el("code", "session-command", `$ ${session.command.join(" ")}`);
     const meta = el("div", "session-meta");
@@ -596,12 +598,10 @@ function renderSessionCards(container: HTMLElement): void {
     openAction.type = "button";
     openAction.addEventListener("click", () => renderTerminal(session.id));
     controls.append(openAction);
-    if (session.running) {
-      const stopAction = el("button", "card-action danger", "Stop & close");
-      stopAction.type = "button";
-      stopAction.addEventListener("click", () => stopFromDashboard(session, stopAction));
-      controls.append(stopAction);
-    }
+    const stopAction = el("button", "card-action danger", "Stop & close");
+    stopAction.type = "button";
+    stopAction.addEventListener("click", () => stopFromDashboard(session, stopAction));
+    controls.append(stopAction);
     card.append(open, controls);
     container.append(card);
   }
@@ -613,7 +613,11 @@ async function stopFromDashboard(session: Session, button: HTMLButtonElement): P
   button.textContent = "Stopping…";
   try {
     await api(`/api/sessions/${encodeURIComponent(session.id)}/stop`, { method: "POST" });
-    window.setTimeout(() => refreshSessions(), 500);
+    state.closedSessions.add(session.id);
+    state.sessions = state.sessions.filter((item) => item.id !== session.id);
+    const container = document.querySelector<HTMLElement>("#session-list");
+    if (container) renderSessionCards(container);
+    updateSessionSummary();
   } catch (caught) {
     button.disabled = false;
     button.textContent = caught instanceof Error ? caught.message : "Could not stop";
@@ -621,10 +625,9 @@ async function stopFromDashboard(session: Session, button: HTMLButtonElement): P
 }
 
 function updateSessionSummary(): void {
-  const running = state.sessions.filter((session) => session.running).length;
-  const finished = state.sessions.length - running;
+  const running = state.sessions.length;
   const summary = document.querySelector<HTMLElement>("#session-summary");
-  if (summary) summary.textContent = `${running} running · ${finished} finished`;
+  if (summary) summary.textContent = `${running} running`;
   const status = document.querySelector<HTMLElement>("#computer-status .computer-status-label");
   if (status) status.textContent = `${encryptedPortal ? "E2E · " : ""}Computer online · ${running} running`;
 }
@@ -689,7 +692,9 @@ function renderTerminal(id: string): void {
     if (!window.confirm(`Stop “${session.name}”?`)) return;
     try {
       await api(`/api/sessions/${encodeURIComponent(session.id)}/stop`, { method: "POST" });
-      setConnectionState("Stopping…", "warning");
+      state.closedSessions.add(session.id);
+      state.sessions = state.sessions.filter((item) => item.id !== session.id);
+      renderSessions();
     } catch (caught) {
       setConnectionState(caught instanceof Error ? caught.message : "Could not stop", "offline");
     }
@@ -866,10 +871,6 @@ function ageLabel(session: Session): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ${minutes % 60}m`;
   return `${Math.floor(hours / 24)}d ${hours % 24}h`;
-}
-
-function exitLabel(session: Session): string {
-  return session.exitCode === 0 ? "DONE" : `EXIT ${session.exitCode ?? "?"}`;
 }
 
 void boot();
