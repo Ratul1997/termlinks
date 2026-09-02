@@ -1,4 +1,4 @@
-const CACHE_NAME = "termlinks-app-shell-v16";
+const CACHE_NAME = "termlinks-app-shell-v17";
 const APP_SHELL = [
   "/",
   "/index.html",

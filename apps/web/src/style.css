@@ -56,6 +56,10 @@ button { color: inherit; }
   color: var(--ink); background: #090e0b; font-family: ui-monospace, monospace;
 }
 .token-input:focus { border-color: #6cc88a; box-shadow: 0 0 0 3px rgba(108, 200, 138, .12); }
+.password-manager-username {
+  position: absolute; width: 1px; height: 1px; padding: 0; border: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+}
 .primary-button {
   width: 100%; height: 50px; margin-top: 12px; border: 0; border-radius: 11px;
   background: var(--green); color: #071009; font-weight: 760; cursor: pointer;
@@ -234,6 +238,19 @@ button { color: inherit; }
   border-top: 1px solid #202722; background: linear-gradient(180deg, #101613, #0c110e);
   box-shadow: 0 -12px 30px rgba(0, 0, 0, .18);
 }
+.terminal-attachment-list {
+  display: flex; gap: 7px; overflow-x: auto; padding: 7px 0 2px; scrollbar-width: none;
+}
+.terminal-attachment-list[hidden] { display: none; }
+.terminal-attachment-list::-webkit-scrollbar { display: none; }
+.terminal-attachment-chip {
+  display: flex; flex: 0 0 auto; align-items: center; gap: 7px; max-width: 220px; min-height: 34px;
+  padding: 5px 8px; border: 1px solid #36503f; border-radius: 9px; color: #b8c9bf; background: #121c16;
+  font: 10px/1.2 ui-monospace, monospace;
+}
+.terminal-attachment-icon { color: #9dd9ff; font-size: 16px; }
+.terminal-attachment-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.terminal-attachment-ready { color: var(--green); }
 .extra-keys {
   display: flex; gap: 6px; overflow-x: auto; padding: 7px 0 5px;
   background: transparent; scrollbar-width: none;
@@ -247,7 +264,7 @@ button { color: inherit; }
 .key-button.key-action { min-width: 76px; color: #a8d8ff; border-color: #3d566a; background: #111d25; }
 .key-button:disabled { opacity: .38; cursor: not-allowed; }
 .terminal-composer-form {
-  display: grid; grid-template-columns: minmax(0, 1fr) 44px; align-items: end; gap: 7px;
+  display: grid; grid-template-columns: 40px minmax(0, 1fr) 44px; align-items: center; gap: 5px;
   padding: 4px; border: 1px solid #344139; border-radius: 15px; background: #090e0b;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025);
 }
@@ -255,11 +272,16 @@ button { color: inherit; }
   border-color: #609871; box-shadow: 0 0 0 3px rgba(108, 200, 138, .1), inset 0 1px 0 rgba(255, 255, 255, .025);
 }
 .terminal-composer-input {
-  display: block; width: 100%; min-width: 0; min-height: 46px; max-height: 128px; padding: 12px 10px;
+  display: block; width: 100%; min-width: 0; height: 46px; min-height: 46px; max-height: 46px; padding: 12px 8px;
   overflow-y: auto; border: 0; border-radius: 11px; outline: none; resize: none;
   color: var(--ink); background: transparent; font: 14px/1.45 ui-monospace, "SFMono-Regular", "Cascadia Code", monospace;
   caret-color: var(--green); -webkit-user-select: text; user-select: text; touch-action: manipulation;
 }
+.terminal-attach-button {
+  width: 36px; height: 36px; border: 1px solid #34483c; border-radius: 10px;
+  color: #b7c8be; background: #162019; font-size: 24px; line-height: 1; cursor: pointer;
+}
+.terminal-attach-button:disabled { opacity: .38; cursor: not-allowed; }
 .terminal-composer-input::placeholder { color: #68756e; }
 .terminal-composer-send {
   width: 40px; height: 40px; margin: 3px 0; border: 0; border-radius: 11px;

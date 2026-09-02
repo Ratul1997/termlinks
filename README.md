@@ -194,6 +194,8 @@ On macOS the default directory is normally `~/Library/Application Support/termli
 
 The portal token is not a configurable password string: Termlinks generates it, and `termlinks token` displays the same stored value. To rotate it, first stop the daemon so all in-memory sessions have ended, move `auth.token` to a private backup or trash, and start Termlinks to generate a new token. Existing browser sessions then stop authenticating after their current cookie expires or the daemon restarts.
 
+The login form exposes standard username/current-password metadata so Safari, Chrome, an installed PWA, and the operating system password manager can offer to save and autofill the portal token. Save it under the generated `termlinks` username. Face ID or device-lock confirmation is controlled by iOS and the selected password manager; Termlinks never receives biometric data and cannot force the prompt.
+
 ### Direct portal authentication and network behavior
 
 | Setting | Value |
@@ -328,8 +330,9 @@ After login, the portal dashboard automatically shows every managed terminal and
 - Inside that shell, type `cd`, `ls`, `codex`, `npm run dev`, or any other command exactly as in a desktop terminal.
 - Terminal history uses native touch momentum on mobile and short smooth scrolling for mouse wheels and trackpads.
 - Use the persistent chat-style composer below the terminal to type or paste commands and agent messages. Press **Enter** or the arrow button to send and submit; press **Shift+Enter** to add another line before sending. Multiline content uses xterm's bracketed-paste behavior when the active terminal program supports it.
+- Tap **+** in the composer to choose an image, screenshot, or PDF. The file is E2E-encrypted, saved under `~/Downloads/Termlinks Uploads` on the connected computer, shown as an attachment chip, and its shell-quoted local path is inserted at the cursor so Codex, Claude, a script, or another terminal program can open it. Nothing is sent to the terminal until you press **Enter** or the send arrow.
 - On iPhone/iPad, the terminal refits to the visible area when the software keyboard opens or closes, keeping both terminal output and the composer above the keyboard. Focusing the composer follows the live bottom through the keyboard animation. If the composer is not focused, an intentionally opened history position stays in history through ordinary resizing.
-- The Escape, Tab, Ctrl-C, Ctrl-D, arrow, and Enter controls remain above the composer for terminal-native interaction. Clicking the xterm screen still enables direct keyboard input for editors and other full-screen programs.
+- The composer stays at a fixed height while typing so it cannot repeatedly resize the terminal. A terminal-native **Enter** control appears first above the composer, followed by Escape, Tab, Ctrl-C, Ctrl-D, and arrow controls. Clicking the xterm screen still enables direct keyboard input for editors and other full-screen programs.
 - Terminal text stays in the terminal—there is no copy popup. Press and hold rendered output to use the browser's native text selection and Copy action. Tap **Copy screen** above the composer to copy the currently visible terminal output immediately.
 - The header shows the number of running sessions. Finished and explicitly closed sessions are removed from the dashboard automatically.
 - Each card shows the session name, command, directory, runtime, and status.

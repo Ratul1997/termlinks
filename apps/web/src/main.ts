@@ -102,6 +102,8 @@ const state: {
   touchCleanup?: () => void;
   touchSync?: () => void;
   layoutCleanup?: () => void;
+  resizeTimer?: number;
+  lastResize?: string;
   desktop?: RFB;
   desktopLink?: EncryptedDesktopLink;
   windowLink?: EncryptedWindowLink;
@@ -792,10 +794,21 @@ function renderLogin(message = ""): void {
   );
 
   const form = el("form", "login-form");
+  form.autocomplete = "on";
+  form.method = "post";
+  form.action = "/api/login";
   const label = el("label", "field-label", "Portal token");
   label.htmlFor = "token";
+  const username = el("input", "password-manager-username");
+  username.type = "text";
+  username.name = "username";
+  username.autocomplete = "username";
+  username.value = "termlinks";
+  username.tabIndex = -1;
+  username.setAttribute("aria-hidden", "true");
   const input = el("input", "token-input");
   input.id = "token";
+  input.name = "password";
   input.type = "password";
   input.autocomplete = "current-password";
   input.spellcheck = false;
@@ -805,7 +818,7 @@ function renderLogin(message = ""): void {
   submit.type = "submit";
   const error = el("p", "form-error", message);
   error.setAttribute("role", "alert");
-  form.append(label, input, submit, error);
+  form.append(username, label, input, submit, error);
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     submit.disabled = true;
@@ -822,7 +835,6 @@ function renderLogin(message = ""): void {
       } else {
         await api("/api/login", { method: "POST", body: JSON.stringify({ token }) });
       }
-      input.value = "";
       state.authenticated = true;
       await loadSessions();
       renderSessions();
@@ -836,7 +848,7 @@ function renderLogin(message = ""): void {
   panel.append(form, createInstallButton(), el("p", "login-hint", "On your computer: termlinks token · Install from your browser menu on iPhone/iPad"));
   page.append(panel);
   app.append(page);
-  input.focus();
+  if (!window.matchMedia("(pointer: coarse)").matches) input.focus();
 }
 
 async function loadSessions(): Promise<void> {
@@ -1941,6 +1953,8 @@ function enableTouchScroll(terminal: Terminal): { cleanup: () => void; align: ()
 function renderTerminalComposer(): HTMLElement {
   const section = el("section", "terminal-composer");
   section.dataset.connected = "false";
+  const attachmentList = el("div", "terminal-attachment-list");
+  attachmentList.hidden = true;
   const input = el("textarea", "terminal-composer-input");
   input.rows = 1;
   input.placeholder = "Type a command or message…";
@@ -1954,20 +1968,81 @@ function renderTerminalComposer(): HTMLElement {
   send.type = "submit";
   send.disabled = true;
   send.setAttribute("aria-label", "Send to terminal");
+  const attach = el("button", "terminal-attach-button", "+");
+  attach.type = "button";
+  attach.disabled = true;
+  attach.setAttribute("aria-label", "Attach an image, screenshot, or PDF");
+  attach.title = "Attach image or file";
   const form = el("form", "terminal-composer-form");
-  form.append(input, send);
+  form.append(attach, input, send);
   const status = el("div", "terminal-composer-meta");
   status.append(
     el("span", "terminal-composer-hint", "Enter to send · Shift+Enter for a new line"),
     el("span", "terminal-composer-state", "Connecting…"),
   );
 
-  const resizeInput = (): void => {
-    input.style.height = "0";
-    input.style.height = `${Math.min(128, Math.max(46, input.scrollHeight))}px`;
-  };
   const syncSend = (): void => {
     send.disabled = section.dataset.connected !== "true" || input.value.length === 0;
+  };
+  const addPathToComposer = (path: string): void => {
+    const quoted = `'${path.replaceAll("'", `'\\''`)}'`;
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? start;
+    const prefix = start > 0 && !/\s$/.test(input.value.slice(0, start)) ? " " : "";
+    const suffix = end < input.value.length && !/^\s/.test(input.value.slice(end)) ? " " : "";
+    input.setRangeText(`${prefix}${quoted}${suffix}`, start, end, "end");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const showAttachment = (file: File, path: string): void => {
+    const chip = el("div", "terminal-attachment-chip");
+    chip.title = path;
+    chip.append(
+      el("span", "terminal-attachment-icon", file.type.startsWith("image/") ? "▧" : "▤"),
+      el("span", "terminal-attachment-name", file.name),
+      el("span", "terminal-attachment-ready", "✓"),
+    );
+    attachmentList.append(chip);
+    attachmentList.hidden = false;
+  };
+  const chooseAttachments = (): void => {
+    const statusText = status.querySelector<HTMLElement>(".terminal-composer-state");
+    if (!encryptedBridge) {
+      if (statusText) statusText.textContent = "Encrypted upload unavailable";
+      return;
+    }
+    const picker = document.createElement("input");
+    picker.type = "file";
+    picker.accept = "image/*,application/pdf";
+    picker.multiple = true;
+    picker.hidden = true;
+    picker.addEventListener("change", async () => {
+      const files = Array.from(picker.files || []);
+      picker.remove();
+      if (files.length === 0) return;
+      attach.dataset.uploading = "true";
+      attach.disabled = true;
+      try {
+        for (const file of files) {
+          if (statusText) statusText.textContent = `Uploading ${file.name}…`;
+          const path = await encryptedBridge!.uploadFile(file, (received, total) => {
+            const percent = total === 0 ? 100 : Math.round((received / total) * 100);
+            if (statusText) statusText.textContent = `Uploading ${file.name} · ${percent}%`;
+          });
+          showAttachment(file, path);
+          addPathToComposer(path);
+        }
+        if (statusText) statusText.textContent = "Attached · saved on computer";
+        input.focus({ preventScroll: true });
+      } catch (caught) {
+        if (statusText) statusText.textContent = caught instanceof Error ? caught.message : "Upload failed";
+      } finally {
+        delete attach.dataset.uploading;
+        attach.disabled = section.dataset.connected !== "true" || !encryptedBridge;
+      }
+    }, { once: true });
+    picker.addEventListener("cancel", () => picker.remove(), { once: true });
+    document.body.append(picker);
+    picker.click();
   };
   const submit = (): void => {
     if (!input.value || section.dataset.connected !== "true") return;
@@ -1977,12 +2052,12 @@ function renderTerminalComposer(): HTMLElement {
     state.terminal?.paste(value);
     sendTerminalInput("\r");
     input.value = "";
-    resizeInput();
+    attachmentList.replaceChildren();
+    attachmentList.hidden = true;
     syncSend();
-    input.focus();
+    if (document.activeElement !== input) input.focus({ preventScroll: true });
   };
   input.addEventListener("input", () => {
-    resizeInput();
     syncSend();
   });
   input.addEventListener("keydown", (event) => {
@@ -1994,16 +2069,18 @@ function renderTerminalComposer(): HTMLElement {
     event.preventDefault();
     submit();
   });
+  attach.addEventListener("pointerdown", (event) => event.preventDefault());
+  attach.addEventListener("click", chooseAttachments);
 
-  section.append(renderExtraKeys(input), form, status);
+  section.append(renderExtraKeys(input), attachmentList, form, status);
   return section;
 }
 
 function renderExtraKeys(focusTarget?: HTMLElement): HTMLElement {
   const bar = el("div", "extra-keys");
   const keys: Array<[string, string]> = [
-    ["\u001b", "Esc"], ["\t", "Tab"], ["\u0003", "Ctrl C"], ["\u0004", "Ctrl D"],
-    ["\u001b[A", "↑"], ["\u001b[B", "↓"], ["\u001b[D", "←"], ["\u001b[C", "→"], ["\r", "Enter"],
+    ["\r", "Enter"], ["\u001b", "Esc"], ["\t", "Tab"], ["\u0003", "Ctrl C"], ["\u0004", "Ctrl D"],
+    ["\u001b[A", "↑"], ["\u001b[B", "↓"], ["\u001b[D", "←"], ["\u001b[C", "→"],
   ];
   for (const [value, label] of keys) {
     const button = el("button", "key-button", label);
@@ -2090,6 +2167,9 @@ async function copyToDeviceClipboard(text: string, fallback?: HTMLTextAreaElemen
 
 function connectTerminal(session: Session): void {
   state.socket?.close();
+  if (state.resizeTimer !== undefined) window.clearTimeout(state.resizeTimer);
+  state.resizeTimer = undefined;
+  state.lastResize = undefined;
   state.terminal?.reset();
   setConnectionState("Connecting…", "connecting");
   const opened = (): void => {
@@ -2160,8 +2240,20 @@ function fitTerminal(): void {
     state.fit.fit();
     if (wasAtBottom) state.terminal.scrollToBottom();
     state.touchSync?.();
-    if (state.socket?.readyState === WebSocket.OPEN) {
-      state.socket.send(JSON.stringify({ type: "resize", cols: state.terminal.cols, rows: state.terminal.rows }));
+    const size = `${state.terminal.cols}x${state.terminal.rows}`;
+    if (state.socket?.readyState === WebSocket.OPEN && size !== state.lastResize) {
+      if (state.resizeTimer !== undefined) window.clearTimeout(state.resizeTimer);
+      const socket = state.socket;
+      const cols = state.terminal.cols;
+      const rows = state.terminal.rows;
+      state.resizeTimer = window.setTimeout(() => {
+        state.resizeTimer = undefined;
+        if (state.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
+        const currentSize = `${cols}x${rows}`;
+        if (currentSize === state.lastResize) return;
+        socket.send(JSON.stringify({ type: "resize", cols, rows }));
+        state.lastResize = currentSize;
+      }, 100);
     }
   } catch { /* A resize may be queued while changing views. */ }
 }
@@ -2179,8 +2271,10 @@ function setConnectionState(label: string, kind: "connecting" | "online" | "offl
   composer.dataset.connected = String(connected);
   const input = composer.querySelector<HTMLTextAreaElement>(".terminal-composer-input");
   const send = composer.querySelector<HTMLButtonElement>(".terminal-composer-send");
+  const attach = composer.querySelector<HTMLButtonElement>(".terminal-attach-button");
   const composerState = composer.querySelector<HTMLElement>(".terminal-composer-state");
   if (send) send.disabled = !connected || !input?.value.length;
+  if (attach) attach.disabled = !connected || !encryptedBridge || attach.dataset.uploading === "true";
   for (const button of composer.querySelectorAll<HTMLButtonElement>(".terminal-control-key")) button.disabled = !connected;
   if (composerState) {
     composerState.textContent = connected ? "Ready" : kind === "connecting" ? "Connecting…" : "Input unavailable";
@@ -2200,6 +2294,9 @@ function closeConnection(): void {
     state.socket.close();
   }
   state.socket = undefined;
+  if (state.resizeTimer !== undefined) window.clearTimeout(state.resizeTimer);
+  state.resizeTimer = undefined;
+  state.lastResize = undefined;
   state.touchCleanup?.();
   state.touchCleanup = undefined;
   state.touchSync = undefined;
