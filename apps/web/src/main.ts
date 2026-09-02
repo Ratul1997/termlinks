@@ -2286,7 +2286,9 @@ function renderTerminalComposer(): HTMLElement {
     attachmentList.replaceChildren();
     attachmentList.hidden = true;
     syncSend();
-    if (document.activeElement !== input) input.focus({ preventScroll: true });
+    // Submitting is a natural end to one mobile interaction. Release focus so
+    // iOS/Android dismiss the software keyboard and return space to the PTY.
+    if (document.activeElement === input) input.blur();
   };
   input.addEventListener("input", () => {
     syncSend();
