@@ -141,6 +141,25 @@ button { color: inherit; }
 .hint-title { display: block; color: #9ca9a1; font-size: 12px; }
 .hint-copy { margin: 4px 0 0; font-size: 11px; line-height: 1.45; }
 .hint-command { display: block; margin-top: 9px; color: #7fab8a; font-size: 10px; white-space: nowrap; }
+.termads-teaser {
+  display: flex; align-items: center; gap: 12px; margin-top: 12px; padding: 13px 14px;
+  border: 1px solid #4a442d; border-radius: 13px; color: inherit; background: linear-gradient(135deg, #19180f, #12150f);
+  text-decoration: none; transition: border-color .15s, transform .15s, background .15s;
+}
+.termads-teaser:hover { border-color: #756b3d; background: linear-gradient(135deg, #201e11, #151911); transform: translateY(-1px); }
+.termads-teaser:active { transform: translateY(0); }
+.termads-mark {
+  display: grid; flex: 0 0 auto; place-items: center; width: 35px; height: 35px; border-radius: 8px;
+  color: #f0d86e; background: #292511; font: 800 12px/1 ui-monospace, monospace;
+}
+.termads-copy { min-width: 0; }
+.termads-name, .termads-description { display: block; }
+.termads-name { color: #ddd7b8; font-size: 12px; }
+.termads-description { overflow: hidden; margin-top: 3px; color: #8f8c77; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.termads-status {
+  flex: 0 0 auto; margin-left: auto; padding: 5px 7px; border-radius: 6px;
+  color: #f0d86e; background: #292511; font: 700 8px/1 ui-monospace, monospace; letter-spacing: .08em;
+}
 .empty-state { padding: 60px 20px; border: 1px dashed var(--line); border-radius: 16px; text-align: center; }
 .empty-prompt { color: var(--green); font: 18px ui-monospace, monospace; }
 .empty-title { margin: 16px 0 8px; font-size: 20px; }
@@ -337,6 +356,8 @@ button { color: inherit; }
   .dashboard-heading { align-items: flex-start; flex-direction: column; gap: 14px; }
   .dashboard-actions { width: 100%; }
   .new-terminal-button, .desktop-button { flex: 1; }
+  .termads-description { white-space: normal; }
+  .termads-status { max-width: 74px; text-align: center; line-height: 1.3; }
 }
 
 @media (min-width: 680px) {

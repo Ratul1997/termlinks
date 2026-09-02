@@ -516,6 +516,8 @@ npm audit
 
 See [docs/cloudflare.md](docs/cloudflare.md) for deployment, connector-secret rotation, and public smoke-test commands.
 
+The portal currently includes a small **TermAds — Coming soon** teaser linking to [termads.dev](https://termads.dev/). It is a normal external link only: Termlinks does not load TermAds scripts, ads, tracking, or network requests inside terminal sessions.
+
 ## Related open-source projects
 
 Termlinks is not the only open-source way to reach a shell or desktop remotely. The closest options solve overlapping but different problems:

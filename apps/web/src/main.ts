@@ -915,7 +915,7 @@ function renderSessions(): void {
   const list = el("section", "session-list");
   list.id = "session-list";
   renderSessionCards(list);
-  page.append(header, heading, transferStatus, createPanel, list, renderStartHint());
+  page.append(header, heading, transferStatus, createPanel, list, renderStartHint(), renderTermAdsTeaser());
   app.append(page);
   updateSessionSummary();
   startPolling();
@@ -1593,6 +1593,24 @@ function renderStartHint(): HTMLElement {
   );
   hint.append(icon, copy);
   return hint;
+}
+
+function renderTermAdsTeaser(): HTMLElement {
+  const teaser = document.createElement("a");
+  teaser.className = "termads-teaser";
+  teaser.href = "https://termads.dev/";
+  teaser.target = "_blank";
+  teaser.rel = "noopener noreferrer";
+  teaser.setAttribute("aria-label", "TermAds, coming soon to Termlinks (opens in a new tab)");
+  const mark = el("span", "termads-mark", "ad_");
+  const copy = el("span", "termads-copy");
+  copy.append(
+    el("strong", "termads-name", "TermAds"),
+    el("span", "termads-description", "Developer-tool sponsorships, built for the terminal."),
+  );
+  const status = el("span", "termads-status", "COMING SOON ↗");
+  teaser.append(mark, copy, status);
+  return teaser;
 }
 
 function renderSessionCards(container: HTMLElement): void {
