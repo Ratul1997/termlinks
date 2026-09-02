@@ -200,8 +200,13 @@ button { color: inherit; }
   overflow-y: auto; overscroll-behavior-y: contain; touch-action: pan-y;
   -webkit-overflow-scrolling: touch; -webkit-user-select: text; user-select: text;
 }
+.terminal-mount .xterm.native-touch-terminal > .xterm-scrollable-element {
+  /* xterm wraps the rendered screen in this element. Pin the wrapper itself;
+     pinning only .xterm-screen lets WebKit scroll its parent away to black. */
+  position: sticky !important; z-index: 2; top: 0; touch-action: pan-y;
+}
 .terminal-mount .xterm.native-touch-terminal .xterm-screen {
-  position: sticky; z-index: 2; top: 0; touch-action: pan-y;
+  touch-action: pan-y;
   -webkit-user-select: text; user-select: text;
 }
 .terminal-mount .xterm.native-touch-terminal .xterm-rows,
