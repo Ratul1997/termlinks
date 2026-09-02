@@ -65,6 +65,8 @@ Stop a managed session:
 termlinks stop <session-id>
 ```
 
+`termlinks list` shows both running and finished sessions. You can use the short ID displayed in that list with `attach` or `stop`.
+
 Start the portal daemon manually in the foreground:
 
 ```sh
@@ -89,6 +91,19 @@ make install
 ```
 
 `make install` copies the executable to `~/.local/bin/termlinks`. Without installing, replace `termlinks` in the examples with `./dist/termlinks`.
+
+## Managing sessions in the portal
+
+After login, the portal dashboard automatically shows every managed terminal and its current state:
+
+- The header shows the number of running and finished sessions.
+- Each card shows the session name, command, directory, runtime, and status.
+- Select **Open terminal** to view and type in that terminal.
+- Select **Stop & close** to terminate a running command after confirmation.
+- The terminal screen also has **Stop & close session** in its `•••` menu.
+- Finished sessions remain available for viewing their retained output.
+
+Stopping or closing a session terminates its command. Simply closing the browser or local Terminal window only disconnects that viewer; the managed command continues running.
 
 ## Phone access
 

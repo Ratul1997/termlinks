@@ -138,8 +138,9 @@ function renderSessions(): void {
   const brand = el("button", "brand brand-button");
   brand.type = "button";
   brand.append(el("span", "brand-mark", ">_"), el("span", "brand-name", "termlinks"));
-  const status = el("div", "computer-status", "Computer online");
-  status.prepend(el("span", "online-dot"));
+  const status = el("div", "computer-status");
+  status.id = "computer-status";
+  status.append(el("span", "online-dot"), el("span", "computer-status-label", "Computer online"));
   const logout = el("button", "ghost-button", "Log out");
   logout.type = "button";
   logout.addEventListener("click", async () => {
@@ -154,7 +155,9 @@ function renderSessions(): void {
 
   const heading = el("div", "dashboard-heading");
   const titleGroup = el("div");
-  titleGroup.append(el("p", "eyebrow", "YOUR COMPUTER"), el("h1", "dashboard-title", "Terminal sessions"));
+  const summary = el("p", "session-summary", "Checking sessions…");
+  summary.id = "session-summary";
+  titleGroup.append(el("p", "eyebrow", "YOUR COMPUTER"), el("h1", "dashboard-title", "Terminal sessions"), summary);
   const refresh = el("button", "icon-button", "↻");
   refresh.type = "button";
   refresh.title = "Refresh sessions";
@@ -167,6 +170,7 @@ function renderSessions(): void {
   renderSessionCards(list);
   page.append(header, heading, list, renderStartHint());
   app.append(page);
+  updateSessionSummary();
   startPolling();
 }
 
@@ -177,6 +181,7 @@ function renderStartHint(): HTMLElement {
   copy.append(
     el("strong", "hint-title", "Start sessions from your computer"),
     el("p", "hint-copy", "Use termlinks <command>. Remote command creation is disabled for safety."),
+    el("code", "hint-command", "termlinks list  ·  termlinks stop <id>"),
   );
   hint.append(icon, copy);
   return hint;
@@ -191,9 +196,11 @@ function renderSessionCards(container: HTMLElement): void {
     return;
   }
   for (const session of state.sessions) {
-    const card = el("button", "session-card");
-    card.type = "button";
-    card.addEventListener("click", () => renderTerminal(session.id));
+    const card = el("article", "session-card");
+    const open = el("button", "session-open");
+    open.type = "button";
+    open.setAttribute("aria-label", `Open ${session.name} terminal`);
+    open.addEventListener("click", () => renderTerminal(session.id));
     const row = el("div", "session-card-row");
     const identity = el("div", "session-identity");
     identity.append(el("span", `session-dot ${session.running ? "live" : "ended"}`), el("h2", "session-name", session.name));
@@ -202,9 +209,44 @@ function renderSessionCards(container: HTMLElement): void {
     const command = el("code", "session-command", `$ ${session.command.join(" ")}`);
     const meta = el("div", "session-meta");
     meta.append(el("span", "cwd", compactPath(session.cwd)), el("span", "session-age", ageLabel(session)), el("span", "card-arrow", "›"));
-    card.append(row, command, meta);
+    open.append(row, command, meta);
+
+    const controls = el("div", "card-controls");
+    const openAction = el("button", "card-action", "Open terminal");
+    openAction.type = "button";
+    openAction.addEventListener("click", () => renderTerminal(session.id));
+    controls.append(openAction);
+    if (session.running) {
+      const stopAction = el("button", "card-action danger", "Stop & close");
+      stopAction.type = "button";
+      stopAction.addEventListener("click", () => stopFromDashboard(session, stopAction));
+      controls.append(stopAction);
+    }
+    card.append(open, controls);
     container.append(card);
   }
+}
+
+async function stopFromDashboard(session: Session, button: HTMLButtonElement): Promise<void> {
+  if (!window.confirm(`Stop and close “${session.name}”? The running command will be terminated.`)) return;
+  button.disabled = true;
+  button.textContent = "Stopping…";
+  try {
+    await api(`/api/sessions/${encodeURIComponent(session.id)}/stop`, { method: "POST" });
+    window.setTimeout(() => refreshSessions(), 500);
+  } catch (caught) {
+    button.disabled = false;
+    button.textContent = caught instanceof Error ? caught.message : "Could not stop";
+  }
+}
+
+function updateSessionSummary(): void {
+  const running = state.sessions.filter((session) => session.running).length;
+  const finished = state.sessions.length - running;
+  const summary = document.querySelector<HTMLElement>("#session-summary");
+  if (summary) summary.textContent = `${running} running · ${finished} finished`;
+  const status = document.querySelector<HTMLElement>("#computer-status .computer-status-label");
+  if (status) status.textContent = `Computer online · ${running} running`;
 }
 
 async function refreshSessions(showMotion = false): Promise<void> {
@@ -212,6 +254,7 @@ async function refreshSessions(showMotion = false): Promise<void> {
     await loadSessions();
     const container = document.querySelector<HTMLElement>("#session-list");
     if (container) renderSessionCards(container);
+    updateSessionSummary();
     if (showMotion) {
       document.querySelector<HTMLElement>(".icon-button")?.animate(
         [{ transform: "rotate(0)" }, { transform: "rotate(360deg)" }],
@@ -258,7 +301,7 @@ function renderTerminal(id: string): void {
   const reconnect = el("button", "menu-button", "Reconnect");
   reconnect.type = "button";
   reconnect.addEventListener("click", () => connectTerminal(session));
-  const stop = el("button", "menu-button danger", "Stop session");
+  const stop = el("button", "menu-button danger", "Stop & close session");
   stop.type = "button";
   stop.disabled = !session.running;
   stop.addEventListener("click", async () => {
