@@ -761,7 +761,10 @@ function renderTerminal(id: string): void {
     scrollback: 10_000,
     scrollOnUserInput: true,
     scrollSensitivity: 1.15,
-    smoothScrollDuration: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 90,
+    // xterm's animated wheel scrolling starts a new animation for every input
+    // event. Rapid trackpad/touch input can build up enough work to stutter on
+    // mobile Safari/WebKit, so touch momentum is handled below once per frame.
+    smoothScrollDuration: 0,
     theme: {
       background: "#070a09", foreground: "#d8e2dc", cursor: "#9fffb9", cursorAccent: "#070a09",
       selectionBackground: "#335c4166", black: "#111715", brightBlack: "#66716b",
@@ -773,7 +776,7 @@ function renderTerminal(id: string): void {
   terminal.open(mount);
   state.terminal = terminal;
   state.fit = fit;
-  state.touchCleanup = enableNativeTouchScroll(terminal);
+  state.touchCleanup = enableTouchScroll(terminal);
   fitTerminal();
   terminal.focus();
   terminal.onData((data) => {
@@ -785,14 +788,115 @@ function renderTerminal(id: string): void {
   window.addEventListener("orientationchange", fitTerminal, { once: true });
 }
 
-function enableNativeTouchScroll(terminal: Terminal): () => void {
+function enableTouchScroll(terminal: Terminal): () => void {
+  const root = terminal.element;
   const viewport = terminal.element?.querySelector<HTMLElement>(".xterm-viewport");
-  if (!viewport) return () => undefined;
-  // xterm 5.5 manually applies touch deltas and cancels the browser gesture.
-  // Stop that bubbling handler so the overflow viewport keeps native momentum.
-  const keepNativeMomentum = (event: TouchEvent): void => event.stopPropagation();
-  viewport.addEventListener("touchmove", keepNativeMomentum, { passive: true });
-  return () => viewport.removeEventListener("touchmove", keepNativeMomentum);
+  const hasTouchInput = navigator.maxTouchPoints > 0 || window.matchMedia("(pointer: coarse)").matches;
+  if (!root || !viewport || !hasTouchInput) return () => undefined;
+
+  let activeTouch: number | undefined;
+  let lastY = 0;
+  let lastTime = 0;
+  let velocity = 0;
+  let pendingDelta = 0;
+  let scrollFrame = 0;
+  let momentumFrame = 0;
+
+  const cancelMomentum = (): void => {
+    if (momentumFrame) window.cancelAnimationFrame(momentumFrame);
+    momentumFrame = 0;
+  };
+  const applyPendingScroll = (): void => {
+    scrollFrame = 0;
+    if (!pendingDelta) return;
+    viewport.scrollTop += pendingDelta;
+    pendingDelta = 0;
+  };
+  const findTouch = (touches: TouchList): Touch | undefined => {
+    if (activeTouch === undefined) return undefined;
+    for (let index = 0; index < touches.length; index += 1) {
+      const touch = touches.item(index);
+      if (touch?.identifier === activeTouch) return touch;
+    }
+    return undefined;
+  };
+  const onTouchStart = (event: TouchEvent): void => {
+    if (event.touches.length !== 1) return;
+    const touch = event.touches.item(0);
+    if (!touch) return;
+    cancelMomentum();
+    activeTouch = touch.identifier;
+    lastY = touch.clientY;
+    lastTime = performance.now();
+    velocity = 0;
+    pendingDelta = 0;
+    // The visible xterm canvas and its scroll viewport are siblings. Capture
+    // the gesture here so xterm's synchronous per-event handler cannot run too.
+    event.stopImmediatePropagation();
+  };
+  const onTouchMove = (event: TouchEvent): void => {
+    const touch = findTouch(event.touches);
+    if (!touch) return;
+    const now = performance.now();
+    const elapsed = Math.max(1, now - lastTime);
+    const delta = lastY - touch.clientY;
+    lastY = touch.clientY;
+    lastTime = now;
+    velocity = Math.max(-3, Math.min(3, velocity * 0.72 + (delta / elapsed) * 0.28));
+    pendingDelta += delta;
+    if (!scrollFrame) scrollFrame = window.requestAnimationFrame(applyPendingScroll);
+    if (event.cancelable) event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+  const startMomentum = (): void => {
+    if (Math.abs(velocity) < 0.03) return;
+    let previous = performance.now();
+    const step = (now: number): void => {
+      const elapsed = Math.min(32, now - previous);
+      previous = now;
+      const before = viewport.scrollTop;
+      viewport.scrollTop += velocity * elapsed;
+      velocity *= Math.pow(0.95, elapsed / 16.67);
+      const hitBoundary = viewport.scrollTop === before;
+      if (!hitBoundary && Math.abs(velocity) >= 0.03) {
+        momentumFrame = window.requestAnimationFrame(step);
+      } else {
+        momentumFrame = 0;
+      }
+    };
+    momentumFrame = window.requestAnimationFrame(step);
+  };
+  const onTouchEnd = (event: TouchEvent): void => {
+    if (!findTouch(event.changedTouches)) return;
+    if (scrollFrame) {
+      window.cancelAnimationFrame(scrollFrame);
+      applyPendingScroll();
+    }
+    activeTouch = undefined;
+    startMomentum();
+  };
+  const onTouchCancel = (): void => {
+    activeTouch = undefined;
+    pendingDelta = 0;
+    velocity = 0;
+    if (scrollFrame) window.cancelAnimationFrame(scrollFrame);
+    scrollFrame = 0;
+    cancelMomentum();
+  };
+
+  root.classList.add("touch-scroll");
+  root.addEventListener("touchstart", onTouchStart, { capture: true, passive: true });
+  root.addEventListener("touchmove", onTouchMove, { capture: true, passive: false });
+  root.addEventListener("touchend", onTouchEnd, { capture: true, passive: true });
+  root.addEventListener("touchcancel", onTouchCancel, { capture: true, passive: true });
+  return () => {
+    onTouchCancel();
+    root.classList.remove("touch-scroll");
+    root.removeEventListener("touchstart", onTouchStart, true);
+    root.removeEventListener("touchmove", onTouchMove, true);
+    root.removeEventListener("touchend", onTouchEnd, true);
+    root.removeEventListener("touchcancel", onTouchCancel, true);
+  };
 }
 
 function renderExtraKeys(): HTMLElement {

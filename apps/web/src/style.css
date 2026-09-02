@@ -170,9 +170,12 @@ button { color: inherit; }
 .connection-bar.warning .connection-dot { background: #e7b65a; }
 .terminal-frame { min-height: 0; overflow: hidden; padding: 10px 6px 4px 10px; }
 .terminal-mount, .terminal-mount .xterm { width: 100%; height: 100%; }
+.terminal-mount .xterm.touch-scroll {
+  touch-action: none;
+  overscroll-behavior: contain;
+}
 .terminal-mount .xterm-viewport {
   overscroll-behavior-y: contain; scrollbar-color: #344139 transparent; scrollbar-width: thin;
-  touch-action: pan-y; -webkit-overflow-scrolling: touch;
 }
 .extra-keys {
   display: flex; gap: 6px; overflow-x: auto; padding: 7px 8px max(7px, env(safe-area-inset-bottom));
