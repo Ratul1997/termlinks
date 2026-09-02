@@ -196,6 +196,8 @@ The portal token is not a configurable password string: Termlinks generates it, 
 
 The login form exposes standard username/current-password metadata so Safari, Chrome, an installed PWA, and the operating system password manager can offer to save and autofill the portal token. Save it under the generated `termlinks` username. Face ID or device-lock confirmation is controlled by iOS and the selected password manager; Termlinks never receives biometric data and cannot force the prompt.
 
+In the hosted E2E portal, **Keep me signed in on this device** is enabled by default. After successful authentication, Termlinks stores the derived, non-exportable AES-GCM `CryptoKey` in origin-scoped IndexedDB—not the raw token. If iOS suspends or terminates the PWA, it uses that key to reconnect automatically and restores the previously open terminal when possible. **Log out** deletes the stored key. Clearing website data also deletes it. Uncheck the option on a shared or untrusted device.
+
 ### Direct portal authentication and network behavior
 
 | Setting | Value |
@@ -461,6 +463,7 @@ Selected-window access also stops immediately when `termlinks desktop disable` d
 - **Window is missing from the list:** make sure it is open, on screen, not minimized, and has a normal title, then tap **Refresh**.
 - **Computer offline:** run `termlinks cloud start` and check `termlinks cloud status`. The connector is outbound-only; do not open or forward port 5900 on the router.
 - **PWA appears outdated:** fully close and reopen it. If necessary, reload your portal URL in the browser or remove and add the Home Screen app again.
+- **PWA asks for the token after every app switch:** sign in once with **Keep me signed in on this device** checked. A normal iOS WebSocket suspension then reconnects automatically. Explicit logout, clearing website data, private-browsing storage restrictions, or rotating the portal token requires login again.
 - **Connection stops while away:** the Mac must remain powered on, awake, and online. Terminal processes and desktop access are unavailable while it sleeps.
 
 ### Remote desktop security notes
@@ -471,6 +474,7 @@ Selected-window access also stops immediately when `termlinks desktop disable` d
 - VNC credentials are supplied directly to the in-browser VNC client for the live connection. Termlinks does not save them.
 - Selected-window titles, application names, captured frames, and control events are encrypted inside the same bridge. Cloudflare receives ciphertext, sizes, timing, and ordinary connection metadata only.
 - Uploaded filenames and file bytes are chunked inside that same authenticated AES-256-GCM bridge. Cloudflare can observe transfer timing and ciphertext sizes but not names or contents.
+- A remembered hosted-portal login stores a non-exportable derived bridge key in that Pages origin's IndexedDB. It avoids storing the raw token, but it is still an authentication capability: anyone able to use the unlocked PWA can control the connected computer. Use explicit **Log out** before sharing the phone and do not enable remembering on an untrusted device.
 - macOS Screen Recording and Accessibility permissions apply to the installed Termlinks executable. Replacing it with an unsigned/differently signed build may require approval again; official local builds use the stable `dev.termlinks.cli` ad-hoc identifier.
 - View-only mode prevents accidental input in the UI; it is a safety control, not an authentication boundary.
 

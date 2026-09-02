@@ -114,6 +114,13 @@ const state: {
 let encryptedPortal = true;
 let encryptedBridge: EncryptedBridge | undefined;
 let installPrompt: BeforeInstallPromptEvent | undefined;
+let portalResumeKey: CryptoKey | undefined;
+let portalReconnect: Promise<void> | undefined;
+let portalReconnectTimer = 0;
+
+const PORTAL_KEY_DATABASE = "termlinks-secure-session";
+const PORTAL_KEY_STORE = "keys";
+const PORTAL_KEY_ID = "portal-e2e-key";
 
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
@@ -281,7 +288,11 @@ class EncryptedBridge {
   private failed = false;
 
   async connect(token: string): Promise<void> {
-    this.key = await deriveEncryptionKey(token);
+    await this.connectWithKey(await deriveEncryptionKey(token));
+  }
+
+  async connectWithKey(key: CryptoKey): Promise<void> {
+    this.key = key;
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${scheme}//${location.host}/ws/bridge`);
     this.socket = socket;
@@ -624,7 +635,12 @@ class EncryptedBridge {
     if (encryptedBridge === this && state.authenticated) {
       encryptedBridge = undefined;
       state.authenticated = false;
-      window.queueMicrotask(() => renderLogin(error.message));
+      if (portalResumeKey) {
+        setConnectionState("Connection paused · reconnecting…", "connecting");
+        window.queueMicrotask(() => { void resumeEncryptedPortal(); });
+      } else {
+        window.queueMicrotask(() => renderLogin(error.message));
+      }
     }
   }
 }
@@ -657,6 +673,76 @@ async function waitForBridge(socket: WebSocket): Promise<{ id: string }> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function openPortalKeyDatabase(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(PORTAL_KEY_DATABASE, 1);
+    request.addEventListener("upgradeneeded", () => {
+      if (!request.result.objectStoreNames.contains(PORTAL_KEY_STORE)) request.result.createObjectStore(PORTAL_KEY_STORE);
+    });
+    request.addEventListener("success", () => resolve(request.result), { once: true });
+    request.addEventListener("error", () => reject(request.error || new Error("Could not open secure device storage")), { once: true });
+    request.addEventListener("blocked", () => reject(new Error("Secure device storage is blocked")), { once: true });
+  });
+}
+
+async function loadPortalResumeKey(): Promise<CryptoKey | undefined> {
+  if (!("indexedDB" in window)) return undefined;
+  let database: IDBDatabase | undefined;
+  try {
+    database = await openPortalKeyDatabase();
+    const value = await new Promise<unknown>((resolve, reject) => {
+      const request = database!.transaction(PORTAL_KEY_STORE, "readonly").objectStore(PORTAL_KEY_STORE).get(PORTAL_KEY_ID);
+      request.addEventListener("success", () => resolve(request.result), { once: true });
+      request.addEventListener("error", () => reject(request.error || new Error("Could not read secure device storage")), { once: true });
+    });
+    if (!(value instanceof CryptoKey) || value.extractable || value.algorithm.name !== "AES-GCM") return undefined;
+    if (!value.usages.includes("encrypt") || !value.usages.includes("decrypt")) return undefined;
+    return value;
+  } catch {
+    return undefined;
+  } finally {
+    database?.close();
+  }
+}
+
+async function savePortalResumeKey(key: CryptoKey): Promise<boolean> {
+  if (!("indexedDB" in window) || key.extractable) return false;
+  let database: IDBDatabase | undefined;
+  try {
+    database = await openPortalKeyDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database!.transaction(PORTAL_KEY_STORE, "readwrite");
+      transaction.objectStore(PORTAL_KEY_STORE).put(key, PORTAL_KEY_ID);
+      transaction.addEventListener("complete", () => resolve(), { once: true });
+      transaction.addEventListener("abort", () => reject(transaction.error || new Error("Could not save secure login")), { once: true });
+      transaction.addEventListener("error", () => reject(transaction.error || new Error("Could not save secure login")), { once: true });
+    });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    database?.close();
+  }
+}
+
+async function clearPortalResumeKey(): Promise<void> {
+  portalResumeKey = undefined;
+  if (portalReconnectTimer) window.clearTimeout(portalReconnectTimer);
+  portalReconnectTimer = 0;
+  if (!("indexedDB" in window)) return;
+  let database: IDBDatabase | undefined;
+  try {
+    database = await openPortalKeyDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database!.transaction(PORTAL_KEY_STORE, "readwrite");
+      transaction.objectStore(PORTAL_KEY_STORE).delete(PORTAL_KEY_ID);
+      transaction.addEventListener("complete", () => resolve(), { once: true });
+      transaction.addEventListener("abort", () => reject(transaction.error), { once: true });
+    });
+  } catch { /* Private browsing or cleared site storage already forgets the key. */ }
+  finally { database?.close(); }
 }
 
 function isWindowSource(value: unknown): value is WindowSource {
@@ -708,6 +794,7 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     const response = await encryptedBridge.request(method, path, body);
     if (response.status === 401) {
       state.authenticated = false;
+      await clearPortalResumeKey();
       closeConnection();
       const bridge = encryptedBridge;
       encryptedBridge = undefined;
@@ -744,10 +831,58 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function resumeEncryptedPortal(): Promise<void> {
+  if (!encryptedPortal || !portalResumeKey || state.authenticated || portalReconnect || document.visibilityState === "hidden") return;
+  const key = portalResumeKey;
+  const selectedSession = state.selected;
+  if (portalReconnectTimer) window.clearTimeout(portalReconnectTimer);
+  portalReconnectTimer = 0;
+  setConnectionState("Reconnecting securely…", "connecting");
+  portalReconnect = (async () => {
+    const previous = encryptedBridge;
+    encryptedBridge = undefined;
+    previous?.close();
+    const bridge = new EncryptedBridge();
+    await bridge.connectWithKey(key);
+    encryptedBridge = bridge;
+    state.authenticated = true;
+    await loadSessions();
+    const session = selectedSession ? state.sessions.find((item) => item.id === selectedSession) : undefined;
+    if (session && state.terminal && document.querySelector(".terminal-page")) connectTerminal(session);
+    else if (session) renderTerminal(session.id);
+    else renderSessions();
+  })().catch(async (caught: unknown) => {
+    encryptedBridge = undefined;
+    state.authenticated = false;
+    const message = caught instanceof Error ? caught.message : "Could not reconnect securely";
+    if (message.includes("Invalid portal token")) {
+      await clearPortalResumeKey();
+      renderLogin("The saved device login is no longer valid. Enter the current portal token.");
+      return;
+    }
+    renderLogin("Saved login found. Reconnecting when the computer is available…");
+    if (portalResumeKey && document.visibilityState === "visible") {
+      portalReconnectTimer = window.setTimeout(() => {
+        portalReconnectTimer = 0;
+        void resumeEncryptedPortal();
+      }, 2500);
+    }
+  }).finally(() => {
+    portalReconnect = undefined;
+  });
+  await portalReconnect;
+}
+
 async function boot(): Promise<void> {
   encryptedPortal = !(await isDirectPortal());
   if (encryptedPortal) {
-    renderLogin();
+    portalResumeKey = await loadPortalResumeKey();
+    if (portalResumeKey) {
+      renderLogin("Restoring the secure device login…");
+      await resumeEncryptedPortal();
+    } else {
+      renderLogin();
+    }
     return;
   }
   try {
@@ -781,6 +916,7 @@ async function isDirectPortal(): Promise<boolean> {
 
 function renderLogin(message = ""): void {
   stopPolling();
+  closeConnection();
   app.replaceChildren();
   const page = el("main", "login-page");
   const panel = el("section", "login-panel");
@@ -814,13 +950,20 @@ function renderLogin(message = ""): void {
   input.spellcheck = false;
   input.placeholder = "Paste your private token";
   input.required = true;
+  const rememberLabel = el("label", "remember-device");
+  const remember = el("input", "remember-device-checkbox");
+  remember.type = "checkbox";
+  remember.checked = true;
+  rememberLabel.append(remember, el("span", "remember-device-copy", "Keep me signed in on this device"));
   const submit = el("button", "primary-button", "Unlock portal");
   submit.type = "submit";
   const error = el("p", "form-error", message);
   error.setAttribute("role", "alert");
-  form.append(username, label, input, submit, error);
+  form.append(username, label, input, rememberLabel, submit, error);
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (portalReconnectTimer) window.clearTimeout(portalReconnectTimer);
+    portalReconnectTimer = 0;
     submit.disabled = true;
     submit.textContent = "Checking…";
     error.textContent = "";
@@ -829,9 +972,13 @@ function renderLogin(message = ""): void {
       if (token.length < 32) throw new Error("Paste the complete portal token without backticks");
       if (encryptedPortal) {
         encryptedBridge?.close();
+        const key = await deriveEncryptionKey(token);
         const bridge = new EncryptedBridge();
-        await bridge.connect(token);
+        await bridge.connectWithKey(key);
         encryptedBridge = bridge;
+        portalResumeKey = key;
+        if (remember.checked) await savePortalResumeKey(key);
+        else await clearPortalResumeKey();
       } else {
         await api("/api/login", { method: "POST", body: JSON.stringify({ token }) });
       }
@@ -845,7 +992,7 @@ function renderLogin(message = ""): void {
       input.focus();
     }
   });
-  panel.append(form, createInstallButton(), el("p", "login-hint", "On your computer: termlinks token · Install from your browser menu on iPhone/iPad"));
+  panel.append(form, createInstallButton(), el("p", "login-hint", "On your computer: termlinks token · A remembered device reconnects automatically after iOS suspension"));
   page.append(panel);
   app.append(page);
   if (!window.matchMedia("(pointer: coarse)").matches) input.focus();
@@ -876,6 +1023,7 @@ function renderSessions(): void {
       await api("/api/logout", { method: "POST" });
     } finally {
       state.authenticated = false;
+      await clearPortalResumeKey();
       encryptedBridge?.close();
       encryptedBridge = undefined;
       renderLogin();
@@ -1829,7 +1977,11 @@ function installTerminalViewportSizing(page: HTMLElement): () => void {
 
   const sync = (): void => {
     animationFrame = 0;
-    const height = Math.max(1, viewport?.height ?? window.innerHeight);
+    if (document.visibilityState === "hidden") return;
+    const height = viewport?.height ?? window.innerHeight;
+    // WebKit can briefly report zero while a standalone PWA is suspended.
+    // Keeping the last valid layout prevents the composer from collapsing.
+    if (!Number.isFinite(height) || height < 160) return;
     const offsetTop = Math.max(0, viewport?.offsetTop ?? 0);
     page.style.setProperty("--terminal-viewport-height", `${height}px`);
     page.style.setProperty("--terminal-viewport-top", `${offsetTop}px`);
@@ -1845,12 +1997,16 @@ function installTerminalViewportSizing(page: HTMLElement): () => void {
     // animation settles in case the last VisualViewport event was skipped.
     settleTimer = window.setTimeout(schedule, 350);
   };
+  const onVisibilityChange = (): void => {
+    if (document.visibilityState === "visible") settle();
+  };
 
   window.addEventListener("resize", schedule, { passive: true });
   viewport?.addEventListener("resize", schedule, { passive: true });
   viewport?.addEventListener("scroll", schedule, { passive: true });
   page.addEventListener("focusin", settle);
   page.addEventListener("focusout", settle);
+  document.addEventListener("visibilitychange", onVisibilityChange);
   sync();
 
   return () => {
@@ -1861,6 +2017,7 @@ function installTerminalViewportSizing(page: HTMLElement): () => void {
     viewport?.removeEventListener("scroll", schedule);
     page.removeEventListener("focusin", settle);
     page.removeEventListener("focusout", settle);
+    document.removeEventListener("visibilitychange", onVisibilityChange);
     document.documentElement.classList.remove("terminal-active");
   };
 }
@@ -2334,5 +2491,11 @@ if ("serviceWorker" in navigator) {
     void navigator.serviceWorker.register("/sw.js", { scope: "/", updateViaCache: "none" });
   }, { once: true });
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") void resumeEncryptedPortal();
+});
+window.addEventListener("pageshow", () => { void resumeEncryptedPortal(); });
+window.addEventListener("online", () => { void resumeEncryptedPortal(); });
 
 void boot();

@@ -56,6 +56,11 @@ button { color: inherit; }
   color: var(--ink); background: #090e0b; font-family: ui-monospace, monospace;
 }
 .token-input:focus { border-color: #6cc88a; box-shadow: 0 0 0 3px rgba(108, 200, 138, .12); }
+.remember-device {
+  display: flex; align-items: center; gap: 9px; margin-top: 12px;
+  color: #91a099; font-size: 12px; cursor: pointer;
+}
+.remember-device-checkbox { width: 17px; height: 17px; margin: 0; accent-color: var(--green); }
 .password-manager-username {
   position: absolute; width: 1px; height: 1px; padding: 0; border: 0; margin: -1px;
   overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
