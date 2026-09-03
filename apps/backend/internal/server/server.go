@@ -87,6 +87,7 @@ func (s *Server) WebHandler() http.Handler {
 	}))
 	mux.HandleFunc("GET /api/sessions", s.requireWebAuth(s.listSessions))
 	mux.HandleFunc("POST /api/sessions", s.requireWebAuth(s.createWebSession))
+	mux.HandleFunc("PATCH /api/sessions/{id}", s.requireWebAuth(s.renameWebSession))
 	mux.HandleFunc("POST /api/sessions/{id}/stop", s.requireWebAuth(s.stopSession))
 	mux.HandleFunc("GET /api/agents", s.requireWebAuth(s.listAgents))
 	mux.HandleFunc("POST /api/agents/refresh", s.requireWebAuth(s.refreshAgents))
@@ -335,6 +336,26 @@ func (s *Server) createWebSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusCreated, created.Info())
+}
+
+func (s *Server) renameWebSession(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "cross-origin request rejected")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	defer r.Body.Close()
+	input, err := remote.DecodeRenameRequest(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	current, ok := s.sessions.Get(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, current.Rename(input.Name))
 }
 
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {

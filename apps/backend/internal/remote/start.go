@@ -25,6 +25,10 @@ type StartRequest struct {
 	Cwd  string `json:"cwd"`
 }
 
+type RenameRequest struct {
+	Name string `json:"name"`
+}
+
 func DecodeStartRequest(reader io.Reader) (StartRequest, error) {
 	var request StartRequest
 	decoder := json.NewDecoder(reader)
@@ -39,12 +43,34 @@ func DecodeStartRequest(reader io.Reader) (StartRequest, error) {
 	return request, nil
 }
 
-func (request StartRequest) Options() (session.StartOptions, error) {
-	name := strings.TrimSpace(request.Name)
-	cwd := strings.TrimSpace(request.Cwd)
-	if len(name) > maxNameLength || strings.ContainsRune(name, 0) {
-		return session.StartOptions{}, errors.New("session name is invalid")
+func DecodeRenameRequest(reader io.Reader) (RenameRequest, error) {
+	var request RenameRequest
+	decoder := json.NewDecoder(reader)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		return RenameRequest{}, errors.New("invalid rename request")
 	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return RenameRequest{}, errors.New("invalid rename request")
+	}
+	name, err := ValidateSessionName(request.Name)
+	if err != nil {
+		return RenameRequest{}, err
+	}
+	if name == "" {
+		return RenameRequest{}, errors.New("session name is required")
+	}
+	request.Name = name
+	return request, nil
+}
+
+func (request StartRequest) Options() (session.StartOptions, error) {
+	name, err := ValidateSessionName(request.Name)
+	if err != nil {
+		return session.StartOptions{}, err
+	}
+	cwd := strings.TrimSpace(request.Cwd)
 	if len(cwd) > maxCwdLength || strings.ContainsRune(cwd, 0) {
 		return session.StartOptions{}, errors.New("working directory is invalid")
 	}
@@ -78,4 +104,12 @@ func (request StartRequest) Options() (session.StartOptions, error) {
 		Cols:        100,
 		Rows:        30,
 	}, nil
+}
+
+func ValidateSessionName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if len(name) > maxNameLength || strings.ContainsRune(name, 0) {
+		return "", errors.New("session name is invalid")
+	}
+	return name, nil
 }
