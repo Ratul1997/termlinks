@@ -43,3 +43,24 @@ func TestInteractiveShellRequestValidation(t *testing.T) {
 		t.Fatal("accepted a relative working directory")
 	}
 }
+
+func TestRenameRequestValidation(t *testing.T) {
+	request, err := DecodeRenameRequest(strings.NewReader(`{"name":" renamed "}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Name != "renamed" {
+		t.Fatalf("rename name = %q", request.Name)
+	}
+	for _, payload := range []string{
+		`{"name":" "}`,
+		`{"name":"` + strings.Repeat("x", 81) + `"}`,
+		`{"name":"x","cwd":"/tmp"}`,
+		`{"name":"x"} {"name":"y"}`,
+		`not-json`,
+	} {
+		if _, err := DecodeRenameRequest(strings.NewReader(payload)); err == nil {
+			t.Fatalf("accepted invalid rename payload %q", payload)
+		}
+	}
+}

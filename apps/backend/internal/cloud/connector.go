@@ -1588,6 +1588,10 @@ func allowedHTTPRoute(method, requestPath string) bool {
 		}
 		return false
 	}
+	if method == http.MethodPatch && strings.HasPrefix(path, "/api/sessions/") {
+		id := strings.TrimPrefix(path, "/api/sessions/")
+		return validSessionID(id)
+	}
 	if method != http.MethodPost || !strings.HasPrefix(path, "/api/sessions/") || !strings.HasSuffix(path, "/stop") {
 		return false
 	}

@@ -59,6 +59,25 @@ type WorkflowDraft = { request: string; cwd: string; stages: WorkflowStage[] };
 
 type WorkspaceSuggestion = { path: string; name: string; lastUsedAt: string };
 
+type SavedTerminal = {
+  id: string;
+  sourceSessionId?: string;
+  name: string;
+  command: string[];
+  cwd: string;
+  favorite: boolean;
+  createdAt: string;
+  updatedAt: string;
+  lastOpenedAt: string;
+  lastClosedAt?: string;
+};
+
+type TerminalTemplate = {
+  name: string;
+  cwd: string;
+  command: string[];
+};
+
 type StatusMessage = {
   type: "status";
   running: boolean;
@@ -149,9 +168,14 @@ function readLastPortalView(): { view: PortalView; selected?: string; selectedWo
 
 const lastPortalView = readLastPortalView();
 
+const SAVED_TERMINALS_STORAGE_KEY = "termlinks-saved-terminals-v1";
+const MAX_RECENT_TERMINALS = 10;
+const MAX_TERMINAL_NAME_LENGTH = 80;
+
 const state: {
   authenticated: boolean;
   sessions: Session[];
+  savedTerminals: SavedTerminal[];
   selected?: string;
   socket?: TerminalLink;
   terminal?: Terminal;
@@ -171,7 +195,7 @@ const state: {
   view: PortalView;
   selectedWorkflow?: string;
 } = {
-  authenticated: false, sessions: [], terminalReconnectAttempts: 0, closedSessions: new Set(),
+  authenticated: false, sessions: [], savedTerminals: loadSavedTerminals(), terminalReconnectAttempts: 0, closedSessions: new Set(),
   view: lastPortalView.view, selected: lastPortalView.selected, selectedWorkflow: lastPortalView.selectedWorkflow,
 };
 
@@ -745,6 +769,170 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function loadSavedTerminals(): SavedTerminal[] {
+  try {
+    const raw = localStorage.getItem(SAVED_TERMINALS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const now = new Date().toISOString();
+    const loaded: SavedTerminal[] = [];
+    for (const value of parsed) {
+      if (!isRecord(value) || typeof value.name !== "string" || typeof value.cwd !== "string") continue;
+      const command = Array.isArray(value.command) && value.command.every((part) => typeof part === "string")
+        ? value.command.slice(0, 16) as string[]
+        : [];
+      const createdAt = normalizedDate(value.createdAt, now);
+      const updatedAt = normalizedDate(value.updatedAt, createdAt);
+      const lastOpenedAt = normalizedDate(value.lastOpenedAt, updatedAt);
+      const lastClosedAt = normalizedOptionalDate(value.lastClosedAt);
+      loaded.push({
+        id: typeof value.id === "string" && value.id ? value.id : newSavedTerminalID(),
+        sourceSessionId: typeof value.sourceSessionId === "string" && value.sourceSessionId ? value.sourceSessionId : undefined,
+        name: value.name.trim().slice(0, MAX_TERMINAL_NAME_LENGTH) || "Terminal",
+        command,
+        cwd: value.cwd,
+        favorite: value.favorite === true,
+        createdAt,
+        updatedAt,
+        lastOpenedAt,
+        lastClosedAt,
+      });
+    }
+    return pruneSavedTerminals(loaded);
+  } catch {
+    return [];
+  }
+}
+
+function saveSavedTerminals(): void {
+  try {
+    localStorage.setItem(SAVED_TERMINALS_STORAGE_KEY, JSON.stringify(state.savedTerminals));
+  } catch {
+    // Private browsing or full storage should not break active terminal use.
+  }
+}
+
+function commitSavedTerminals(next: SavedTerminal[]): void {
+  state.savedTerminals = pruneSavedTerminals(next);
+  saveSavedTerminals();
+}
+
+function pruneSavedTerminals(items: SavedTerminal[]): SavedTerminal[] {
+  const byID = new Map<string, SavedTerminal>();
+  for (const item of items) byID.set(item.id, item);
+  const deduped = Array.from(byID.values());
+  const recent = deduped
+    .filter((item) => !item.favorite)
+    .sort((a, b) => savedActivityTime(b) - savedActivityTime(a))
+    .slice(0, MAX_RECENT_TERMINALS);
+  const recentIDs = new Set(recent.map((item) => item.id));
+  return deduped
+    .filter((item) => item.favorite || recentIDs.has(item.id))
+    .sort((a, b) => savedActivityTime(b) - savedActivityTime(a));
+}
+
+function saveSessionSnapshot(session: Session, options: { savedId?: string; favorite?: boolean; opened?: boolean; closed?: boolean } = {}): SavedTerminal {
+  const now = new Date().toISOString();
+  const existing = (options.savedId ? state.savedTerminals.find((item) => item.id === options.savedId) : undefined)
+    ?? state.savedTerminals.find((item) => item.sourceSessionId === session.id)
+    ?? state.savedTerminals.find((item) => item.name === session.name && item.cwd === session.cwd && !runningSessionForSaved(item));
+  const saved: SavedTerminal = {
+    id: existing?.id ?? newSavedTerminalID(),
+    sourceSessionId: session.id,
+    name: session.name,
+    command: session.command.slice(),
+    cwd: session.cwd,
+    favorite: options.favorite ?? existing?.favorite ?? false,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+    lastOpenedAt: options.opened ? now : existing?.lastOpenedAt ?? now,
+    lastClosedAt: options.closed ? now : existing?.lastClosedAt,
+  };
+  commitSavedTerminals([...state.savedTerminals.filter((item) => item.id !== saved.id), saved]);
+  return saved;
+}
+
+function markSavedOpened(saved: SavedTerminal, session: Session): void {
+  saveSessionSnapshot(session, { savedId: saved.id, favorite: saved.favorite, opened: true });
+}
+
+function updateSavedSessionName(sessionID: string, name: string): void {
+  const next = state.savedTerminals.map((item) => (
+    item.sourceSessionId === sessionID ? { ...item, name, updatedAt: new Date().toISOString() } : item
+  ));
+  commitSavedTerminals(next);
+}
+
+function updateSavedTerminal(saved: SavedTerminal, changes: Partial<Pick<SavedTerminal, "name" | "favorite" | "sourceSessionId" | "lastOpenedAt" | "lastClosedAt">>): void {
+  commitSavedTerminals(state.savedTerminals.map((item) => (
+    item.id === saved.id ? { ...item, ...changes, updatedAt: new Date().toISOString() } : item
+  )));
+}
+
+function removeSavedTerminal(saved: SavedTerminal): void {
+  commitSavedTerminals(state.savedTerminals.filter((item) => item.id !== saved.id));
+}
+
+function savedTerminalBySession(session: Session): SavedTerminal | undefined {
+  return state.savedTerminals.find((item) => item.sourceSessionId === session.id);
+}
+
+function runningSessionForSaved(saved: SavedTerminal): Session | undefined {
+  return saved.sourceSessionId ? state.sessions.find((item) => item.id === saved.sourceSessionId && item.running) : undefined;
+}
+
+function favoriteSavedTerminals(): SavedTerminal[] {
+  return state.savedTerminals.filter((item) => item.favorite).sort((a, b) => savedActivityTime(b) - savedActivityTime(a));
+}
+
+function recentSavedTerminals(): SavedTerminal[] {
+  return state.savedTerminals
+    .filter((item) => !item.favorite && !runningSessionForSaved(item))
+    .sort((a, b) => savedActivityTime(b) - savedActivityTime(a));
+}
+
+function normalizedDate(value: unknown, fallback: string): string {
+  if (typeof value !== "string") return fallback;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? new Date(time).toISOString() : fallback;
+}
+
+function normalizedOptionalDate(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? new Date(time).toISOString() : undefined;
+}
+
+function savedActivityTime(saved: SavedTerminal): number {
+  return Date.parse(saved.lastClosedAt ?? saved.lastOpenedAt ?? saved.updatedAt ?? saved.createdAt) || 0;
+}
+
+function newSavedTerminalID(): string {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  return `saved-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function normalizeTerminalNameInput(value: string | null): string | undefined {
+  if (value === null) return undefined;
+  const name = value.trim();
+  if (!name) {
+    window.alert("Terminal name is required.");
+    return undefined;
+  }
+  if (name.length > MAX_TERMINAL_NAME_LENGTH) {
+    window.alert(`Terminal name must be ${MAX_TERMINAL_NAME_LENGTH} characters or less.`);
+    return undefined;
+  }
+  return name;
+}
+
+function projectLabel(cwd: string): string {
+  const trimmed = cwd.trim().replace(/\/+$/, "");
+  if (!trimmed || trimmed === "/") return "/";
+  return trimmed.split("/").filter(Boolean).pop() ?? trimmed;
+}
+
 function openPortalKeyDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(PORTAL_KEY_DATABASE, 1);
@@ -1178,6 +1366,9 @@ function renderLogin(message = ""): void {
 
 async function loadSessions(): Promise<void> {
   const response = await api<{ sessions: Session[] }>("/api/sessions");
+  for (const session of response.sessions) {
+    if (!session.running && !state.closedSessions.has(session.id)) saveSessionSnapshot(session, { closed: true });
+  }
   state.sessions = response.sessions.filter((session) => session.running && !state.closedSessions.has(session.id));
 }
 
@@ -2254,11 +2445,11 @@ function renderCreatePanel(close: () => void): HTMLElement {
     submit.disabled = true;
     submit.textContent = "Creating…";
     try {
-      const created = await api<Session>("/api/sessions", {
-        method: "POST",
-        body: JSON.stringify({ name: name.value.trim(), cwd: cwd.value.trim() }),
+      const created = await createTerminalFromTemplate({
+        name: name.value.trim(),
+        cwd: cwd.value.trim(),
+        command: [],
       });
-      state.sessions = [created, ...state.sessions.filter((item) => item.id !== created.id)];
       renderTerminal(created.id);
     } catch (caught) {
       error.textContent = caught instanceof Error ? caught.message : "Could not create the terminal";
@@ -2270,13 +2461,109 @@ function renderCreatePanel(close: () => void): HTMLElement {
   return panel;
 }
 
+async function createTerminalFromTemplate(template: TerminalTemplate): Promise<Session> {
+  const created = await api<Session>("/api/sessions", {
+    method: "POST",
+    body: JSON.stringify({ name: template.name, cwd: template.cwd }),
+  });
+  state.sessions = [created, ...state.sessions.filter((item) => item.id !== created.id)];
+  return created;
+}
+
+async function openSavedTerminal(saved: SavedTerminal, button?: HTMLButtonElement): Promise<void> {
+  const running = runningSessionForSaved(saved);
+  if (running) {
+    markSavedOpened(saved, running);
+    renderTerminal(running.id);
+    return;
+  }
+  const originalText = button?.textContent ?? "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Opening…";
+  }
+  try {
+    const created = await createTerminalFromTemplate(saved);
+    markSavedOpened(saved, created);
+    renderTerminal(created.id);
+  } catch (caught) {
+    if (button) {
+      button.disabled = false;
+      button.textContent = caught instanceof Error ? caught.message : "Could not open";
+      window.setTimeout(() => { button.textContent = originalText; }, 1800);
+    } else {
+      window.alert(caught instanceof Error ? caught.message : "Could not open the terminal.");
+    }
+  }
+}
+
+async function duplicateTerminal(template: TerminalTemplate, button?: HTMLButtonElement): Promise<void> {
+  const originalText = button?.textContent ?? "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Creating…";
+  }
+  try {
+    const created = await createTerminalFromTemplate({ ...template, name: duplicateTerminalName(template.name) });
+    renderTerminal(created.id);
+  } catch (caught) {
+    if (button) {
+      button.disabled = false;
+      button.textContent = caught instanceof Error ? caught.message : "Could not duplicate";
+      window.setTimeout(() => { button.textContent = originalText; }, 1800);
+    } else {
+      window.alert(caught instanceof Error ? caught.message : "Could not duplicate the terminal.");
+    }
+  }
+}
+
+async function renameRunningSession(session: Session, forcedName?: string): Promise<Session | undefined> {
+  const name = normalizeTerminalNameInput(forcedName ?? window.prompt("Terminal name", session.name));
+  if (!name || name === session.name) return undefined;
+  const updated = await api<Session>(`/api/sessions/${encodeURIComponent(session.id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
+  state.sessions = state.sessions.map((item) => item.id === updated.id ? updated : item);
+  updateSavedSessionName(updated.id, updated.name);
+  return updated;
+}
+
+async function renameSavedTerminal(saved: SavedTerminal): Promise<void> {
+  const name = normalizeTerminalNameInput(window.prompt("Terminal name", saved.name));
+  if (!name || name === saved.name) return;
+  const running = runningSessionForSaved(saved);
+  if (running) {
+    try {
+      await renameRunningSession(running, name);
+    } catch (caught) {
+      window.alert(caught instanceof Error ? caught.message : "Could not rename the terminal.");
+      return;
+    }
+  } else {
+    updateSavedTerminal(saved, { name });
+  }
+  const container = document.querySelector<HTMLElement>("#session-list");
+  if (container) {
+    renderSessionCards(container);
+    updateSessionSummary();
+  }
+}
+
+function duplicateTerminalName(name: string): string {
+  const base = name.trim() || "Terminal";
+  const suffix = " Copy";
+  if (base.length + suffix.length <= MAX_TERMINAL_NAME_LENGTH) return `${base}${suffix}`;
+  return `${base.slice(0, MAX_TERMINAL_NAME_LENGTH - suffix.length).trimEnd()}${suffix}`;
+}
+
 function renderStartHint(): HTMLElement {
   const hint = el("aside", "start-hint");
   const icon = el("span", "hint-icon", "+");
   const copy = el("div");
   copy.append(
     el("strong", "hint-title", "Your shells stay managed"),
-    el("p", "hint-copy", "Leaving this page only disconnects the viewer. A terminal disappears from this list after it exits or you stop it."),
+    el("p", "hint-copy", "Leaving this page only disconnects the viewer. A terminal moves to Recent history after it exits or you stop it."),
     el("code", "hint-command", "termlinks list  ·  termlinks stop <id>"),
   );
   hint.append(icon, copy);
@@ -2303,40 +2590,168 @@ function renderTermAdsTeaser(): HTMLElement {
 
 function renderSessionCards(container: HTMLElement): void {
   container.replaceChildren();
+  container.append(
+    renderRunningTerminalSection(),
+    renderSavedTerminalSection("Favorites", favoriteSavedTerminals()),
+    renderSavedTerminalSection("Recent history", recentSavedTerminals()),
+  );
+}
+
+function renderRunningTerminalSection(): HTMLElement {
+  const section = renderDashboardSection("Running", state.sessions.length);
+  const list = el("div", "session-section-list");
   if (state.sessions.length === 0) {
     const empty = el("div", "empty-state");
     empty.append(el("span", "empty-prompt", "$_"), el("h2", "empty-title", "Nothing running yet"), el("p", "empty-copy", "Tap New terminal to open an interactive shell on your computer."));
-    container.append(empty);
-    return;
+    list.append(empty);
+    section.append(list);
+    return section;
   }
   for (const session of state.sessions) {
-    const card = el("article", "session-card");
-    const open = el("button", "session-open");
-    open.type = "button";
-    open.setAttribute("aria-label", `Open ${session.name} terminal`);
-    open.addEventListener("click", () => renderTerminal(session.id));
-    const row = el("div", "session-card-row");
-    const identity = el("div", "session-identity");
-    identity.append(el("span", "session-dot live"), el("h2", "session-name", session.name));
-    const badge = el("span", "status-badge running", "RUNNING");
-    row.append(identity, badge);
-    const command = el("code", "session-command", `$ ${session.command.join(" ")}`);
-    const meta = el("div", "session-meta");
-    meta.append(el("span", "cwd", compactPath(session.cwd)), el("span", "session-age", ageLabel(session)), el("span", "card-arrow", "›"));
-    open.append(row, command, meta);
-
-    const controls = el("div", "card-controls");
-    const openAction = el("button", "card-action", "Open terminal");
-    openAction.type = "button";
-    openAction.addEventListener("click", () => renderTerminal(session.id));
-    controls.append(openAction);
-    const stopAction = el("button", "card-action danger", "Stop & close");
-    stopAction.type = "button";
-    stopAction.addEventListener("click", () => stopFromDashboard(session, stopAction));
-    controls.append(stopAction);
-    card.append(open, controls);
-    container.append(card);
+    list.append(renderRunningSessionCard(session));
   }
+  section.append(list);
+  return section;
+}
+
+function renderSavedTerminalSection(title: string, savedTerminals: SavedTerminal[]): HTMLElement {
+  const section = renderDashboardSection(title, savedTerminals.length);
+  const list = el("div", "session-section-list");
+  if (savedTerminals.length === 0) {
+    list.append(el("p", "saved-empty", title === "Favorites" ? "No favorites saved" : "No recent history"));
+  } else {
+    for (const saved of savedTerminals) list.append(renderSavedTerminalCard(saved));
+  }
+  section.append(list);
+  return section;
+}
+
+function renderDashboardSection(title: string, count: number): HTMLElement {
+  const section = el("section", "session-section");
+  const heading = el("div", "session-section-heading");
+  heading.append(el("h2", "session-section-title", title), el("span", "session-section-count", String(count)));
+  section.append(heading);
+  return section;
+}
+
+function renderRunningSessionCard(session: Session): HTMLElement {
+  const card = el("article", "session-card");
+  const open = el("button", "session-open");
+  open.type = "button";
+  open.setAttribute("aria-label", `Open ${session.name} terminal`);
+  open.addEventListener("click", () => renderTerminal(session.id));
+  const row = el("div", "session-card-row");
+  const identity = el("div", "session-identity");
+  const folder = el("span", "project-label", projectLabel(session.cwd));
+  folder.title = session.cwd;
+  identity.append(el("span", "session-dot live"), folder, el("h2", "session-name", session.name));
+  const badge = el("span", "status-badge running", "RUNNING");
+  row.append(identity, badge);
+  const command = el("code", "session-command", `$ ${session.command.join(" ")}`);
+  const meta = el("div", "session-meta");
+  const cwd = el("span", "cwd", compactPath(session.cwd));
+  cwd.title = session.cwd;
+  meta.append(cwd, el("span", "session-age", ageLabel(session)), el("span", "card-arrow", "›"));
+  open.append(row, command, meta);
+
+  const controls = el("div", "card-controls");
+  const openAction = el("button", "card-action", "Open terminal");
+  openAction.type = "button";
+  openAction.addEventListener("click", () => renderTerminal(session.id));
+  const renameAction = el("button", "card-action", "Rename");
+  renameAction.type = "button";
+  renameAction.addEventListener("click", () => {
+    void renameRunningSession(session)
+      .then(() => refreshDashboardCards())
+      .catch((caught) => {
+        window.alert(caught instanceof Error ? caught.message : "Could not rename the terminal.");
+      });
+  });
+  const duplicateAction = el("button", "card-action", "Duplicate");
+  duplicateAction.type = "button";
+  duplicateAction.addEventListener("click", () => { void duplicateTerminal(session, duplicateAction); });
+  const favoriteAction = el("button", "card-action", savedTerminalBySession(session)?.favorite ? "Unfavorite" : "Favorite");
+  favoriteAction.type = "button";
+  favoriteAction.addEventListener("click", () => {
+    toggleFavoriteForSession(session);
+    refreshDashboardCards();
+  });
+  const stopAction = el("button", "card-action danger", "Stop & close");
+  stopAction.type = "button";
+  stopAction.addEventListener("click", () => stopFromDashboard(session, stopAction));
+  controls.append(openAction, renameAction, duplicateAction, favoriteAction, stopAction);
+  card.append(open, controls);
+  return card;
+}
+
+function renderSavedTerminalCard(saved: SavedTerminal): HTMLElement {
+  const running = runningSessionForSaved(saved);
+  const card = el("article", "session-card saved-terminal-card");
+  const open = el("button", "session-open");
+  open.type = "button";
+  open.setAttribute("aria-label", `${running ? "Open" : "Reconnect"} ${saved.name} terminal`);
+  open.addEventListener("click", () => { void openSavedTerminal(saved); });
+  const row = el("div", "session-card-row");
+  const identity = el("div", "session-identity");
+  const folder = el("span", "project-label", projectLabel(saved.cwd));
+  folder.title = saved.cwd;
+  identity.append(el("span", `session-dot ${running ? "live" : "ended"}`), folder, el("h2", "session-name", saved.name));
+  const badge = el("span", `status-badge ${running ? "running" : saved.favorite ? "favorite" : "finished"}`, running ? "RUNNING" : saved.favorite ? "FAVORITE" : "RECENT");
+  row.append(identity, badge);
+  const command = el("code", "session-command", saved.command.length ? `$ ${saved.command.join(" ")}` : "$ shell");
+  const meta = el("div", "session-meta");
+  const cwd = el("span", "cwd", compactPath(saved.cwd));
+  cwd.title = saved.cwd;
+  meta.append(cwd, el("span", "session-age", savedAgeLabel(saved)), el("span", "card-arrow", "›"));
+  open.append(row, command, meta);
+
+  const controls = el("div", "card-controls");
+  const openAction = el("button", "card-action", running ? "Open terminal" : "Reconnect");
+  openAction.type = "button";
+  openAction.addEventListener("click", () => { void openSavedTerminal(saved, openAction); });
+  const renameAction = el("button", "card-action", "Rename");
+  renameAction.type = "button";
+  renameAction.addEventListener("click", () => { void renameSavedTerminal(saved); });
+  const duplicateAction = el("button", "card-action", "Duplicate");
+  duplicateAction.type = "button";
+  duplicateAction.addEventListener("click", () => { void duplicateTerminal(saved, duplicateAction); });
+  const favoriteAction = el("button", "card-action", saved.favorite ? "Unfavorite" : "Favorite");
+  favoriteAction.type = "button";
+  favoriteAction.addEventListener("click", () => {
+    toggleFavoriteForSaved(saved);
+    refreshDashboardCards();
+  });
+  const removeAction = el("button", "card-action danger", "Remove");
+  removeAction.type = "button";
+  removeAction.addEventListener("click", () => {
+    if (!window.confirm(`Remove "${saved.name}" from saved terminals?`)) return;
+    removeSavedTerminal(saved);
+    refreshDashboardCards();
+  });
+  controls.append(openAction, renameAction, duplicateAction, favoriteAction, removeAction);
+  card.append(open, controls);
+  return card;
+}
+
+function toggleFavoriteForSession(session: Session): void {
+  const saved = savedTerminalBySession(session);
+  if (saved?.favorite) {
+    if (saved.lastClosedAt) updateSavedTerminal(saved, { favorite: false });
+    else removeSavedTerminal(saved);
+    return;
+  }
+  saveSessionSnapshot(session, { favorite: true, opened: true });
+}
+
+function toggleFavoriteForSaved(saved: SavedTerminal): void {
+  updateSavedTerminal(saved, { favorite: !saved.favorite });
+}
+
+function refreshDashboardCards(): void {
+  const container = document.querySelector<HTMLElement>("#session-list");
+  if (!container) return;
+  renderSessionCards(container);
+  updateSessionSummary();
 }
 
 async function stopFromDashboard(session: Session, button: HTMLButtonElement): Promise<void> {
@@ -2345,6 +2760,7 @@ async function stopFromDashboard(session: Session, button: HTMLButtonElement): P
   button.textContent = "Stopping…";
   try {
     await api(`/api/sessions/${encodeURIComponent(session.id)}/stop`, { method: "POST" });
+    saveSessionSnapshot(session, { closed: true });
     state.closedSessions.add(session.id);
     state.sessions = state.sessions.filter((item) => item.id !== session.id);
     const container = document.querySelector<HTMLElement>("#session-list");
@@ -2358,8 +2774,11 @@ async function stopFromDashboard(session: Session, button: HTMLButtonElement): P
 
 function updateSessionSummary(): void {
   const running = state.sessions.length;
+  const favorites = favoriteSavedTerminals().length;
+  const recent = recentSavedTerminals().length;
+  const saved = favorites + recent;
   const summary = document.querySelector<HTMLElement>("#session-summary");
-  if (summary) summary.textContent = `${running} running`;
+  if (summary) summary.textContent = saved > 0 ? `${running} running · ${favorites} favorites · ${recent} recent` : `${running} running`;
   const status = document.querySelector<HTMLElement>("#computer-status .computer-status-label");
   if (status) status.textContent = `${encryptedPortal ? "E2E · " : ""}Computer online · ${running} running`;
 }
@@ -2430,6 +2849,36 @@ function renderTerminal(id: string, workflowID?: string): void {
     actions.classList.remove("open");
     void copyVisibleTerminalOutput();
   });
+  const rename = el("button", "menu-button", "Rename terminal");
+  rename.type = "button";
+  rename.addEventListener("click", () => {
+    actions.classList.remove("open");
+    void renameRunningSession(session)
+      .then((updated) => {
+        if (!updated) return;
+        session.name = updated.name;
+        const terminalName = document.querySelector<HTMLElement>(".terminal-name");
+        if (terminalName) terminalName.textContent = updated.name;
+        const activeTab = document.querySelector<HTMLElement>(".terminal-tab.active .terminal-tab-name");
+        if (activeTab) activeTab.textContent = updated.name;
+      })
+      .catch((caught) => {
+        setConnectionState(caught instanceof Error ? caught.message : "Could not rename", "warning");
+      });
+  });
+  const favorite = el("button", "menu-button", savedTerminalBySession(session)?.favorite ? "Remove from favorites" : "Add to favorites");
+  favorite.type = "button";
+  favorite.addEventListener("click", () => {
+    actions.classList.remove("open");
+    toggleFavoriteForSession(session);
+    favorite.textContent = savedTerminalBySession(session)?.favorite ? "Remove from favorites" : "Add to favorites";
+  });
+  const duplicate = el("button", "menu-button", "Duplicate terminal");
+  duplicate.type = "button";
+  duplicate.addEventListener("click", () => {
+    actions.classList.remove("open");
+    void duplicateTerminal(session, duplicate);
+  });
   const stop = el("button", "menu-button danger", "Stop & close session");
   stop.type = "button";
   stop.disabled = !session.running;
@@ -2438,6 +2887,7 @@ function renderTerminal(id: string, workflowID?: string): void {
     if (!window.confirm(`Stop “${session.name}”?`)) return;
     try {
       await api(`/api/sessions/${encodeURIComponent(session.id)}/stop`, { method: "POST" });
+      saveSessionSnapshot(session, { closed: true });
       state.closedSessions.add(session.id);
       state.sessions = state.sessions.filter((item) => item.id !== session.id);
       renderSessions();
@@ -2445,7 +2895,7 @@ function renderTerminal(id: string, workflowID?: string): void {
       setConnectionState(caught instanceof Error ? caught.message : "Could not stop", "offline");
     }
   });
-  actions.append(reconnect, terminalText, stop);
+  actions.append(reconnect, rename, favorite, duplicate, terminalText, stop);
 
   const connection = el("div", "connection-bar");
   connection.id = "connection-state";
@@ -3173,6 +3623,7 @@ function connectTerminal(session: Session, automatic = false): void {
         if (message.type === "status" && !message.running) {
           session.running = false;
           session.exitCode = message.exitCode;
+          saveSessionSnapshot(session, { closed: true });
           setConnectionState(message.exitCode === 0 ? "Exited successfully" : `Exited · code ${message.exitCode ?? "?"}`, "offline");
         }
       } catch { /* Ignore unknown text control messages. */ }
@@ -3336,6 +3787,20 @@ function ageLabel(session: Session): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ${minutes % 60}m`;
   return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+
+function savedAgeLabel(saved: SavedTerminal): string {
+  const time = savedActivityTime(saved);
+  if (!time) return "saved";
+  const seconds = Math.max(0, Math.floor((Date.now() - time) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(time).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 if ("serviceWorker" in navigator) {

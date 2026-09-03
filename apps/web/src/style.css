@@ -130,7 +130,15 @@ button { color: inherit; }
 .secondary-button { border: 1px solid #344039; color: #9eaaa4; background: #151c18; }
 .create-submit { border: 0; color: #071009; background: var(--green); }
 .create-submit:disabled { opacity: .55; cursor: wait; }
-.session-list { display: grid; gap: 10px; }
+.session-list { display: grid; gap: 18px; }
+.session-section { display: grid; gap: 10px; }
+.session-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.session-section-title { margin: 0; color: #c7d2cc; font-size: 13px; letter-spacing: 0; }
+.session-section-count {
+  min-width: 24px; padding: 4px 7px; border: 1px solid #2d3933; border-radius: 7px;
+  color: #91a099; background: #111814; font: 700 10px/1 ui-monospace, monospace; text-align: center;
+}
+.session-section-list { display: grid; gap: 10px; }
 .session-card {
   width: 100%; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; text-align: left;
   background: linear-gradient(150deg, #131a16, #0e1411); box-shadow: 0 10px 28px rgba(0,0,0,.13);
@@ -145,20 +153,29 @@ button { color: inherit; }
 .session-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; }
 .session-dot.live { background: var(--green); box-shadow: 0 0 8px rgba(136,242,168,.38); }
 .session-dot.ended { background: #66716b; }
+.project-label {
+  flex: 0 1 auto; max-width: 124px; overflow: hidden; padding: 4px 7px; border: 1px solid #314139; border-radius: 7px;
+  color: #9eddb0; background: #111d16; font: 700 10px/1 ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap;
+}
 .session-name { overflow: hidden; margin: 0; font-size: 16px; text-overflow: ellipsis; white-space: nowrap; }
 .status-badge { flex: 0 0 auto; padding: 5px 7px; border-radius: 6px; font: 700 9px/1 ui-monospace, monospace; letter-spacing: .1em; }
 .status-badge.running { color: var(--green); background: var(--green-dark); }
+.status-badge.favorite { color: #f0d86e; background: #292511; }
 .status-badge.finished { color: #87948d; background: #202823; }
 .session-command { display: block; overflow: hidden; margin: 14px 0 15px; color: #bdc9c2; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .session-meta { color: #738078; font-size: 11px; gap: 12px; }
 .cwd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-age { margin-left: auto; }
 .card-arrow { color: #607168; font-size: 21px; line-height: 10px; }
-.card-controls { display: flex; justify-content: flex-end; gap: 8px; padding: 9px 12px; border-top: 1px solid #242d28; background: rgba(5, 8, 6, .18); }
-.card-action { min-height: 34px; padding: 0 11px; border: 1px solid #344039; border-radius: 8px; color: #aab7b0; background: #171e1a; font-size: 11px; font-weight: 650; cursor: pointer; }
+.card-controls { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 9px 12px; border-top: 1px solid #242d28; background: rgba(5, 8, 6, .18); }
+.card-action { min-height: 34px; padding: 0 11px; border: 1px solid #344039; border-radius: 8px; color: #aab7b0; background: #171e1a; font-size: 11px; font-weight: 650; white-space: nowrap; cursor: pointer; }
 .card-action:hover { border-color: #516158; color: var(--ink); }
 .card-action.danger { border-color: #4a3031; color: var(--danger); background: #211718; }
 .card-action:disabled { opacity: .5; cursor: wait; }
+.saved-empty {
+  margin: 0; padding: 14px 16px; border: 1px dashed #26302b; border-radius: 12px;
+  color: #75827a; background: #0c110f; font-size: 12px;
+}
 .start-hint { display: flex; gap: 13px; margin-top: 20px; padding: 16px; border: 1px dashed #2b3731; border-radius: 13px; color: #7b8981; }
 .hint-icon { display: grid; flex: 0 0 auto; place-items: center; width: 27px; height: 27px; border-radius: 7px; color: #769b80; background: #152019; font: 18px/1 ui-monospace, monospace; }
 .hint-title { display: block; color: #9ca9a1; font-size: 12px; }

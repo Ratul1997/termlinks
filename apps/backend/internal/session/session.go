@@ -198,6 +198,15 @@ func (s *Session) Info() Info {
 
 func (s *Session) Done() <-chan struct{} { return s.done }
 
+func (s *Session) Rename(name string) Info {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.info.Name = name
+	info := s.info
+	info.Command = append([]string(nil), s.info.Command...)
+	return info
+}
+
 func (s *Session) Write(data []byte) error {
 	if len(data) == 0 {
 		return nil

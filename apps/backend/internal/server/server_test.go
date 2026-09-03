@@ -203,6 +203,104 @@ func TestAuthenticatedWebCreationStartsInteractiveShell(t *testing.T) {
 	t.Cleanup(func() { _ = current.Stop() })
 }
 
+func TestAuthenticatedWebRenameUpdatesSessionName(t *testing.T) {
+	manager := session.NewManager()
+	handler, err := New(manager, auth.New("token"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	web := httptest.NewServer(handler.WebHandler())
+	defer web.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	request, _ := http.NewRequest(http.MethodPost, web.URL+"/api/login", bytes.NewBufferString(`{"token":"token"}`))
+	request.Header.Set("Origin", web.URL)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+
+	current, err := manager.Start(session.StartOptions{Name: "old name", Command: []string{"/bin/sh"}, Cwd: t.TempDir(), Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = current.Stop() })
+
+	payload := bytes.NewBufferString(`{"name":" renamed terminal "}`)
+	request, _ = http.NewRequest(http.MethodPatch, web.URL+"/api/sessions/"+current.Info().ID, payload)
+	request.Header.Set("Origin", web.URL)
+	request.Header.Set("Content-Type", "application/json")
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("rename status = %d: %s", response.StatusCode, body)
+	}
+	var renamed session.Info
+	if err := json.NewDecoder(response.Body).Decode(&renamed); err != nil {
+		t.Fatal(err)
+	}
+	if renamed.Name != "renamed terminal" || current.Info().Name != "renamed terminal" {
+		t.Fatalf("session was not renamed: response=%q manager=%q", renamed.Name, current.Info().Name)
+	}
+}
+
+func TestWebRenameRejectsInvalidMissingAndCrossOriginRequests(t *testing.T) {
+	manager := session.NewManager()
+	handler, err := New(manager, auth.New("token"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	web := httptest.NewServer(handler.WebHandler())
+	defer web.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	request, _ := http.NewRequest(http.MethodPost, web.URL+"/api/login", bytes.NewBufferString(`{"token":"token"}`))
+	request.Header.Set("Origin", web.URL)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+
+	current, err := manager.Start(session.StartOptions{Name: "old name", Command: []string{"/bin/sh"}, Cwd: t.TempDir(), Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = current.Stop() })
+
+	for _, test := range []struct {
+		name       string
+		path       string
+		origin     string
+		body       string
+		wantStatus int
+	}{
+		{"empty", "/api/sessions/" + current.Info().ID, web.URL, `{"name":" "}`, http.StatusBadRequest},
+		{"too long", "/api/sessions/" + current.Info().ID, web.URL, `{"name":"` + strings.Repeat("x", 81) + `"}`, http.StatusBadRequest},
+		{"missing", "/api/sessions/0123456789abcdef0123456789abcdef", web.URL, `{"name":"new name"}`, http.StatusNotFound},
+		{"cross origin", "/api/sessions/" + current.Info().ID, "https://attacker.example", `{"name":"new name"}`, http.StatusForbidden},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request, _ := http.NewRequest(http.MethodPatch, web.URL+test.path, bytes.NewBufferString(test.body))
+			request.Header.Set("Origin", test.origin)
+			request.Header.Set("Content-Type", "application/json")
+			response, err := client.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response.Body.Close()
+			if response.StatusCode != test.wantStatus {
+				t.Fatalf("status = %d, want %d", response.StatusCode, test.wantStatus)
+			}
+		})
+	}
+}
+
 func TestControlAPIStartsOnlyExplicitCommand(t *testing.T) {
 	manager := session.NewManager()
 	handler, err := New(manager, auth.New("unused"), slog.New(slog.NewTextHandler(io.Discard, nil)))
