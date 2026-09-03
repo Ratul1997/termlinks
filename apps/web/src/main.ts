@@ -2508,22 +2508,14 @@ function renderTerminalComposer(): HTMLElement {
     // Use xterm's paste path so full-screen terminal programs receive bracketed
     // paste markers when they have enabled that mode, then submit with Enter.
     state.terminal?.paste(value);
-    // Always follow the pasted composer value with the PTY's Enter byte so
-    // shells and full-screen terminal programs submit it immediately.
-    if (!sendTerminalInput("\r")) return;
+    sendTerminalInput("\r");
     input.value = "";
     attachmentList.replaceChildren();
     attachmentList.hidden = true;
     syncSend();
-    // Keep the send button from retaining focus, then repeat the blur after
-    // the submit event. iOS can otherwise preserve its keyboard when focus
-    // moves from a textarea to the submit button during the same tap.
-    input.blur();
-    send.blur();
-    window.setTimeout(() => {
-      input.blur();
-      send.blur();
-    }, 0);
+    // Submitting is a natural end to one mobile interaction. Release focus so
+    // iOS/Android dismiss the software keyboard and return space to the PTY.
+    if (document.activeElement === input) input.blur();
   };
   input.addEventListener("input", () => {
     syncSend();
@@ -2537,7 +2529,6 @@ function renderTerminalComposer(): HTMLElement {
     event.preventDefault();
     submit();
   });
-  send.addEventListener("pointerdown", (event) => event.preventDefault());
   attach.addEventListener("pointerdown", (event) => event.preventDefault());
   attach.addEventListener("click", chooseAttachments);
 
