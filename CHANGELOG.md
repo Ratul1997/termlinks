@@ -8,6 +8,7 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 
 - A checksum-verifying macOS/Linux release installer and a shorter binary-first quick start.
 - GitHub-native CI, release, and license badges for clearer project status.
+- An isolated, non-executing **V2 Design** preview for a mobile text-stream terminal, command suggestions, wrapped/selectable output, and a raw-terminal escape hatch. The current terminal UI remains unchanged.
 
 ## [0.8.2] - 2026-09-04
 

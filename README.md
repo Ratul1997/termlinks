@@ -63,6 +63,8 @@ To build instead of installing a release, clone the repository and follow [Contr
 
 The portal is an installable PWA. On Android/desktop, use the browser's **Install app** action (or the in-app button when available). On iPhone/iPad, open the Share menu and select **Add to Home Screen**. The installed app still asks for the portal token and still requires the computer and connector to be online for terminal access.
 
+The authenticated Home screen also includes an isolated **V2 Design** preview of a future mobile text-stream interface. It demonstrates wrapped/selectable output, local-style command suggestions, quick commands, and a three-line composer without connecting to or resizing a PTY. Preview submissions are simulated and clearly marked; use **Raw terminal** to return to the current live terminal.
+
 ## Open source
 
 Termlinks is released under the permissive [MIT License](LICENSE). You may use, inspect, modify, redistribute, and self-host it, including with a network or hosting provider of your choice. The repository contains the Go CLI/daemon, TypeScript PWA, Cloudflare relay, build scripts, tests, architecture notes, and security documentation—there is no required proprietary Termlinks backend.

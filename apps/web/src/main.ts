@@ -143,12 +143,12 @@ type FileUploadReply = {
   path?: string;
 };
 
-type PortalView = "sessions" | "terminal" | "workflows" | "workflow" | "desktop";
+type PortalView = "sessions" | "terminal" | "workflows" | "workflow" | "desktop" | "v2";
 
 function readLastPortalView(): { view: PortalView; selected?: string; selectedWorkflow?: string } {
   try {
     const value: unknown = JSON.parse(localStorage.getItem("termlinks-last-view-v1") || "null");
-    if (!isRecord(value) || !["sessions", "terminal", "workflows", "workflow", "desktop"].includes(String(value.view))) return { view: "sessions" };
+    if (!isRecord(value) || !["sessions", "terminal", "workflows", "workflow", "desktop", "v2"].includes(String(value.view))) return { view: "sessions" };
     return {
       view: value.view as PortalView,
       selected: typeof value.selected === "string" ? value.selected : undefined,
@@ -1074,6 +1074,7 @@ async function resumeEncryptedPortal(): Promise<void> {
     if (state.view === "workflow" && state.selectedWorkflow) await renderWorkflowDetail(state.selectedWorkflow);
     else if (state.view === "workflows") await renderWorkflows();
     else if (state.view === "desktop") renderDesktop();
+    else if (state.view === "v2") renderV2Design(selectedSession);
     else if (session && state.terminal && document.querySelector(".terminal-page")) connectTerminal(session);
     else if (session) renderTerminal(session.id, state.selectedWorkflow);
     else if (state.view === "sessions" && document.querySelector("#session-list")) {
@@ -1095,7 +1096,7 @@ async function resumeEncryptedPortal(): Promise<void> {
     // iOS briefly suspends network sockets while Photos/the file picker is on
     // screen. Preserve the terminal/dashboard DOM and its draft instead of
     // replacing the user's work with a login screen during that wake-up gap.
-    const activePortalView = document.querySelector(".terminal-page, .dashboard, .desktop-page");
+    const activePortalView = document.querySelector(".terminal-page, .dashboard, .desktop-page, .v2-page");
     if (activePortalView) {
       setConnectionState("Computer waking · reconnecting…", "connecting");
       const transfer = document.querySelector<HTMLElement>(".file-transfer-status");
@@ -1170,6 +1171,10 @@ async function renderRememberedView(): Promise<void> {
   }
   if (state.view === "desktop" && encryptedPortal) {
     renderDesktop();
+    return;
+  }
+  if (state.view === "v2") {
+    renderV2Design(state.selected);
     return;
   }
   if (state.view === "terminal" && state.selected && state.sessions.some((session) => session.id === state.selected)) {
@@ -1339,7 +1344,10 @@ function renderSessions(): void {
   const workflows = el("button", "ai-work-button", "✦ AI work");
   workflows.type = "button";
   workflows.addEventListener("click", () => { void renderWorkflows(); });
-  headingActions.append(workflows);
+  const v2 = el("button", "v2-design-button", "V2 Design");
+  v2.type = "button";
+  v2.addEventListener("click", () => renderV2Design(state.sessions[0]?.id));
+  headingActions.append(v2, workflows);
   headingActions.append(create, refresh);
   heading.append(titleGroup, headingActions);
 
@@ -1360,6 +1368,230 @@ function renderSessions(): void {
   app.append(page);
   updateSessionSummary();
   startPolling();
+}
+
+type V2Suggestion = { command: string; detail: string; badge: string };
+
+const V2_SUGGESTIONS: V2Suggestion[] = [
+  { command: "git status", detail: "Show repository changes", badge: "GIT" },
+  { command: "git log --oneline -10", detail: "Recent commits", badge: "GIT" },
+  { command: "npm run dev", detail: "Start the development server", badge: "NPM" },
+  { command: "npm test", detail: "Run the project test suite", badge: "NPM" },
+  { command: "ls -la", detail: "List files in this directory", badge: "SHELL" },
+  { command: "cd ~/Projects", detail: "Move to a recent directory", badge: "PATH" },
+  { command: "termlinks list", detail: "List managed terminal sessions", badge: "CLI" },
+  { command: "codex", detail: "Open the local Codex agent", badge: "AGENT" },
+  { command: "claude", detail: "Open the local Claude agent", badge: "AGENT" },
+];
+
+function appendV2FeedEntry(
+  feed: HTMLElement,
+  kind: "command" | "output" | "agent" | "notice",
+  label: string,
+  content: string,
+  meta = "",
+): HTMLElement {
+  const card = el("article", `v2-feed-entry ${kind}`);
+  const heading = el("div", "v2-entry-heading");
+  heading.append(el("span", "v2-entry-label", label));
+  if (meta) heading.append(el("span", "v2-entry-meta", meta));
+  const body = el("pre", "v2-entry-body", content);
+  card.append(heading, body);
+  feed.append(card);
+  return card;
+}
+
+function v2PreviewOutput(command: string): { label: string; content: string; kind: "output" | "agent" } {
+  const normalized = command.trim().toLowerCase();
+  if (normalized === "git status") {
+    return { label: "Completed", content: "On branch main\nYour branch is up to date with origin/main.\n\nnothing to commit, working tree clean", kind: "output" };
+  }
+  if (normalized.startsWith("git log")) {
+    return { label: "Completed", content: "ac59efa  feat: add verified release installer\n3a58451  fix: preserve terminal during reconnect\n4faf295  chore: disable Dependabot updates", kind: "output" };
+  }
+  if (normalized === "npm test") {
+    return { label: "Completed", content: "✓ TypeScript\n✓ Web reconnect logic\n✓ Go backend\n\nAll checks passed", kind: "output" };
+  }
+  if (normalized.startsWith("cd ")) {
+    return { label: "Directory changed", content: command.slice(3).trim() || "~", kind: "output" };
+  }
+  if (normalized === "codex" || normalized === "claude") {
+    return { label: normalized === "codex" ? "Codex" : "Claude", content: "Agent output would stream here as readable, selectable text while the real PTY keeps its desktop dimensions.", kind: "agent" };
+  }
+  return { label: "V2 preview", content: `“${command}” would be sent to the selected PTY. This design preview does not execute commands.`, kind: "output" };
+}
+
+function renderV2Design(preferredSessionID?: string): void {
+  stopPolling();
+  closeConnection();
+  state.selectedWorkflow = undefined;
+  const running = state.sessions.filter((session) => session.running);
+  const session = running.find((item) => item.id === preferredSessionID) ?? running[0];
+  state.selected = session?.id;
+  rememberPortalView("v2", session?.id);
+  app.replaceChildren();
+
+  const page = el("main", "v2-page");
+  const header = el("header", "v2-header");
+  const back = el("button", "v2-icon-button", "‹");
+  back.type = "button";
+  back.setAttribute("aria-label", "Return to current design");
+  back.addEventListener("click", renderSessions);
+  const identity = el("div", "v2-identity");
+  identity.append(
+    el("strong", "v2-session-name", session?.name ?? "No running terminal"),
+    el("span", "v2-session-context", session ? `${compactPath(session.cwd)} · ${shortCommand(session.command)}` : "Create a terminal to open the raw view"),
+  );
+  const previewBadge = el("span", "v2-preview-badge", "V2 DESIGN");
+  header.append(back, identity, previewBadge);
+
+  const context = el("section", "v2-context-bar");
+  const contextCopy = el("div", "v2-context-copy");
+  contextCopy.append(
+    el("span", "v2-online-dot"),
+    el("span", "v2-context-label", session ? "Text stream · computer online" : "Text stream preview"),
+  );
+  const raw = el("button", "v2-raw-button", session ? "Raw terminal" : "Create terminal");
+  raw.type = "button";
+  raw.addEventListener("click", () => session ? renderTerminal(session.id) : renderSessionsWithCreate());
+  context.append(contextCopy, raw);
+
+  const tabs = el("nav", "v2-session-tabs");
+  tabs.setAttribute("aria-label", "V2 terminal sessions");
+  if (running.length === 0) {
+    const empty = el("button", "v2-session-tab active", "No active sessions");
+    empty.type = "button";
+    empty.disabled = true;
+    tabs.append(empty);
+  } else {
+    for (const [index, item] of running.entries()) {
+      const tab = el("button", `v2-session-tab${item.id === session?.id ? " active" : ""}`);
+      tab.type = "button";
+      tab.setAttribute("aria-current", item.id === session?.id ? "page" : "false");
+      tab.append(el("span", "v2-session-number", String(index + 1)), el("span", "v2-session-tab-name", item.name));
+      tab.addEventListener("click", () => renderV2Design(item.id));
+      tabs.append(tab);
+    }
+  }
+
+  const feed = el("section", "v2-feed");
+  feed.setAttribute("aria-label", "Wrapped terminal output preview");
+  feed.setAttribute("aria-live", "polite");
+  appendV2FeedEntry(
+    feed,
+    "notice",
+    "Design preview",
+    "A mobile-first text stream that never resizes the real PTY. Commands on this screen are simulated; your terminal is untouched.",
+    "LOCAL ONLY",
+  );
+  appendV2FeedEntry(feed, "command", "You", "git status", "~/Projects/termlinks");
+  appendV2FeedEntry(feed, "output", "Completed", "On branch main\nYour branch is up to date with origin/main.\n\nnothing to commit, working tree clean", "exit 0 · 0.2s");
+  appendV2FeedEntry(feed, "command", "You", "npm test", "~/Projects/termlinks");
+  appendV2FeedEntry(feed, "output", "Completed", "✓ TypeScript checks\n✓ Terminal reconnect logic\n✓ Go backend tests\n\nAll checks passed", "exit 0 · 5.9s");
+  appendV2FeedEntry(
+    feed,
+    "agent",
+    "Codex",
+    "The release installer and documentation are ready. Output wraps to the phone width, remains selectable, and does not change the desktop terminal layout.",
+    "READY",
+  );
+
+  const composer = el("section", "v2-composer");
+  const suggestions = el("div", "v2-suggestions");
+  suggestions.hidden = true;
+  suggestions.setAttribute("role", "listbox");
+  suggestions.setAttribute("aria-label", "Local command suggestions");
+  const snippets = el("div", "v2-snippets");
+  snippets.append(el("span", "v2-snippet-label", "QUICK"));
+  const form = el("form", "v2-composer-form");
+  const attach = el("button", "v2-attach-button", "+");
+  attach.type = "button";
+  attach.setAttribute("aria-label", "Preview an attachment");
+  const input = el("textarea", "v2-composer-input");
+  input.rows = 3;
+  input.placeholder = "Type a command or ask an agent…";
+  input.spellcheck = false;
+  input.autocomplete = "off";
+  input.autocapitalize = "off";
+  input.setAttribute("enterkeyhint", "send");
+  input.setAttribute("aria-label", "V2 command composer");
+  const send = el("button", "v2-send-button", "↑");
+  send.type = "submit";
+  send.disabled = true;
+  send.setAttribute("aria-label", "Preview command");
+  form.append(attach, input, send);
+  const footer = el("div", "v2-composer-footer");
+  footer.append(el("span", "v2-composer-hint", "Local suggestions · Shift+Enter for a new line"), el("span", "v2-composer-status", "PREVIEW"));
+  composer.append(suggestions, snippets, form, footer);
+
+  const chooseSuggestion = (command: string): void => {
+    input.value = command;
+    send.disabled = false;
+    suggestions.hidden = true;
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(command.length, command.length);
+  };
+  for (const command of ["git status", "npm test", "termlinks list"]) {
+    const chip = el("button", "v2-snippet-chip", command);
+    chip.type = "button";
+    chip.addEventListener("click", () => chooseSuggestion(command));
+    snippets.append(chip);
+  }
+  const renderSuggestions = (): void => {
+    const query = input.value.trim().toLowerCase();
+    send.disabled = query.length === 0;
+    suggestions.replaceChildren();
+    if (!query || input.value.includes("\n")) {
+      suggestions.hidden = true;
+      return;
+    }
+    const matches = V2_SUGGESTIONS
+      .filter((item) => item.command.toLowerCase().includes(query) || item.detail.toLowerCase().includes(query))
+      .slice(0, 4);
+    suggestions.hidden = matches.length === 0;
+    for (const item of matches) {
+      const option = el("button", "v2-suggestion");
+      option.type = "button";
+      option.setAttribute("role", "option");
+      const copy = el("span", "v2-suggestion-copy");
+      copy.append(el("strong", "v2-suggestion-command", item.command), el("span", "v2-suggestion-detail", item.detail));
+      option.append(el("span", "v2-suggestion-badge", item.badge), copy, el("span", "v2-suggestion-arrow", "↵"));
+      option.addEventListener("click", () => chooseSuggestion(item.command));
+      suggestions.append(option);
+    }
+  };
+  input.addEventListener("input", renderSuggestions);
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+    event.preventDefault();
+    form.requestSubmit();
+  });
+  attach.addEventListener("click", () => {
+    const attached = attach.dataset.attached === "true";
+    attach.dataset.attached = String(!attached);
+    attach.textContent = attached ? "+" : "✓";
+    attach.classList.toggle("attached", !attached);
+    footer.querySelector<HTMLElement>(".v2-composer-hint")!.textContent = attached
+      ? "Local suggestions · Shift+Enter for a new line"
+      : "screenshot.png ready · preview only";
+    input.focus({ preventScroll: true });
+  });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const command = input.value.trim();
+    if (!command) return;
+    appendV2FeedEntry(feed, "command", "You", command, session ? compactPath(session.cwd) : "preview");
+    const result = v2PreviewOutput(command);
+    appendV2FeedEntry(feed, result.kind, result.label, result.content, "not executed");
+    input.value = "";
+    send.disabled = true;
+    suggestions.hidden = true;
+    input.blur();
+    window.requestAnimationFrame(() => feed.scrollTo({ top: feed.scrollHeight, behavior: "smooth" }));
+  });
+
+  page.append(header, context, tabs, feed, composer);
+  app.append(page);
 }
 
 async function renderWorkflows(message = ""): Promise<void> {
@@ -2793,6 +3025,12 @@ function renderTerminal(id: string, workflowID?: string): void {
     actions.classList.remove("open");
     void duplicateTerminal(session, duplicate);
   });
+  const v2Design = el("button", "menu-button", "Open V2 Design");
+  v2Design.type = "button";
+  v2Design.addEventListener("click", () => {
+    actions.classList.remove("open");
+    renderV2Design(session.id);
+  });
   const stop = el("button", "menu-button danger", "Stop & close session");
   stop.type = "button";
   stop.disabled = !session.running;
@@ -2808,7 +3046,7 @@ function renderTerminal(id: string, workflowID?: string): void {
       setConnectionState(caught instanceof Error ? caught.message : "Could not stop", "offline");
     }
   });
-  actions.append(reconnect, rename, favorite, duplicate, terminalText, stop);
+  actions.append(reconnect, rename, favorite, duplicate, v2Design, terminalText, stop);
 
   const connection = el("div", "connection-bar");
   connection.id = "connection-state";
