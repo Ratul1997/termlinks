@@ -123,6 +123,8 @@ let portalReconnectTimer = 0;
 const PORTAL_KEY_DATABASE = "termlinks-secure-session";
 const PORTAL_KEY_STORE = "keys";
 const PORTAL_KEY_ID = "portal-e2e-key";
+const TERMINAL_TAB_ORDER_KEY = "termlinks-terminal-tab-order-v1";
+const MAX_PERSISTED_TERMINAL_TABS = 64;
 
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
@@ -1887,7 +1889,7 @@ function renderTerminal(id: string): void {
   app.replaceChildren();
   const page = el("main", "terminal-page");
   const header = el("header", "terminal-header");
-  const back = el("button", "back-button", "‹");
+  const back = el("button", "back-button terminal-back-button", "‹");
   back.type = "button";
   back.setAttribute("aria-label", "Back to sessions");
   back.addEventListener("click", renderSessions);
@@ -2003,27 +2005,38 @@ function renderTerminalTabs(activeSessionId: string): HTMLElement {
   list.setAttribute("role", "tablist");
   list.setAttribute("aria-label", "Running terminals");
   let activeTab: HTMLButtonElement | undefined;
-  const runningSessions = state.sessions.filter((item) => item.running);
+  const runningSessions = orderedRunningSessions();
   for (const [index, session] of runningSessions.entries()) {
     const tab = el("button", "terminal-tab");
     tab.type = "button";
+    tab.dataset.sessionId = session.id;
     tab.setAttribute("role", "tab");
     const active = session.id === activeSessionId;
     tab.classList.toggle("active", active);
     tab.setAttribute("aria-selected", String(active));
     if (active) tab.setAttribute("aria-current", "page");
     tab.title = `${session.name} · ${shortCommand(session.command)}`;
+    const dragHandle = el("span", "terminal-tab-drag-handle");
+    dragHandle.title = "Hold and drag to reposition";
+    dragHandle.setAttribute("aria-hidden", "true");
     tab.append(
+      dragHandle,
       el("span", "terminal-tab-index", String(index + 1)),
-      el("span", "terminal-tab-dot"),
       el("span", "terminal-tab-name", session.name),
+      el("span", "terminal-tab-dot"),
     );
-    tab.addEventListener("click", () => {
+    tab.addEventListener("click", (event) => {
+      if (tab.dataset.suppressClick === "true") {
+        event.preventDefault();
+        return;
+      }
       if (!active) renderTerminal(session.id);
     });
+    installTerminalTabReorder(tab, dragHandle, list);
     list.append(tab);
     if (active) activeTab = tab;
   }
+  updateTerminalTabPositions(list);
 
   const create = el("button", "terminal-tab-action terminal-tab-create", "+");
   create.type = "button";
@@ -2036,6 +2049,158 @@ function renderTerminalTabs(activeSessionId: string): HTMLElement {
     list.scrollLeft = Math.max(0, activeTab.offsetLeft - ((list.clientWidth - activeTab.clientWidth) / 2));
   });
   return navigation;
+}
+
+function readTerminalTabOrder(): string[] {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(TERMINAL_TAB_ORDER_KEY) || "[]");
+    if (!Array.isArray(stored)) return [];
+    const unique = new Set<string>();
+    for (const value of stored) {
+      if (typeof value !== "string" || value.length === 0 || value.length > 160) continue;
+      unique.add(value);
+      if (unique.size >= MAX_PERSISTED_TERMINAL_TABS) break;
+    }
+    return Array.from(unique);
+  } catch {
+    return [];
+  }
+}
+
+function writeTerminalTabOrder(ids: string[]): void {
+  try {
+    localStorage.setItem(TERMINAL_TAB_ORDER_KEY, JSON.stringify(ids.slice(0, MAX_PERSISTED_TERMINAL_TABS)));
+  } catch {
+    // Private browsing and managed browsers may reject local storage writes.
+  }
+}
+
+function orderedRunningSessions(): Session[] {
+  const running = state.sessions.filter((item) => item.running);
+  const byId = new Map(running.map((session) => [session.id, session]));
+  const ordered: Session[] = [];
+  for (const id of readTerminalTabOrder()) {
+    const session = byId.get(id);
+    if (!session) continue;
+    ordered.push(session);
+    byId.delete(id);
+  }
+  for (const session of running) {
+    if (byId.delete(session.id)) ordered.push(session);
+  }
+  const normalized = ordered.map((session) => session.id);
+  if (normalized.length > 0) writeTerminalTabOrder(normalized);
+  return ordered;
+}
+
+function updateTerminalTabPositions(list: HTMLElement): void {
+  const tabs = Array.from(list.querySelectorAll<HTMLButtonElement>(".terminal-tab"));
+  for (const [index, tab] of tabs.entries()) {
+    tab.querySelector<HTMLElement>(".terminal-tab-index")!.textContent = String(index + 1);
+    tab.setAttribute("aria-posinset", String(index + 1));
+    tab.setAttribute("aria-setsize", String(tabs.length));
+    const name = tab.querySelector<HTMLElement>(".terminal-tab-name")?.textContent || "terminal";
+    tab.setAttribute("aria-label", `${name}, tab ${index + 1} of ${tabs.length}. Hold the drag grip or press Alt and an arrow key to reposition.`);
+  }
+}
+
+function persistTerminalTabOrder(list: HTMLElement): void {
+  const ids = Array.from(list.querySelectorAll<HTMLElement>(".terminal-tab"))
+    .map((tab) => tab.dataset.sessionId)
+    .filter((id): id is string => Boolean(id));
+  writeTerminalTabOrder(ids);
+}
+
+function moveTerminalTabWithKeyboard(tab: HTMLButtonElement, list: HTMLElement, direction: -1 | 1): void {
+  const tabs = Array.from(list.querySelectorAll<HTMLButtonElement>(".terminal-tab"));
+  const index = tabs.indexOf(tab);
+  const target = tabs[index + direction];
+  if (index < 0 || !target) return;
+  if (direction < 0) list.insertBefore(tab, target);
+  else list.insertBefore(tab, target.nextSibling);
+  updateTerminalTabPositions(list);
+  persistTerminalTabOrder(list);
+  tab.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+}
+
+function installTerminalTabReorder(tab: HTMLButtonElement, handle: HTMLElement, list: HTMLElement): void {
+  let pointerId: number | undefined;
+  let pressTimer = 0;
+  let dragging = false;
+  let startX = 0;
+  let startY = 0;
+
+  const clearPressTimer = (): void => {
+    if (pressTimer) window.clearTimeout(pressTimer);
+    pressTimer = 0;
+  };
+  const beginDrag = (): void => {
+    pressTimer = 0;
+    if (pointerId === undefined) return;
+    dragging = true;
+    tab.dataset.suppressClick = "true";
+    tab.classList.add("dragging");
+    list.classList.add("reordering");
+    try { handle.setPointerCapture(pointerId); } catch { /* Older WebKit may already own capture. */ }
+  };
+  const finishDrag = (): void => {
+    clearPressTimer();
+    if (dragging) {
+      persistTerminalTabOrder(list);
+      updateTerminalTabPositions(list);
+    }
+    dragging = false;
+    tab.classList.remove("dragging");
+    list.classList.remove("reordering");
+    pointerId = undefined;
+    window.setTimeout(() => { delete tab.dataset.suppressClick; }, 0);
+  };
+  const onPointerDown = (event: PointerEvent): void => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    clearPressTimer();
+    pointerId = event.pointerId;
+    startX = event.clientX;
+    startY = event.clientY;
+    pressTimer = window.setTimeout(beginDrag, event.pointerType === "mouse" ? 120 : 320);
+  };
+  const onPointerMove = (event: PointerEvent): void => {
+    if (pointerId !== event.pointerId) return;
+    if (!dragging) {
+      if (Math.hypot(event.clientX - startX, event.clientY - startY) > 10) {
+        clearPressTimer();
+        pointerId = undefined;
+      }
+      return;
+    }
+    event.preventDefault();
+    const listRect = list.getBoundingClientRect();
+    if (event.clientX < listRect.left + 34) list.scrollLeft -= 18;
+    else if (event.clientX > listRect.right - 34) list.scrollLeft += 18;
+
+    const siblings = Array.from(list.querySelectorAll<HTMLButtonElement>(".terminal-tab:not(.dragging)"));
+    let placed = false;
+    for (const sibling of siblings) {
+      const rect = sibling.getBoundingClientRect();
+      if (event.clientX < rect.left + (rect.width / 2)) {
+        list.insertBefore(tab, sibling);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) list.append(tab);
+    updateTerminalTabPositions(list);
+  };
+
+  handle.addEventListener("pointerdown", onPointerDown);
+  handle.addEventListener("pointermove", onPointerMove);
+  handle.addEventListener("pointerup", finishDrag);
+  handle.addEventListener("pointercancel", finishDrag);
+  handle.addEventListener("lostpointercapture", finishDrag);
+  tab.addEventListener("keydown", (event) => {
+    if (!event.altKey || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
+    event.preventDefault();
+    moveTerminalTabWithKeyboard(tab, list, event.key === "ArrowLeft" ? -1 : 1);
+  });
 }
 
 function installTerminalViewportSizing(page: HTMLElement): () => void {
@@ -2188,7 +2353,7 @@ function renderTerminalComposer(): HTMLElement {
   const input = el("textarea", "terminal-composer-input");
   input.rows = 1;
   input.wrap = "soft";
-  input.placeholder = "Type a command or message…";
+  input.placeholder = "Ask or type a command…";
   input.spellcheck = false;
   input.autocapitalize = "off";
   input.autocomplete = "off";
@@ -2206,6 +2371,8 @@ function renderTerminalComposer(): HTMLElement {
   attach.title = "Attach image or file";
   const form = el("form", "terminal-composer-form");
   form.append(attach, input, send);
+  const panel = el("div", "terminal-composer-panel");
+  panel.append(attachmentList, form);
   const status = el("div", "terminal-composer-meta");
   status.append(
     el("span", "terminal-composer-hint", "Enter to send · Shift+Enter for a new line"),
@@ -2305,7 +2472,7 @@ function renderTerminalComposer(): HTMLElement {
   attach.addEventListener("pointerdown", (event) => event.preventDefault());
   attach.addEventListener("click", chooseAttachments);
 
-  section.append(renderExtraKeys(input), attachmentList, form, status);
+  section.append(renderExtraKeys(input), panel, status);
   return section;
 }
 

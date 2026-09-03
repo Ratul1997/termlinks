@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1170" height="2532" viewBox="0 0 1170 2532">
+  <rect width="1170" height="2532" fill="#070B14"/>
+  <rect width="1170" height="78" fill="#050810"/>
+  <text x="58" y="51" fill="#A9B4C8" font-family="-apple-system, sans-serif" font-size="25">9:41</text>
+  <circle cx="1028" cy="39" r="7" fill="#A9B4C8"/><circle cx="1052" cy="39" r="7" fill="#A9B4C8"/><rect x="1073" y="29" width="48" height="20" rx="6" fill="none" stroke="#A9B4C8" stroke-width="3"/>
+
+  <text x="42" y="158" fill="#F4F7FC" font-family="-apple-system, sans-serif" font-size="52" font-weight="700">Termlinks</text>
+  <circle cx="49" cy="207" r="9" fill="#38D98A"/><text x="71" y="216" fill="#93A3B9" font-family="-apple-system, sans-serif" font-size="27">My MacBook · Online</text>
+  <circle cx="1087" cy="156" r="42" fill="#111A29"/><path d="M1073 155 a14 14 0 1 0 28 0 a14 14 0 1 0-28 0 M1066 184 q21-20 42 0" fill="none" stroke="#8DA0B9" stroke-width="4"/>
+
+  <rect x="35" y="267" width="1100" height="96" rx="24" fill="#101827" stroke="#1E2A3D" stroke-width="2"/>
+  <circle cx="78" cy="314" r="16" fill="none" stroke="#6E819B" stroke-width="4"/><path d="M90 326 l18 18" stroke="#6E819B" stroke-width="4" stroke-linecap="round"/>
+  <text x="130" y="327" fill="#72859F" font-family="-apple-system, sans-serif" font-size="29">Search sessions</text>
+
+  <text x="40" y="438" fill="#72859F" font-family="-apple-system, sans-serif" font-size="25" font-weight="650" letter-spacing="3">RUNNING ON THIS MAC</text>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, sans-serif">
+    <rect x="35" y="476" width="1100" height="286" rx="25" fill="#0E1624" stroke="#1B2A3E" stroke-width="2"/>
+    <rect x="62" y="505" width="70" height="70" rx="17" fill="#172B46"/><text x="97" y="552" text-anchor="middle" fill="#63BEFF" font-family="Menlo, monospace" font-size="31">&gt;_</text>
+    <text x="157" y="537" fill="#F0F4FA" font-size="34" font-weight="650">codex-main</text><circle cx="947" cy="529" r="7" fill="#38D98A"/><text x="966" y="538" fill="#38D98A" font-size="22" font-weight="650">LIVE</text><text x="1090" y="548" fill="#72859F" font-size="42">›</text>
+    <text x="157" y="578" fill="#8496AE" font-size="25">Codex · 2m ago</text>
+    <rect x="62" y="616" width="1040" height="116" rx="15" fill="#080D16"/><text x="85" y="656" fill="#7190B2" font-family="Menlo, monospace" font-size="23">› Implemented mobile keyboard fix</text><text x="85" y="700" fill="#4FADFF" font-family="Menlo, monospace" font-size="23">~/Projects/termlinks $</text>
+
+    <rect x="35" y="790" width="1100" height="286" rx="25" fill="#0E1624" stroke="#1B2A3E" stroke-width="2"/>
+    <rect x="62" y="819" width="70" height="70" rx="17" fill="#172B46"/><text x="97" y="866" text-anchor="middle" fill="#63BEFF" font-family="Menlo, monospace" font-size="31">&gt;_</text>
+    <text x="157" y="851" fill="#F0F4FA" font-size="34" font-weight="650">frontend-dev</text><circle cx="947" cy="843" r="7" fill="#38D98A"/><text x="966" y="852" fill="#38D98A" font-size="22" font-weight="650">LIVE</text><text x="1090" y="862" fill="#72859F" font-size="42">›</text>
+    <text x="157" y="892" fill="#8496AE" font-size="25">npm run dev · 8m ago</text>
+    <rect x="62" y="930" width="1040" height="116" rx="15" fill="#080D16"/><text x="85" y="970" fill="#38D98A" font-family="Menlo, monospace" font-size="23">VITE ready in 312 ms</text><text x="85" y="1014" fill="#A5B3C6" font-family="Menlo, monospace" font-size="23">Local: http://localhost:5173/</text>
+
+    <rect x="35" y="1104" width="1100" height="286" rx="25" fill="#0E1624" stroke="#1B2A3E" stroke-width="2"/>
+    <rect x="62" y="1133" width="70" height="70" rx="17" fill="#302719"/><text x="97" y="1180" text-anchor="middle" fill="#F4B85A" font-family="Menlo, monospace" font-size="31">&gt;_</text>
+    <text x="157" y="1165" fill="#F0F4FA" font-size="34" font-weight="650">data-import</text><circle cx="900" cy="1157" r="7" fill="#F4B85A"/><text x="919" y="1166" fill="#F4B85A" font-size="22" font-weight="650">WAITING</text><text x="1090" y="1176" fill="#72859F" font-size="42">›</text>
+    <text x="157" y="1206" fill="#8496AE" font-size="25">python import.py · 1h ago</text>
+    <rect x="62" y="1244" width="1040" height="116" rx="15" fill="#080D16"/><text x="85" y="1284" fill="#A5B3C6" font-family="Menlo, monospace" font-size="23">Imported 24,810 / 50,000 rows</text><text x="85" y="1328" fill="#F4B85A" font-family="Menlo, monospace" font-size="23">Continue? [y/N]</text>
+
+    <rect x="35" y="1418" width="1100" height="286" rx="25" fill="#0E1624" stroke="#1B2A3E" stroke-width="2"/>
+    <rect x="62" y="1447" width="70" height="70" rx="17" fill="#172B46"/><text x="97" y="1494" text-anchor="middle" fill="#63BEFF" font-family="Menlo, monospace" font-size="31">&gt;_</text>
+    <text x="157" y="1479" fill="#F0F4FA" font-size="34" font-weight="650">server-logs</text><circle cx="947" cy="1471" r="7" fill="#38D98A"/><text x="966" y="1480" fill="#38D98A" font-size="22" font-weight="650">LIVE</text><text x="1090" y="1490" fill="#72859F" font-size="42">›</text>
+    <text x="157" y="1520" fill="#8496AE" font-size="25">tail -f app.log · 3h ago</text>
+    <rect x="62" y="1558" width="1040" height="116" rx="15" fill="#080D16"/><text x="85" y="1598" fill="#7190B2" font-family="Menlo, monospace" font-size="23">09:40:22 GET /health 200</text><text x="85" y="1642" fill="#7190B2" font-family="Menlo, monospace" font-size="23">09:40:28 WS connected</text>
+  </g>
+
+  <rect x="744" y="1812" width="391" height="104" rx="28" fill="#2589F4"/><text x="940" y="1878" text-anchor="middle" fill="white" font-family="-apple-system, sans-serif" font-size="31" font-weight="650">+  New terminal</text>
+
+  <rect y="2287" width="1170" height="245" fill="#0C1220" stroke="#1A2638" stroke-width="2"/>
+  <g font-family="-apple-system, sans-serif" font-size="22" text-anchor="middle">
+    <g fill="#53B7FF"><rect x="133" y="2336" width="56" height="43" rx="7" fill="none" stroke="#53B7FF" stroke-width="4"/><path d="M146 2350 h30 M146 2362 h20" stroke="#53B7FF" stroke-width="3"/><text x="161" y="2421">Sessions</text><rect x="107" y="2451" width="108" height="7" rx="4" fill="#2589F4"/></g>
+    <g fill="#778AA5"><rect x="413" y="2336" width="56" height="43" rx="7" fill="none" stroke="#778AA5" stroke-width="4"/><text x="441" y="2421">Terminal</text></g>
+    <g fill="#778AA5"><rect x="691" y="2336" width="56" height="43" rx="7" fill="none" stroke="#778AA5" stroke-width="4"/><text x="719" y="2421">Desktop</text></g>
+    <g fill="#778AA5"><circle cx="1000" cy="2357" r="23" fill="none" stroke="#778AA5" stroke-width="4"/><path d="M1000 2325 v12 M1000 2377 v12 M968 2357 h12 M1020 2357 h12" stroke="#778AA5" stroke-width="4"/><text x="1000" y="2421">Settings</text></g>
+  </g>
+  <rect x="435" y="2488" width="300" height="12" rx="6" fill="#D9E1ED" opacity=".85"/>
+</svg>

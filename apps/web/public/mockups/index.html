@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <title>Termlinks mobile UI mockups</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #070b14;
+        color: #f4f7fc;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: #070b14; }
+      main { width: min(100%, 760px); margin: 0 auto; padding: max(28px, env(safe-area-inset-top)) 18px max(40px, env(safe-area-inset-bottom)); }
+      h1 { margin: 0 0 8px; font-size: clamp(28px, 8vw, 42px); }
+      .intro { margin: 0 0 28px; color: #91a2ba; line-height: 1.5; }
+      article { margin: 0 0 42px; }
+      h2 { margin: 0 0 7px; font-size: 21px; }
+      p { margin: 0 0 14px; color: #91a2ba; line-height: 1.45; }
+      a { color: #63beff; }
+      img { display: block; width: 100%; height: auto; border: 1px solid #263650; border-radius: 22px; background: #070b14; }
+      .badge { display: inline-block; margin-left: 8px; padding: 4px 8px; border-radius: 999px; background: #17365e; color: #73c2ff; font-size: 12px; vertical-align: 3px; }
+      footer { color: #6f829e; font-size: 14px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Termlinks mobile UI</h1>
+      <p class="intro">The selected combined direction plus the original three concepts. Pinch to zoom, or tap an image and open it in a new tab for full resolution.</p>
+
+      <article>
+        <h2>Selected: hybrid terminal + sliding tabs <span class="badge">New</span></h2>
+        <p>Attachment-enabled composer from the hybrid design, combined with horizontally sliding terminal tabs. Tap to switch; hold and drag to reorder.</p>
+        <a href="./combined-terminal.svg"><img src="./combined-terminal.svg" alt="Combined Termlinks mobile terminal mockup with attachment composer and reorderable session tabs" /></a>
+      </article>
+
+      <article>
+        <h2>1. Terminal first</h2>
+        <p>Closest to a focused mobile SSH client. The terminal receives almost all the screen space.</p>
+        <a href="./terminal-first.svg"><img src="./terminal-first.svg" alt="Terminal-first Termlinks mobile mockup" /></a>
+      </article>
+
+      <article>
+        <h2>2. Hybrid with attachments <span class="badge">Recommended</span></h2>
+        <p>A terminal-first screen with the image/file workflow and a restrained command composer.</p>
+        <a href="./hybrid-attachments.svg"><img src="./hybrid-attachments.svg" alt="Hybrid Termlinks mobile terminal mockup" /></a>
+      </article>
+
+      <article>
+        <h2>3. Session workspace</h2>
+        <p>A clean home screen for returning to Codex, servers, scripts, and other long-running sessions.</p>
+        <a href="./session-workspace.svg"><img src="./session-workspace.svg" alt="Termlinks session workspace mobile mockup" /></a>
+      </article>
+
+      <footer>These are design previews only. The live terminal UI has not been changed.</footer>
+    </main>
+  </body>
+</html>
