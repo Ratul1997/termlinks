@@ -1,5 +1,9 @@
 # Termlinks
 
+[![CI](https://github.com/Ratul1997/termlinks/actions/workflows/ci.yml/badge.svg)](https://github.com/Ratul1997/termlinks/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/Ratul1997/termlinks)](https://github.com/Ratul1997/termlinks/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-4c9f70.svg)](LICENSE)
+
 > **A private, local-first continuity layer for terminals and AI coding agents—letting you leave your computer without leaving your work.**
 
 Termlinks is an open-source, self-hosted bridge that keeps terminal work running on your computer and lets you view and control it from a phone browser. It is command-agnostic: Codex, Claude, development servers, import scripts, shells, and other terminal programs all use the same PTY bridge. A shell created from the portal also opens in a native terminal window on the computer, so both screens share the same PTY and history. Termlinks can carry an opt-in full Mac desktop or one selected macOS window and can transfer files from the encrypted portal to the computer.
@@ -23,20 +27,39 @@ Termlinks is a **developer preview** intended for one trusted owner and trusted 
 
 Managed PTYs survive browser/PWA disconnects and connector restarts, but they currently do **not** survive a Termlinks daemon restart or computer reboot. One hosted deployment maps to one configured computer; device pairing, revocation, and multi-computer routing remain roadmap work.
 
-## Quick start
+## Install
 
-Requirements: Go 1.25+ (the module selects the tested Go 1.26.8 toolchain), Node.js 20+, and npm.
+The release installer supports Apple silicon, Intel Macs, and Linux on arm64 or amd64. It downloads the correct [GitHub release](https://github.com/Ratul1997/termlinks/releases/latest), verifies its published SHA-256 checksum, validates the archive and executable version, verifies the macOS code signature, and installs to `~/.local/bin/termlinks` without `sudo`:
 
 ```sh
-git clone https://github.com/Ratul1997/termlinks.git
-cd termlinks
-npm ci
-make install
+curl -fsSLO https://raw.githubusercontent.com/Ratul1997/termlinks/main/install.sh
+less install.sh
+sh install.sh
+rm install.sh
+```
+
+Reviewing the installer before running it is recommended. For a one-line installation after review:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Ratul1997/termlinks/main/install.sh | sh
+```
+
+If `~/.local/bin` is not already on your shell path, the installer prints the exact command to add it. Set `TERMLINKS_INSTALL_DIR` to another absolute user-writable directory or `TERMLINKS_VERSION` to install a specific published version. Windows is not currently supported.
+
+## Quick start
+
+After installing:
+
+```sh
 termlinks token
 termlinks codex
 ```
 
-The first managed command starts the background daemon automatically. Open `http://127.0.0.1:57321` on the computer and log in with the token. Port `57321` is in IANA's Dynamic/Private range and is not assigned to a standard service. If it is occupied locally, start the first command with `termlinks -p 9000 <command>` and open the matching port instead. The compiled, self-contained executable is `dist/termlinks`; its portal assets are embedded in the binary.
+The first managed command starts the background daemon automatically. Open `http://127.0.0.1:57321` on the computer and log in with the token. Port `57321` is in IANA's Dynamic/Private range and is not assigned to a standard service. If it is occupied locally, start the first command with `termlinks -p 9000 <command>` and open the matching port instead.
+
+This loopback start is the fastest safe test. For phone access, use an SSH tunnel/private VPN or deploy your own encrypted Cloudflare portal by following [the Cloudflare setup guide](docs/cloudflare.md). The public `termlinks.pages.dev` installation belongs to its operator and is not a shared Termlinks service.
+
+To build instead of installing a release, clone the repository and follow [Contributing](CONTRIBUTING.md). The compiled, self-contained executable is `dist/termlinks`; its portal assets are embedded in the binary.
 
 The portal is an installable PWA. On Android/desktop, use the browser's **Install app** action (or the in-app button when available). On iPhone/iPad, open the Share menu and select **Add to Home Screen**. The installed app still asks for the portal token and still requires the computer and connector to be online for terminal access.
 

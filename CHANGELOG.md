@@ -4,6 +4,11 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 
 ## [Unreleased]
 
+### Added
+
+- A checksum-verifying macOS/Linux release installer and a shorter binary-first quick start.
+- GitHub-native CI, release, and license badges for clearer project status.
+
 ## [0.8.2] - 2026-09-04
 
 ### Fixed

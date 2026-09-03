@@ -41,6 +41,12 @@ jobs:
       - run: npm run build
       - if: runner.os == 'Linux'
         run: npm audit --audit-level=high
+      - name: Smoke-test release installer
+        if: runner.os == 'Linux'
+        run: |
+          install_dir="$(mktemp -d)"
+          TERMLINKS_INSTALL_DIR="$install_dir" ./install.sh
+          "$install_dir/termlinks" version
 
   race:
     name: Go race detector
