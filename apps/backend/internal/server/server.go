@@ -49,6 +49,11 @@ type terminalControl struct {
 	Rows uint16 `json:"rows,omitempty"`
 }
 
+type terminalSnapshotControl struct {
+	Type  string `json:"type"`
+	Bytes *int   `json:"bytes,omitempty"`
+}
+
 func New(sessions *session.Manager, authManager *auth.Manager, logger *slog.Logger, visibleTerminal ...func(string) error) (*Server, error) {
 	root, err := fs.Sub(webui.Files, "dist")
 	if err != nil {
@@ -693,10 +698,17 @@ func (s *Server) terminal(w http.ResponseWriter, r *http.Request, browser bool) 
 
 	initial, updates, cancel := current.Subscribe()
 	defer cancel()
+	initialBytes := len(initial)
+	if err := connection.WriteJSON(terminalSnapshotControl{Type: "terminal_snapshot_start", Bytes: &initialBytes}); err != nil {
+		return
+	}
 	if len(initial) > 0 {
 		if err := connection.WriteMessage(websocket.BinaryMessage, initial); err != nil {
 			return
 		}
+	}
+	if err := connection.WriteJSON(terminalSnapshotControl{Type: "terminal_snapshot_end"}); err != nil {
+		return
 	}
 	if !current.Info().Running {
 		s.writeTerminalStatus(connection, current.Info())

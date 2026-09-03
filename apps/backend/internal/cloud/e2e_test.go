@@ -125,12 +125,13 @@ func TestCloudPortalEndToEnd(t *testing.T) {
 			if json.Unmarshal(raw, &message) != nil || message.ID != terminalID {
 				t.Fatal("connector returned invalid encrypted terminal data")
 			}
-			data := []byte(message.Data)
-			if message.Binary {
-				data, err = base64.RawURLEncoding.DecodeString(message.Data)
-				if err != nil {
-					t.Fatal(err)
-				}
+			if !message.Binary {
+				// Snapshot framing and terminal status travel as text controls.
+				continue
+			}
+			data, err := base64.RawURLEncoding.DecodeString(message.Data)
+			if err != nil {
+				t.Fatal(err)
 			}
 			terminalOutput = append(terminalOutput, data...)
 		case "terminal_close":

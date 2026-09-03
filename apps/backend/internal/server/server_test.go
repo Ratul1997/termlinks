@@ -84,6 +84,18 @@ func TestWebAuthenticationAndInteractiveTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = current.Stop() })
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		initial, _, cancel := current.Subscribe()
+		cancel()
+		if bytes.Contains(initial, []byte("web-ready")) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("terminal did not produce its initial output")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	parsed, _ := url.Parse(web.URL)
 	header := http.Header{"Origin": []string{web.URL}}
@@ -100,6 +112,7 @@ func TestWebAuthenticationAndInteractiveTerminal(t *testing.T) {
 	}
 	defer connection.Close()
 	connection.SetReadDeadline(time.Now().Add(4 * time.Second))
+	assertTerminalSnapshot(t, connection, []byte("web-ready"))
 	if err := connection.WriteMessage(websocket.BinaryMessage, []byte("browser-input\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -112,6 +125,67 @@ func TestWebAuthenticationAndInteractiveTerminal(t *testing.T) {
 		if kind == websocket.BinaryMessage {
 			output = append(output, payload...)
 		}
+	}
+}
+
+func TestTerminalFramesEmptySnapshot(t *testing.T) {
+	manager := session.NewManager()
+	handler, err := New(manager, auth.New("token"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := manager.Start(session.StartOptions{Name: "quiet", Command: []string{"/bin/cat"}, Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = current.Stop() })
+	web := httptest.NewServer(handler.ControlHandler())
+	defer web.Close()
+	connection, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(web.URL, "http")+"/v1/sessions/"+current.Info().ID+"/attach", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	connection.SetReadDeadline(time.Now().Add(2 * time.Second))
+	assertTerminalSnapshot(t, connection, nil)
+}
+
+func assertTerminalSnapshot(t *testing.T, connection *websocket.Conn, contains []byte) {
+	t.Helper()
+	kind, payload, err := connection.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var start terminalSnapshotControl
+	if kind != websocket.TextMessage || json.Unmarshal(payload, &start) != nil || start.Type != "terminal_snapshot_start" {
+		t.Fatalf("invalid terminal snapshot start: kind=%d payload=%q", kind, payload)
+	}
+	if start.Bytes == nil {
+		t.Fatal("terminal snapshot start omitted its byte count")
+	}
+	if len(contains) == 0 {
+		if *start.Bytes != 0 {
+			t.Fatalf("empty terminal snapshot declared %d bytes", *start.Bytes)
+		}
+	} else {
+		kind, payload, err = connection.ReadMessage()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kind != websocket.BinaryMessage || len(payload) != *start.Bytes || !bytes.Contains(payload, contains) {
+			t.Fatalf("invalid terminal snapshot data: kind=%d bytes=%d declared=%d", kind, len(payload), *start.Bytes)
+		}
+	}
+	kind, payload, err = connection.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var end terminalSnapshotControl
+	if kind != websocket.TextMessage || json.Unmarshal(payload, &end) != nil || end.Type != "terminal_snapshot_end" {
+		t.Fatalf("invalid terminal snapshot end: kind=%d payload=%q", kind, payload)
+	}
+	if end.Bytes != nil {
+		t.Fatal("terminal snapshot end unexpectedly included a byte count")
 	}
 }
 

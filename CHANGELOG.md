@@ -4,6 +4,14 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-09-04
+
+### Fixed
+
+- Terminal reconnects keep the previous xterm buffer readable, show a compact reconnect indicator, and pause input until replacement scrollback is ready.
+- Explicit snapshot framing separates complete retained output from live terminal bytes, preventing blank reconnect gaps and duplicated history while remaining compatible with older daemons.
+- Reconnect snapshot application preserves whether the user was at the live bottom or viewing earlier history.
+
 ## [0.8.1] - 2026-09-04
 
 ### Fixed
@@ -26,6 +34,7 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 - Private SQLite workflow and terminal-history state.
 - Browser-created terminal continuity with native terminal attachment.
 
-[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/Ratul1997/termlinks/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/Ratul1997/termlinks/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/Ratul1997/termlinks/releases/tag/v0.8.0

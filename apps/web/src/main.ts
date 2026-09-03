@@ -13,6 +13,7 @@ import {
   visibleSavedGroups,
   type SavedTerminal,
 } from "./terminal-history";
+import { TerminalStreamReconciler, terminalStreamControl } from "./terminal-reconnect";
 import "./style.css";
 
 type Session = {
@@ -72,12 +73,6 @@ type WorkspaceSuggestion = { path: string; name: string; lastUsedAt: string };
 type TerminalTemplate = {
   name: string;
   cwd: string;
-};
-
-type StatusMessage = {
-  type: "status";
-  running: boolean;
-  exitCode?: number;
 };
 
 type BeforeInstallPromptEvent = Event & {
@@ -172,6 +167,8 @@ const state: {
   selected?: string;
   socket?: TerminalLink;
   terminal?: Terminal;
+  terminalSessionID?: string;
+  terminalSnapshotApplied: boolean;
   fit?: FitAddon;
   touchCleanup?: () => void;
   touchSync?: () => void;
@@ -188,7 +185,8 @@ const state: {
   view: PortalView;
   selectedWorkflow?: string;
 } = {
-  authenticated: false, sessions: [], savedTerminals: [], terminalHistoryAvailable: true, terminalReconnectAttempts: 0, closedSessions: new Set(),
+  authenticated: false, sessions: [], savedTerminals: [], terminalHistoryAvailable: true, terminalSnapshotApplied: false,
+  terminalReconnectAttempts: 0, closedSessions: new Set(),
   view: lastPortalView.view, selected: lastPortalView.selected, selectedWorkflow: lastPortalView.selectedWorkflow,
 };
 
@@ -2822,7 +2820,12 @@ function renderTerminal(id: string, workflowID?: string): void {
   const frame = el("section", "terminal-frame");
   const mount = el("div", "terminal-mount");
   mount.id = "terminal";
-  frame.append(mount);
+  const sync = el("div", "terminal-sync-indicator");
+  sync.hidden = true;
+  sync.setAttribute("role", "status");
+  sync.setAttribute("aria-live", "polite");
+  sync.append(el("span", "terminal-sync-dot"), el("span", "terminal-sync-label", "Reconnecting…"));
+  frame.append(mount, sync);
   page.append(header, actions, connection, frame, renderTerminalTabs(session.id), renderTerminalComposer());
   app.append(page);
 
@@ -2850,6 +2853,8 @@ function renderTerminal(id: string, workflowID?: string): void {
   terminal.loadAddon(fit);
   terminal.open(mount);
   state.terminal = terminal;
+  state.terminalSessionID = session.id;
+  state.terminalSnapshotApplied = false;
   state.fit = fit;
   const touchScroll = enableTouchScroll(terminal);
   state.touchCleanup = touchScroll.cleanup;
@@ -3521,34 +3526,93 @@ function connectTerminal(session: Session, automatic = false): void {
   if (state.resizeTimer !== undefined) window.clearTimeout(state.resizeTimer);
   state.resizeTimer = undefined;
   state.lastResize = undefined;
-  state.terminal?.reset();
-  setConnectionState("Connecting…", "connecting");
+  const preserveExisting = state.terminalSessionID === session.id && state.terminalSnapshotApplied;
+  const stream = new TerminalStreamReconciler();
+  let readyTimer: number | undefined;
+  let ended = !session.running;
+  const clearReadyTimer = (): void => {
+    if (readyTimer !== undefined) window.clearTimeout(readyTimer);
+    readyTimer = undefined;
+  };
+  const markReady = (): void => {
+    if (state.socket !== socket) return;
+    clearReadyTimer();
+    state.terminalSnapshotApplied = true;
+    const prefix = encryptedPortal ? "E2E · " : "";
+    if (!ended) setConnectionState(`${prefix}Live · input enabled`, "online");
+    fitTerminal();
+  };
+  const applySnapshot = (snapshot: Uint8Array): void => {
+    if (state.socket !== socket || !state.terminal) return;
+    const terminal = state.terminal;
+    const buffer = terminal.buffer.active;
+    const wasAtBottom = buffer.viewportY >= buffer.baseY;
+    const distanceFromBottom = Math.max(0, buffer.baseY - buffer.viewportY);
+    terminal.reset();
+    const applied = (): void => {
+      if (state.socket !== socket || state.terminal !== terminal) return;
+      if (wasAtBottom) terminal.scrollToBottom();
+      else terminal.scrollToLine(Math.max(0, terminal.buffer.active.baseY - distanceFromBottom));
+      state.touchSync?.();
+      markReady();
+    };
+    if (snapshot.byteLength === 0) applied();
+    else terminal.write(snapshot, applied);
+  };
+  setConnectionState(preserveExisting ? "Reconnecting · terminal kept visible…" : "Connecting…", "connecting");
   const opened = (): void => {
     if (state.socket !== socket) return;
     state.terminalReconnectAttempts = 0;
-    const prefix = encryptedPortal ? "E2E · " : "";
-    setConnectionState(session.running ? `${prefix}Live · input enabled` : `${prefix}Session output`, session.running ? "online" : "offline");
+    setConnectionState(preserveExisting ? "Connected · syncing terminal…" : "Connected · loading terminal…", "connecting");
     fitTerminal();
+    // Older daemons do not frame an empty initial snapshot. Keep treating the
+    // first eventual binary frame as their snapshot, but avoid blocking input
+    // forever when a brand-new quiet shell has no output yet.
+    readyTimer = window.setTimeout(() => {
+      if (state.socket === socket && stream.waitingForSnapshot && !stream.framedSnapshotStarted) markReady();
+    }, 400);
   };
   const received = async (data: string | ArrayBuffer | Blob): Promise<void> => {
     if (state.socket !== socket) return;
     if (typeof data === "string") {
       try {
-        const message = JSON.parse(data) as StatusMessage;
-        if (message.type === "status" && !message.running) {
-          session.running = false;
-          session.exitCode = message.exitCode;
-          void loadTerminalHistory().catch(() => undefined);
-          setConnectionState(message.exitCode === 0 ? "Exited successfully" : `Exited · code ${message.exitCode ?? "?"}`, "offline");
+        const message: unknown = JSON.parse(data);
+        const control = terminalStreamControl(message);
+        if (control) {
+          if (control.type === "terminal_snapshot_start") clearReadyTimer();
+          const action = stream.receiveControl(control);
+          if (action?.kind === "snapshot") applySnapshot(action.data);
+          return;
         }
-      } catch { /* Ignore unknown text control messages. */ }
+        if (isRecord(message) && message.type === "status" && message.running === false) {
+          ended = true;
+          session.running = false;
+          session.exitCode = typeof message.exitCode === "number" ? message.exitCode : undefined;
+          void loadTerminalHistory().catch(() => undefined);
+          setConnectionState(session.exitCode === 0 ? "Exited successfully" : `Exited · code ${session.exitCode ?? "?"}`, "offline");
+        }
+      } catch {
+        if (state.socket === socket) {
+          socket.close();
+          scheduleTerminalReconnect(session);
+        }
+      }
       return;
     }
     const bytes = data instanceof Blob ? await data.arrayBuffer() : data;
-    state.terminal?.write(new Uint8Array(bytes));
+    if (state.socket !== socket) return;
+    try {
+      const action = stream.receiveBinary(new Uint8Array(bytes));
+      if (action?.kind === "snapshot") applySnapshot(action.data);
+      else if (action?.kind === "live") state.terminal?.write(action.data);
+    } catch {
+      socket.close();
+      scheduleTerminalReconnect(session);
+    }
   };
   const closed = (code: number): void => {
     if (state.socket !== socket) return;
+    clearReadyTimer();
     if (code === 1008) {
       state.authenticated = false;
       renderLogin("Your portal session expired");
@@ -3557,13 +3621,17 @@ function connectTerminal(session: Session, automatic = false): void {
     if (session.running) scheduleTerminalReconnect(session);
   };
   const failed = (): void => {
-    if (state.socket === socket) scheduleTerminalReconnect(session);
+    if (state.socket === socket) {
+      clearReadyTimer();
+      scheduleTerminalReconnect(session);
+    }
   };
 
   let socket: TerminalLink;
   if (encryptedPortal) {
     if (!encryptedBridge) {
-      renderLogin("Encrypted portal is disconnected");
+      setConnectionState("Connection paused · reconnecting…", "connecting");
+      if (portalResumeKey) void resumeEncryptedPortal();
       return;
     }
     socket = encryptedBridge.openTerminal(session.id, {
@@ -3637,6 +3705,13 @@ function setConnectionState(label: string, kind: "connecting" | "online" | "offl
   const text = bar.querySelector<HTMLElement>(".connection-label");
   if (text) text.textContent = label;
 
+  const sync = document.querySelector<HTMLElement>(".terminal-sync-indicator");
+  if (sync) {
+    sync.hidden = kind !== "connecting";
+    const syncLabel = sync.querySelector<HTMLElement>(".terminal-sync-label");
+    if (syncLabel) syncLabel.textContent = label.includes("waking") ? "Computer waking…" : label.includes("loading") ? "Loading terminal…" : "Reconnecting…";
+  }
+
   const composer = document.querySelector<HTMLElement>(".terminal-composer");
   if (!composer) return;
   const connected = kind === "online";
@@ -3679,6 +3754,8 @@ function closeConnection(): void {
   state.layoutCleanup = undefined;
   state.terminal?.dispose();
   state.terminal = undefined;
+  state.terminalSessionID = undefined;
+  state.terminalSnapshotApplied = false;
   state.fit = undefined;
 }
 

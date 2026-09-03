@@ -278,7 +278,11 @@ while (!opened || output.length === 0 || (expectedOutput && !new TextDecoder().d
   }
   if (message.type === "terminal_close") throw new Error("Terminal closed during encrypted smoke test");
   if (message.type === "terminal_data") {
-    const next = message.binary ? base64URLToBytes(message.data) : new TextEncoder().encode(message.data);
+    // Text frames are terminal protocol controls (snapshot markers/status),
+    // never terminal output. Keeping them out of output also supports rolling
+    // upgrades where either side may not know a newer control type yet.
+    if (!message.binary) continue;
+    const next = base64URLToBytes(message.data);
     const combined = new Uint8Array(output.length + next.length);
     combined.set(output);
     combined.set(next, output.length);

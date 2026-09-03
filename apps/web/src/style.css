@@ -395,7 +395,20 @@ button { color: inherit; }
   flex: 0 0 auto; margin-left: auto; padding: 3px 6px; border: 1px solid #294454; border-radius: 5px;
   color: #83cbe9; background: #0d1b24; font: 700 7px/1 ui-monospace, monospace; letter-spacing: .08em;
 }
-.terminal-frame { min-height: 0; overflow: hidden; padding: 10px 5px 3px 10px; background: var(--terminal-bg); }
+.terminal-frame { position: relative; min-height: 0; overflow: hidden; padding: 10px 5px 3px 10px; background: var(--terminal-bg); }
+.terminal-sync-indicator {
+  position: absolute; z-index: 4; top: 10px; left: 50%; display: flex; align-items: center; gap: 7px;
+  max-width: calc(100% - 28px); padding: 7px 10px; transform: translateX(-50%);
+  border: 1px solid #344451; border-radius: 999px; color: #b9c6d0; background: rgba(17, 27, 36, .92);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .3); backdrop-filter: blur(12px);
+  font: 10px/1 ui-monospace, monospace; white-space: nowrap; pointer-events: none;
+}
+.terminal-sync-indicator[hidden] { display: none; }
+.terminal-sync-dot {
+  width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: #e5c07b;
+  box-shadow: 0 0 0 0 rgba(229, 192, 123, .35); animation: terminal-sync-pulse 1.35s ease-out infinite;
+}
+@keyframes terminal-sync-pulse { 70%, 100% { box-shadow: 0 0 0 6px rgba(229, 192, 123, 0); } }
 .terminal-mount, .terminal-mount .xterm { width: 100%; height: 100%; }
 .terminal-mount .xterm.native-touch-terminal {
   overflow-y: auto; overscroll-behavior-y: contain; touch-action: pan-y;

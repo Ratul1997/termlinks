@@ -94,7 +94,9 @@ Phone                   Daemon                         Child
   │◄──── safe metadata ───│                              │
   │                       │                              │
   │ WS + cookie + Origin ►│                              │
-  │◄── retained output ───│                              │
+  │◄─ snapshot_start(N) ──│                              │
+  │◄── N retained bytes ──│                              │
+  │◄── snapshot_end ──────│                              │
   │                       │◄──── bytes from owned PTY ───│
   │◄──── binary bytes ────│                              │
   │──── keyboard bytes ──►│──── write to PTY ───────────►│
@@ -103,6 +105,8 @@ Phone                   Daemon                         Child
 ```
 
 Only the initial login carries the long-lived token. Later API and WebSocket calls use the temporary browser cookie. Refreshing or reconnecting creates a new viewer of the same daemon-owned PTY; it does not create or restart the command.
+
+The daemon explicitly brackets the complete bounded scrollback with `terminal_snapshot_start` (including its byte count) and `terminal_snapshot_end`; later binary frames are live output. During reconnect, the PWA leaves the old xterm buffer rendered and disables input behind a small status indicator. It assembles and validates the replacement snapshot, resets/replays xterm only when the full snapshot is locally available, restores the user's bottom-or-history position, then applies queued live output in order and re-enables input. This removes the multi-second blank gap and prevents duplicated scrollback. A rolling-upgrade fallback treats the first binary frame from older daemons as the snapshot, matching their existing wire behavior, so the hosted PWA can update before a daemon holding important PTYs is safely restarted.
 
 ## Encrypted public attachment flow
 
@@ -173,7 +177,7 @@ Frames are scaled to a bounded browser-requested maximum, JPEG encoded locally, 
 
 - Local terminal closes: its socket disappears; the daemon and PTY continue.
 - Phone locks or changes network: its WebSocket disappears; the PTY continues.
-- Phone reconnects: retained scrollback is sent first, followed by live bytes.
+- Phone reconnects: the old terminal stays readable with input paused; an explicitly framed retained-scrollback snapshot replaces it atomically, followed by live bytes. Older daemons use a compatible first-binary-frame fallback.
 - Child exits: the daemon records the exit code and retained output remains viewable.
 - Dashboard refreshes: completed sessions are omitted, so exited or explicitly stopped terminals do not clutter the portal list.
 - Remote desktop viewer closes: its loopback VNC socket is closed; Screen Sharing remains governed by macOS and terminal sessions are unaffected.
