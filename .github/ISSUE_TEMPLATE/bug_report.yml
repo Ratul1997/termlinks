@@ -1,0 +1,68 @@
+name: Bug report
+description: Report a reproducible Termlinks problem without including secrets or terminal contents.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Do not paste portal tokens, connector tokens, cookies, terminal output containing secrets, or private file contents.
+  - type: input
+    id: version
+    attributes:
+      label: Termlinks version
+      description: Output of `termlinks version`.
+      placeholder: termlinks 0.8.1
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Computer platform
+      options:
+        - macOS arm64
+        - macOS amd64
+        - Linux arm64
+        - Linux amd64
+        - Windows (unsupported)
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Connection mode
+      options:
+        - Same-computer portal
+        - SSH forwarding
+        - Private VPN or overlay
+        - Cloudflare relay
+        - Another HTTPS tunnel or reverse proxy
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Use placeholder names and redact private paths, commands, output, and credentials.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed tokens, cookies, sensitive terminal output, and private data from this report.
+          required: true

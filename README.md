@@ -8,6 +8,21 @@ No Termlinks-hosted account or service is required. Run it only on the local com
 
 This first version is designed for one trusted owner and supports macOS and Linux. It controls sessions started through Termlinks; it does not take over unrelated Terminal/iTerm windows.
 
+## Project status
+
+Termlinks is a **developer preview** intended for one trusted owner and trusted client devices. Its terminal continuity path is usable today, but the project has not received an independent security audit and is not a multi-user access-control system. Read [SECURITY.md](SECURITY.md) before exposing it to a network and [ROADMAP.md](ROADMAP.md) before depending on an unfinished platform feature.
+
+| Capability | macOS | Linux | Windows |
+| --- | --- | --- | --- |
+| Managed terminal CLI, daemon, and browser portal | Supported and CI-tested | Supported and CI-tested | Not implemented |
+| Official release binaries | Apple silicon and Intel | arm64 and amd64 | Not published |
+| Portal-created native terminal window | Terminal.app | Best effort through a supported terminal emulator | Not implemented |
+| Hosted PWA and encrypted Cloudflare relay | Supported | Supported | Connector not implemented |
+| Full-desktop access | Local Screen Sharing/VNC required | User-supplied loopback VNC server required | Not implemented |
+| Selected-window capture and control | macOS 14+ only | Unavailable | Unavailable |
+
+Managed PTYs survive browser/PWA disconnects and connector restarts, but they currently do **not** survive a Termlinks daemon restart or computer reboot. One hosted deployment maps to one configured computer; device pairing, revocation, and multi-computer routing remain roadmap work.
+
 ## Quick start
 
 Requirements: Go 1.25+ (the module selects the tested Go 1.26.8 toolchain), Node.js 20+, and npm.
@@ -29,7 +44,7 @@ The portal is an installable PWA. On Android/desktop, use the browser's **Instal
 
 Termlinks is released under the permissive [MIT License](LICENSE). You may use, inspect, modify, redistribute, and self-host it, including with a network or hosting provider of your choice. The repository contains the Go CLI/daemon, TypeScript PWA, Cloudflare relay, build scripts, tests, architecture notes, and security documentation—there is no required proprietary Termlinks backend.
 
-Third-party dependencies keep their own licenses. Contributions and security reports are welcome; read [SECURITY.md](SECURITY.md) before putting a terminal on any network.
+Third-party dependencies keep their own licenses. Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md), the [Code of Conduct](CODE_OF_CONDUCT.md), and [SECURITY.md](SECURITY.md) before putting a terminal on any network.
 
 ## Choose how to connect
 
