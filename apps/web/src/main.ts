@@ -856,6 +856,37 @@ const el = <K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, t
   return node;
 };
 
+type AppDestination = "home" | "ai" | "desktop" | "new";
+
+function renderAppNavigation(active: AppDestination): HTMLElement {
+  const navigation = el("nav", "app-bottom-nav");
+  navigation.setAttribute("aria-label", "Main navigation");
+  const addItem = (destination: AppDestination, icon: string, label: string, action: () => void): void => {
+    const button = el("button", `app-nav-button${active === destination ? " active" : ""}`);
+    button.type = "button";
+    button.dataset.destination = destination;
+    button.setAttribute("aria-label", label);
+    if (active === destination) button.setAttribute("aria-current", "page");
+    button.append(el("span", "app-nav-icon", icon), el("span", "app-nav-label", label));
+    button.addEventListener("click", action);
+    navigation.append(button);
+  };
+  addItem("home", "⌂", "Home", renderSessions);
+  addItem("ai", "✦", "AI Work", () => { void renderWorkflows(); });
+  addItem("desktop", "▣", "Desktop", renderDesktop);
+  addItem("new", "+", "New", renderSessionsWithCreate);
+  return navigation;
+}
+
+function markAppNavigationActive(destination: AppDestination): void {
+  for (const button of document.querySelectorAll<HTMLButtonElement>(".app-nav-button")) {
+    const active = button.dataset.destination === destination;
+    button.classList.toggle("active", active);
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  }
+}
+
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (encryptedPortal) {
     if (!encryptedBridge) throw new Error("Encrypted portal is not connected");
@@ -1158,7 +1189,7 @@ function renderSessions(): void {
   rememberPortalView("sessions");
   app.replaceChildren();
   const page = el("main", "dashboard");
-  const header = el("header", "topbar");
+  const header = el("header", "topbar home-topbar");
   const brand = el("button", "brand brand-button");
   brand.type = "button";
   brand.append(el("span", "brand-mark", ">_"), el("span", "brand-name", "termlinks"));
@@ -1184,7 +1215,7 @@ function renderSessions(): void {
   const titleGroup = el("div");
   const summary = el("p", "session-summary", "Checking sessions…");
   summary.id = "session-summary";
-  titleGroup.append(el("p", "eyebrow", "YOUR COMPUTER"), el("h1", "dashboard-title", "Terminal sessions"), summary);
+  titleGroup.append(el("p", "eyebrow", "HOME · YOUR COMPUTER"), el("h1", "dashboard-title", "Terminal sessions"), summary);
   const refresh = el("button", "icon-button", "↻");
   refresh.type = "button";
   refresh.title = "Refresh sessions";
@@ -1231,7 +1262,7 @@ function renderSessions(): void {
   const list = el("section", "session-list");
   list.id = "session-list";
   renderSessionCards(list);
-  page.append(header, heading, transferStatus, createPanel, list, renderStartHint(), renderTermAdsTeaser());
+  page.append(header, heading, transferStatus, createPanel, list, renderStartHint(), renderTermAdsTeaser(), renderAppNavigation("home"));
   app.append(page);
   updateSessionSummary();
   startPolling();
@@ -1266,7 +1297,7 @@ async function renderWorkflows(message = ""): Promise<void> {
   const composer = renderWorkflowComposer();
   const list = el("section", "workflow-list");
   list.append(el("p", "workflow-loading", "Loading local workflows…"));
-  page.append(header, heading, notice, composer, list);
+  page.append(header, heading, notice, composer, list, renderAppNavigation("ai"));
   app.append(page);
 
   try {
@@ -1466,14 +1497,14 @@ async function renderWorkflowDetail(id: string): Promise<void> {
   rememberPortalView("workflow", undefined, id);
   app.replaceChildren();
   const page = el("main", "dashboard workflow-page");
-  const header = el("header", "topbar");
+  const header = el("header", "topbar workflow-detail-topbar");
   const back = el("button", "ghost-button", "‹ AI workflows");
   back.type = "button";
   back.addEventListener("click", () => { void renderWorkflows(); });
   header.append(el("div", "brand", "✦ Agent work"), back);
   const mount = el("section", "workflow-detail");
   mount.append(el("p", "workflow-loading", "Loading workflow…"));
-  page.append(header, mount);
+  page.append(header, mount, renderAppNavigation("ai"));
   app.append(page);
   let remainsActive = false;
   const refresh = async (): Promise<void> => {
@@ -1566,6 +1597,7 @@ async function openWorkflowTerminal(workflowID: string, sessionID: string): Prom
 
 function renderSessionsWithCreate(): void {
   renderSessions();
+  markAppNavigationActive("new");
   const panel = document.querySelector<HTMLElement>("#create-terminal-panel");
   const create = document.querySelector<HTMLButtonElement>('[aria-controls="create-terminal-panel"]');
   if (!panel || !create) return;

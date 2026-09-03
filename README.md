@@ -361,6 +361,7 @@ Forks may change the corresponding source constants, but should reassess memory,
 
 After login, the portal dashboard automatically shows every managed terminal and its current state:
 
+- The dashboard is the app-style **Home** screen. Its safe-area-aware bottom navigation keeps **Home**, **AI Work**, **Desktop**, and **New** available with one thumb; the active destination is highlighted. Terminal screens retain their separate tmux-style running-session rail, and remote desktop keeps its distraction-free full-screen controls.
 - Select **New terminal** to create one normal interactive shell. Termlinks immediately attaches the portal and opens a native Terminal window on the computer to the same PTY. Its optional starting directory may be `~`, `~/path`, or an absolute path.
 - Inside that shell, type `cd`, `ls`, `codex`, `npm run dev`, or any other command exactly as in a desktop terminal.
 - Terminal history uses native touch momentum on mobile and short smooth scrolling for mouse wheels and trackpads.
