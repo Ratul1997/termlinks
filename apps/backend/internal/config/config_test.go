@@ -6,6 +6,12 @@ import (
 	"testing"
 )
 
+func TestDefaultListenUsesPrivateDynamicPort(t *testing.T) {
+	if DefaultListen != "127.0.0.1:57321" {
+		t.Fatalf("DefaultListen = %q", DefaultListen)
+	}
+}
+
 func TestCloudSettingsPersistPrivately(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TERMLINKS_STATE_DIR", dir)

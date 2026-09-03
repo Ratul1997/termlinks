@@ -4,7 +4,7 @@ Termlinks provides remote keyboard access to local processes and can optionally 
 
 ## Protections in this version
 
-- The web listener defaults to `127.0.0.1:8787`.
+- The web listener defaults to `127.0.0.1:57321` on new installations; existing installations retain their persisted listener.
 - Wildcard binds such as `0.0.0.0` and `[::]` are refused unless `--allow-public-bind` is explicitly supplied.
 - Local process creation is available only through a Unix-domain control socket inside a `0700` state directory; the socket is `0600`.
 - The authenticated portal can create only a normal interactive shell with an optional name and starting directory. It cannot submit a separate executable, argument vector, or custom environment, although commands typed into the shell have the user's full permissions.

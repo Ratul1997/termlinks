@@ -1,11 +1,68 @@
 package main
 
 import (
+	"flag"
 	"testing"
 
 	"termlinks/backend/internal/config"
 	"termlinks/backend/internal/session"
 )
+
+func TestListenWithPort(t *testing.T) {
+	tests := map[string]string{
+		"127.0.0.1:8787": "127.0.0.1:9000",
+		"[::1]:8787":     "[::1]:9000",
+		"localhost:8787": "localhost:9000",
+	}
+	for input, want := range tests {
+		got, err := listenWithPort(input, 9000)
+		if err != nil || got != want {
+			t.Errorf("listenWithPort(%q, 9000) = %q, %v; want %q", input, got, err, want)
+		}
+	}
+	for _, port := range []int{-1, 0, 65536} {
+		if _, err := listenWithPort("127.0.0.1:8787", port); err == nil {
+			t.Errorf("listenWithPort accepted invalid port %d", port)
+		}
+	}
+}
+
+func TestFlagWasSetRecognizesAliases(t *testing.T) {
+	flags := flag.NewFlagSet("test", flag.ContinueOnError)
+	port := flags.Int("port", 0, "")
+	flags.IntVar(port, "p", 0, "")
+	if err := flags.Parse([]string{"-p", "9000"}); err != nil {
+		t.Fatal(err)
+	}
+	if !flagWasSet(flags, "port", "p") || *port != 9000 {
+		t.Fatalf("short port flag was not detected: set=%v port=%d", flagWasSet(flags, "port", "p"), *port)
+	}
+}
+
+func TestConfigureDaemonPortPersistsAndPreservesHost(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TERMLINKS_STATE_DIR", dir)
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Ensure(paths); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveSettings(paths, config.Settings{Listen: "100.100.10.2:57321"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := configureDaemonPort(paths, 9000); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := config.LoadSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Listen != "100.100.10.2:9000" {
+		t.Fatalf("configured listener = %q", settings.Listen)
+	}
+}
 
 func TestValidateListenSecurityBoundary(t *testing.T) {
 	accepted := []string{"127.0.0.1:8787", "[::1]:8787", "192.168.1.10:8787", "100.100.10.2:8787"}

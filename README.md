@@ -19,7 +19,7 @@ termlinks token
 termlinks codex
 ```
 
-The first managed command starts the background daemon automatically. Open `http://127.0.0.1:8787` on the computer and log in with the token. The compiled, self-contained executable is `dist/termlinks`; its portal assets are embedded in the binary.
+The first managed command starts the background daemon automatically. Open `http://127.0.0.1:57321` on the computer and log in with the token. Port `57321` is in IANA's Dynamic/Private range and is not assigned to a standard service. If it is occupied locally, start the first command with `termlinks -p 9000 <command>` and open the matching port instead. The compiled, self-contained executable is `dist/termlinks`; its portal assets are embedded in the binary.
 
 The portal is an installable PWA. On Android/desktop, use the browser's **Install app** action (or the in-app button when available). On iPhone/iPad, open the Share menu and select **Add to Home Screen**. The installed app still asks for the portal token and still requires the computer and connector to be online for terminal access.
 
@@ -33,21 +33,21 @@ Third-party dependencies keep their own licenses. Contributions and security rep
 
 The terminal portal and its API are served by the local `termlinks` daemon. Pick the access method that fits your threat model:
 
-1. **Same computer:** keep the default loopback listener and open `http://127.0.0.1:8787`. Nothing leaves the machine.
+1. **Same computer:** keep the default loopback listener and open `http://127.0.0.1:57321`. Nothing leaves the machine.
 2. **SSH port forwarding:** keep Termlinks on loopback and forward it through a host you already trust:
 
    ```sh
-   ssh -N -L 8787:127.0.0.1:8787 your-user@your-computer
+   ssh -N -L 57321:127.0.0.1:57321 your-user@your-computer
    ```
 
-   Then open `http://127.0.0.1:8787` on the SSH client device. A phone needs an SSH client capable of local port forwarding.
+   Then open `http://127.0.0.1:57321` on the SSH client device. A phone needs an SSH client capable of local port forwarding.
 3. **Private VPN/overlay:** connect the computer and phone with Tailscale, WireGuard, or another private network, then bind Termlinks to that private address:
 
    ```sh
-   termlinks daemon --listen <private-vpn-ip>:8787
+   termlinks daemon --listen <private-vpn-ip>:57321
    ```
 
-4. **Any HTTPS tunnel or reverse proxy:** point the provider at `http://127.0.0.1:8787`, preserve WebSocket upgrades, and require HTTPS. This exposes the direct portal through that provider, so the provider terminates TLS and the portal token is the application login boundary. Add the provider's identity/MFA gate when available.
+4. **Any HTTPS tunnel or reverse proxy:** point the provider at `http://127.0.0.1:57321` (or the port selected with `-p`), preserve WebSocket upgrades, and require HTTPS. This exposes the direct portal through that provider, so the provider terminates TLS and the portal token is the application login boundary. Add the provider's identity/MFA gate when available.
 5. **Cloudflare Pages + Workers (default public setup):** deploy the included static PWA, Pages Function, Worker, and Durable Object. The computer makes an outbound connection; no router port is opened. Browser-to-computer terminal and desktop payloads are additionally encrypted with a key derived from the portal token, so the relay carries ciphertext.
 
 The local, SSH, VPN, and direct-tunnel paths provide managed terminals. The native remote-desktop/window picker currently uses the included encrypted connector-relay protocol; use the Cloudflare adapter or implement the same protocol on another provider. See [docs/cloudflare.md](docs/cloudflare.md) for the default deployment and [docs/architecture.md](docs/architecture.md) for the data flow.
@@ -163,18 +163,18 @@ Termlinks intentionally has a small configuration surface. There is no hidden ap
 
 | Configuration | Default | Meaning |
 | --- | --- | --- |
-| `termlinks [--name NAME] [--detach] [--] COMMAND [ARGS...]` | `$SHELL` when no command is supplied | Starts a managed PTY. `-n` aliases `--name`; `-d` aliases `--detach`; `--` ends Termlinks option parsing. |
+| `termlinks [-p PORT] [--name NAME] [--detach] [--] COMMAND [ARGS...]` | `$SHELL` when no command is supplied | Starts a managed PTY. `-p` aliases `--port` and persists a custom local portal port before the daemon starts; `-n` aliases `--name`; `-d` aliases `--detach`; `--` ends Termlinks option parsing. |
 | Current working directory | Directory where the CLI was invoked | Becomes the managed command's starting directory. |
 | Process environment | Current environment; adds `TERM=xterm-256color` only when `TERM` is absent | Passed to locally started managed commands. Keep in mind that a child process can print environment secrets. |
 | `SHELL` | `/bin/zsh` for a command-less local launch; `/bin/sh` for a portal-created shell when `SHELL` is absent or not absolute | Selects the interactive shell. |
 | `TERMLINKS_STATE_DIR` | Operating-system user config directory plus `termlinks` | Overrides all local state paths. It must be an absolute path. Useful for isolated development/testing installations. |
-| `termlinks daemon --listen ADDR` | `127.0.0.1:8787` | Sets and persists the browser portal listener in `settings.json`. Loopback, RFC1918 private addresses, and Tailscale's `100.64.0.0/10` range are accepted by default. |
+| `termlinks daemon [-p PORT] [--listen ADDR]` | `127.0.0.1:57321` | Sets and persists the browser portal listener in `settings.json`. `-p`/`--port` replaces only the port and preserves the configured host. Loopback, RFC1918 private addresses, and Tailscale's `100.64.0.0/10` range are accepted by default. |
 | `termlinks daemon --allow-public-bind` | Off | Allows an unspecified/public bind such as `0.0.0.0`. This is dangerous and does not add TLS; prefer an SSH/VPN/tunnel setup. |
 | Portal **New terminal → Name** | Empty/generated display name | Optional label, at most 80 characters. |
 | Portal **New terminal → Starting directory** | Home directory | Accepts `~`, `~/path`, or an absolute accessible directory, at most 4096 characters. Browser creation always opens the configured shell; commands are typed afterward. |
 | Portal-created native window | Enabled | A portal-created session also launches the platform terminal and runs `termlinks attach <opaque-session-id>`. There is currently no disable toggle; local CLI-created sessions keep their existing attach/detach behavior. |
 
-`--listen` is a daemon option, so if the daemon is already running, stop that foreground daemon before changing it. Later automatic daemon starts reuse the saved address. `termlinks doctor` shows the effective listener, state directory, daemon status, and version without revealing tokens.
+The selected port is persisted, so later automatic daemon and cloud-connector starts reuse it. If a daemon is already running on another port, Termlinks refuses to change the listener because restarting it would terminate active PTYs. Stop that daemon first, then select the new port. `termlinks doctor` shows the effective listener, state directory, daemon status, and version without revealing tokens.
 
 ### Local state and secrets
 
@@ -202,7 +202,7 @@ In the hosted E2E portal, **Keep me signed in on this device** is enabled by def
 
 | Setting | Value |
 | --- | --- |
-| Local URL | `http://127.0.0.1:8787` unless `--listen` changed it. |
+| Local URL | `http://127.0.0.1:57321` for a new installation unless `-p` or `--listen` changed it. Existing installations retain their saved listener. |
 | Login | Portal token exchanged for a random `HttpOnly`, `SameSite=Strict` cookie. |
 | Cookie lifetime | 12 hours. |
 | Direct login rate limit | Five attempts per direct peer IP per minute. Proxy forwarding headers are intentionally ignored. |
@@ -486,10 +486,10 @@ Selected-window access also stops immediately when `termlinks desktop disable` d
 The default portal listens only on the computer itself. For access away from home, connect the computer and phone to the same private VPN/tailnet, then bind Termlinks to the computer's private VPN address:
 
 ```sh
-termlinks daemon --listen 100.x.y.z:8787
+termlinks daemon --listen 100.x.y.z:57321
 ```
 
-Open `http://100.x.y.z:8787` on the phone. Keep the daemon terminal open the first time; the address is saved, and later managed commands can auto-start the daemon with it.
+Open `http://100.x.y.z:57321` on the phone. Keep the daemon terminal open the first time; the address is saved, and later managed commands can auto-start the daemon with it.
 
 Do not port-forward Termlinks from your router or expose its local port directly to the public internet. A private VPN or SSH tunnel is the lower-complexity private option; the included Cloudflare connector is the default public option and makes an authenticated outbound TLS connection.
 
@@ -507,7 +507,7 @@ termlinks CLI ──┴─ Unix socket ─► daemon ├─ WebSocket ─► pho
                          codex / claude / npm / bash / ...
 ```
 
-For the default Cloudflare public path, the browser derives an AES-256-GCM key from the portal token and opens one encrypted bridge through the owner's Pages deployment. Pages and the Worker relay only ciphertext; the local connector decrypts approved requests and terminal data, then talks to `127.0.0.1:8787`. The portal token itself never crosses the network, and the local port is never publicly bound.
+For the default Cloudflare public path, the browser derives an AES-256-GCM key from the portal token and opens one encrypted bridge through the owner's Pages deployment. Pages and the Worker relay only ciphertext; the local connector decrypts approved requests and terminal data, then talks to the daemon's configured local listener (`127.0.0.1:57321` on a new installation). The portal token itself never crosses the network, and the local port is never publicly bound.
 
 Remote desktop uses the same bridge. For a full desktop, browser-side noVNC speaks RFB/VNC through an in-memory WebSocket-like channel; Termlinks encrypts each byte chunk and the connector forwards it only to the configured loopback VNC address. For a selected window, the connector asks macOS ScreenCaptureKit for encrypted source metadata and bounded JPEG frames, then accepts only validated pointer, key, text, and clipboard messages. There is no public VNC port or generic TCP proxy.
 

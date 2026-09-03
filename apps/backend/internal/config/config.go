@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	DefaultListen     = "127.0.0.1:8787"
+	DefaultListen     = "127.0.0.1:57321"
 	DefaultVNCAddress = "127.0.0.1:5900"
 )
 

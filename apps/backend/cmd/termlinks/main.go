@@ -498,8 +498,10 @@ func runCommand(args []string) error {
 	flags.StringVar(name, "n", "", "session name")
 	detach := flags.Bool("detach", false, "start without attaching")
 	flags.BoolVar(detach, "d", false, "start without attaching")
+	port := flags.Int("port", 0, "local web portal port")
+	flags.IntVar(port, "p", 0, "local web portal port")
 	if err := flags.Parse(args); err != nil {
-		return errors.New("usage: termlinks [-n name] [-d] [--] <command> [args...]")
+		return errors.New("usage: termlinks [-p port] [-n name] [-d] [--] <command> [args...]")
 	}
 	command := flags.Args()
 	if len(command) == 0 {
@@ -509,7 +511,16 @@ func runCommand(args []string) error {
 		}
 		command = []string{shell}
 	}
-	paths, err := readyDaemon()
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		return err
+	}
+	if flagWasSet(flags, "port", "p") {
+		if err := configureDaemonPort(paths, *port); err != nil {
+			return err
+		}
+	}
+	paths, err = readyDaemon()
 	if err != nil {
 		return err
 	}
@@ -564,12 +575,28 @@ func runDaemon(args []string) error {
 	}
 	flags := flag.NewFlagSet("daemon", flag.ContinueOnError)
 	listen := flags.String("listen", settings.Listen, "web listen address")
+	port := flags.Int("port", 0, "web listen port")
+	flags.IntVar(port, "p", 0, "web listen port")
 	allowPublic := flags.Bool("allow-public-bind", false, "allow 0.0.0.0 or [::] binding")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	if flagWasSet(flags, "port", "p") {
+		*listen, err = listenWithPort(*listen, *port)
+		if err != nil {
+			return err
+		}
+	}
 	if err := validateListen(*listen, *allowPublic); err != nil {
 		return err
+	}
+	if *listen != settings.Listen {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		running := client.New(paths.Socket).Healthy(ctx)
+		cancel()
+		if running {
+			return fmt.Errorf("daemon is already running on %s; changing its listener would stop active sessions", settings.Listen)
+		}
 	}
 	settings.Listen = *listen
 	if err := config.SaveSettings(paths, settings); err != nil {
@@ -671,6 +698,56 @@ func readyDaemon() (config.Paths, error) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return config.Paths{}, fmt.Errorf("daemon did not start; inspect %s", paths.DaemonLog)
+}
+
+func configureDaemonPort(paths config.Paths, port int) error {
+	if err := config.Ensure(paths); err != nil {
+		return err
+	}
+	settings, err := config.LoadSettings(paths)
+	if err != nil {
+		return err
+	}
+	desired, err := listenWithPort(settings.Listen, port)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	running := client.New(paths.Socket).Healthy(ctx)
+	cancel()
+	if running && desired != settings.Listen {
+		return fmt.Errorf("daemon is already running on %s; changing to port %d would stop active sessions", settings.Listen, port)
+	}
+	if desired == settings.Listen {
+		return nil
+	}
+	settings.Listen = desired
+	return config.SaveSettings(paths, settings)
+}
+
+func listenWithPort(address string, port int) (string, error) {
+	if port < 1 || port > 65535 {
+		return "", errors.New("port must be between 1 and 65535")
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil {
+		return "", fmt.Errorf("configured listen address is invalid: %w", err)
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port)), nil
+}
+
+func flagWasSet(flags *flag.FlagSet, names ...string) bool {
+	wanted := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		wanted[name] = struct{}{}
+	}
+	found := false
+	flags.Visit(func(item *flag.Flag) {
+		if _, ok := wanted[item.Name]; ok {
+			found = true
+		}
+	})
+	return found
 }
 
 func listSessions() error {
@@ -870,7 +947,7 @@ func printHelp() {
 	fmt.Print(`Termlinks — keep local terminal work reachable from your phone
 
 Usage:
-  termlinks [-n name] [-d] [--] <command> [args...]
+  termlinks [-p port] [-n name] [-d] [--] <command> [args...]
   termlinks                         Start your default shell
   termlinks list                    List sessions
   termlinks attach <id>             Reattach locally
@@ -887,10 +964,12 @@ Usage:
   termlinks desktop permissions     Request window view/control permissions
   termlinks desktop windows         List shareable Mac windows locally
   termlinks desktop disable         Revoke remote desktop access
-  termlinks daemon [--listen addr]  Run the daemon in the foreground
+  termlinks daemon [-p port] [--listen addr]
+                                    Run the daemon in the foreground
 
 Examples:
   termlinks codex
+  termlinks -p 9000 codex
   termlinks -n api -- npm run dev
   termlinks -d -- python import.py
 `)

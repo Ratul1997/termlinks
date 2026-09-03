@@ -164,6 +164,6 @@ npm run test:e2e:web
 
 ## Other providers
 
-The local daemon is provider-independent. Any reverse tunnel or HTTPS proxy that preserves WebSocket upgrades can expose `http://127.0.0.1:8787` directly for terminal access. In that mode, use the provider's authentication/MFA layer as defense in depth and understand that TLS normally terminates at that provider.
+The local daemon is provider-independent. Any reverse tunnel or HTTPS proxy that preserves WebSocket upgrades can expose `http://127.0.0.1:57321` (or the listener selected with `termlinks -p PORT`) directly for terminal access. In that mode, use the provider's authentication/MFA layer as defense in depth and understand that TLS normally terminates at that provider.
 
 To retain Termlinks' application-layer E2E bridge and remote-desktop/window protocol on a different host, implement the small channel relay described in [architecture.md](architecture.md): one authenticated outbound connector, browser channels, opaque bounded ciphertext forwarding, and channel-close notifications. The existing Cloudflare Worker is the reference adapter.
