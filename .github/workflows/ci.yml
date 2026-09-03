@@ -40,7 +40,18 @@ jobs:
       - run: go vet ./apps/backend/...
       - run: npm run build
       - if: runner.os == 'Linux'
-        run: npm audit --audit-level=high
+        name: Audit production dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if npm audit --audit-level=high --fetch-timeout=60000; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            echo "npm audit service unavailable; retrying ($attempt/3)"
+            sleep 5
+          done
       - name: Smoke-test release installer
         if: runner.os == 'Linux'
         run: |
