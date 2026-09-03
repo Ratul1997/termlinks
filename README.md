@@ -63,7 +63,7 @@ To build instead of installing a release, clone the repository and follow [Contr
 
 The portal is an installable PWA. On Android/desktop, use the browser's **Install app** action (or the in-app button when available). On iPhone/iPad, open the Share menu and select **Add to Home Screen**. The installed app still asks for the portal token and still requires the computer and connector to be online for terminal access.
 
-The authenticated Home screen also includes an isolated **V2 Design** preview of a future mobile text-stream interface. It demonstrates wrapped/selectable output, local-style command suggestions, quick commands, and a three-line composer without connecting to or resizing a PTY. Preview submissions are simulated and clearly marked; use **Raw terminal** to return to the current live terminal.
+The authenticated Home screen also includes an isolated **V2 Design** interface for mobile text-mode access. It connects to the selected session's real encrypted PTY stream, renders its current scrollback and live output as wrapped/selectable text, and sends composer input and control keys to that terminal. It discovers runnable local agents and recent project directories for suggestions, supports encrypted image/PDF attachment uploads, and deliberately does not resize the PTY. Use **Raw terminal** whenever an interactive full-screen TUI needs exact cursor positioning or colors.
 
 ## Open source
 

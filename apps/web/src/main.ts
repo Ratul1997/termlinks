@@ -14,6 +14,7 @@ import {
   type SavedTerminal,
 } from "./terminal-history";
 import { TerminalStreamReconciler, terminalStreamControl } from "./terminal-reconnect";
+import { terminalBufferText, terminalVisibleText } from "./terminal-text";
 import "./style.css";
 
 type Session = {
@@ -169,6 +170,7 @@ const state: {
   terminal?: Terminal;
   terminalSessionID?: string;
   terminalSnapshotApplied: boolean;
+  terminalTextSync?: () => void;
   fit?: FitAddon;
   touchCleanup?: () => void;
   touchSync?: () => void;
@@ -1074,6 +1076,7 @@ async function resumeEncryptedPortal(): Promise<void> {
     if (state.view === "workflow" && state.selectedWorkflow) await renderWorkflowDetail(state.selectedWorkflow);
     else if (state.view === "workflows") await renderWorkflows();
     else if (state.view === "desktop") renderDesktop();
+    else if (state.view === "v2" && session && state.terminal && document.querySelector(".v2-page")) connectTerminal(session);
     else if (state.view === "v2") renderV2Design(selectedSession);
     else if (session && state.terminal && document.querySelector(".terminal-page")) connectTerminal(session);
     else if (session) renderTerminal(session.id, state.selectedWorkflow);
@@ -1378,10 +1381,7 @@ const V2_SUGGESTIONS: V2Suggestion[] = [
   { command: "npm run dev", detail: "Start the development server", badge: "NPM" },
   { command: "npm test", detail: "Run the project test suite", badge: "NPM" },
   { command: "ls -la", detail: "List files in this directory", badge: "SHELL" },
-  { command: "cd ~/Projects", detail: "Move to a recent directory", badge: "PATH" },
   { command: "termlinks list", detail: "List managed terminal sessions", badge: "CLI" },
-  { command: "codex", detail: "Open the local Codex agent", badge: "AGENT" },
-  { command: "claude", detail: "Open the local Claude agent", badge: "AGENT" },
 ];
 
 function appendV2FeedEntry(
@@ -1401,24 +1401,8 @@ function appendV2FeedEntry(
   return card;
 }
 
-function v2PreviewOutput(command: string): { label: string; content: string; kind: "output" | "agent" } {
-  const normalized = command.trim().toLowerCase();
-  if (normalized === "git status") {
-    return { label: "Completed", content: "On branch main\nYour branch is up to date with origin/main.\n\nnothing to commit, working tree clean", kind: "output" };
-  }
-  if (normalized.startsWith("git log")) {
-    return { label: "Completed", content: "ac59efa  feat: add verified release installer\n3a58451  fix: preserve terminal during reconnect\n4faf295  chore: disable Dependabot updates", kind: "output" };
-  }
-  if (normalized === "npm test") {
-    return { label: "Completed", content: "✓ TypeScript\n✓ Web reconnect logic\n✓ Go backend\n\nAll checks passed", kind: "output" };
-  }
-  if (normalized.startsWith("cd ")) {
-    return { label: "Directory changed", content: command.slice(3).trim() || "~", kind: "output" };
-  }
-  if (normalized === "codex" || normalized === "claude") {
-    return { label: normalized === "codex" ? "Codex" : "Claude", content: "Agent output would stream here as readable, selectable text while the real PTY keeps its desktop dimensions.", kind: "agent" };
-  }
-  return { label: "V2 preview", content: `“${command}” would be sent to the selected PTY. This design preview does not execute commands.`, kind: "output" };
+function shellQuoted(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 function renderV2Design(preferredSessionID?: string): void {
@@ -1446,10 +1430,12 @@ function renderV2Design(preferredSessionID?: string): void {
   header.append(back, identity, previewBadge);
 
   const context = el("section", "v2-context-bar");
+  context.id = "connection-state";
+  context.dataset.state = "connecting";
   const contextCopy = el("div", "v2-context-copy");
   contextCopy.append(
     el("span", "v2-online-dot"),
-    el("span", "v2-context-label", session ? "Text stream · computer online" : "Text stream preview"),
+    el("span", "v2-context-label connection-label", session ? "Connecting to the real terminal…" : "No running terminal"),
   );
   const raw = el("button", "v2-raw-button", session ? "Raw terminal" : "Create terminal");
   raw.type = "button";
@@ -1475,38 +1461,36 @@ function renderV2Design(preferredSessionID?: string): void {
   }
 
   const feed = el("section", "v2-feed");
-  feed.setAttribute("aria-label", "Wrapped terminal output preview");
-  feed.setAttribute("aria-live", "polite");
+  feed.setAttribute("aria-label", "Wrapped live terminal output");
   appendV2FeedEntry(
     feed,
     "notice",
-    "Design preview",
-    "A mobile-first text stream that never resizes the real PTY. Commands on this screen are simulated; your terminal is untouched.",
-    "LOCAL ONLY",
+    session ? "Live text mode" : "No active session",
+    session
+      ? "This is the real terminal stream rendered as wrapped, selectable text. Input runs in the selected PTY without resizing its desktop window."
+      : "Create a managed terminal, then return here to use the live text interface.",
+    session ? (encryptedPortal ? "E2E ENCRYPTED" : "LOCAL") : "OFFLINE",
   );
-  appendV2FeedEntry(feed, "command", "You", "git status", "~/Projects/termlinks");
-  appendV2FeedEntry(feed, "output", "Completed", "On branch main\nYour branch is up to date with origin/main.\n\nnothing to commit, working tree clean", "exit 0 · 0.2s");
-  appendV2FeedEntry(feed, "command", "You", "npm test", "~/Projects/termlinks");
-  appendV2FeedEntry(feed, "output", "Completed", "✓ TypeScript checks\n✓ Terminal reconnect logic\n✓ Go backend tests\n\nAll checks passed", "exit 0 · 5.9s");
-  appendV2FeedEntry(
-    feed,
-    "agent",
-    "Codex",
-    "The release installer and documentation are ready. Output wraps to the phone width, remains selectable, and does not change the desktop terminal layout.",
-    "READY",
-  );
+  const outputCard = appendV2FeedEntry(feed, "output", "Actual terminal", session ? "Connecting and loading current scrollback…" : "No terminal output", session ? `${session.cols}×${session.rows} PTY` : "WAITING");
+  outputCard.classList.add("v2-live-output");
+  const outputBody = outputCard.querySelector<HTMLElement>(".v2-entry-body")!;
+  const outputMeta = outputCard.querySelector<HTMLElement>(".v2-entry-meta")!;
 
   const composer = el("section", "v2-composer");
+  composer.dataset.connected = "false";
   const suggestions = el("div", "v2-suggestions");
   suggestions.hidden = true;
   suggestions.setAttribute("role", "listbox");
   suggestions.setAttribute("aria-label", "Local command suggestions");
   const snippets = el("div", "v2-snippets");
   snippets.append(el("span", "v2-snippet-label", "QUICK"));
+  const attachmentList = el("div", "terminal-attachment-list v2-attachment-list");
+  attachmentList.hidden = true;
   const form = el("form", "v2-composer-form");
   const attach = el("button", "v2-attach-button", "+");
   attach.type = "button";
-  attach.setAttribute("aria-label", "Preview an attachment");
+  attach.disabled = true;
+  attach.setAttribute("aria-label", "Attach an image, screenshot, or PDF");
   const input = el("textarea", "v2-composer-input");
   input.rows = 3;
   input.placeholder = "Type a command or ask an agent…";
@@ -1518,36 +1502,41 @@ function renderV2Design(preferredSessionID?: string): void {
   const send = el("button", "v2-send-button", "↑");
   send.type = "submit";
   send.disabled = true;
-  send.setAttribute("aria-label", "Preview command");
+  send.setAttribute("aria-label", "Send to terminal");
   form.append(attach, input, send);
   const footer = el("div", "v2-composer-footer");
-  footer.append(el("span", "v2-composer-hint", "Local suggestions · Shift+Enter for a new line"), el("span", "v2-composer-status", "PREVIEW"));
-  composer.append(suggestions, snippets, form, footer);
+  footer.append(el("span", "v2-composer-hint", "Enter sends · Shift+Enter adds a line"), el("span", "v2-composer-status", session ? "CONNECTING" : "NO SESSION"));
+  composer.append(suggestions, snippets, renderExtraKeys(input), attachmentList, form, footer);
 
-  const chooseSuggestion = (command: string): void => {
-    input.value = command;
-    send.disabled = false;
-    suggestions.hidden = true;
-    input.focus({ preventScroll: true });
-    input.setSelectionRange(command.length, command.length);
-  };
-  for (const command of ["git status", "npm test", "termlinks list"]) {
+  let availableSuggestions = [...V2_SUGGESTIONS];
+  const quickCommands = new Set<string>();
+  const addQuickCommand = (command: string): void => {
+    if (quickCommands.has(command)) return;
+    quickCommands.add(command);
     const chip = el("button", "v2-snippet-chip", command);
     chip.type = "button";
     chip.addEventListener("click", () => chooseSuggestion(command));
     snippets.append(chip);
-  }
+  };
+  const chooseSuggestion = (command: string): void => {
+    input.value = command;
+    send.disabled = composer.dataset.connected !== "true";
+    suggestions.hidden = true;
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(command.length, command.length);
+  };
+  for (const command of ["git status", "npm test", "termlinks list"]) addQuickCommand(command);
   const renderSuggestions = (): void => {
     const query = input.value.trim().toLowerCase();
-    send.disabled = query.length === 0;
+    send.disabled = composer.dataset.connected !== "true" || query.length === 0;
     suggestions.replaceChildren();
-    if (!query || input.value.includes("\n")) {
+    if (input.value.includes("\n")) {
       suggestions.hidden = true;
       return;
     }
-    const matches = V2_SUGGESTIONS
-      .filter((item) => item.command.toLowerCase().includes(query) || item.detail.toLowerCase().includes(query))
-      .slice(0, 4);
+    const matches = (query
+      ? availableSuggestions.filter((item) => item.command.toLowerCase().includes(query) || item.detail.toLowerCase().includes(query))
+      : availableSuggestions).slice(0, 4);
     suggestions.hidden = matches.length === 0;
     for (const item of matches) {
       const option = el("button", "v2-suggestion");
@@ -1561,37 +1550,157 @@ function renderV2Design(preferredSessionID?: string): void {
     }
   };
   input.addEventListener("input", renderSuggestions);
+  input.addEventListener("focus", renderSuggestions);
   input.addEventListener("keydown", (event) => {
     if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
     event.preventDefault();
     form.requestSubmit();
   });
+  attach.addEventListener("pointerdown", (event) => event.preventDefault());
   attach.addEventListener("click", () => {
-    const attached = attach.dataset.attached === "true";
-    attach.dataset.attached = String(!attached);
-    attach.textContent = attached ? "+" : "✓";
-    attach.classList.toggle("attached", !attached);
-    footer.querySelector<HTMLElement>(".v2-composer-hint")!.textContent = attached
-      ? "Local suggestions · Shift+Enter for a new line"
-      : "screenshot.png ready · preview only";
-    input.focus({ preventScroll: true });
+    if (!session || composer.dataset.connected !== "true") return;
+    const picker = document.createElement("input");
+    picker.type = "file";
+    picker.accept = "image/*,application/pdf";
+    picker.multiple = true;
+    picker.hidden = true;
+    picker.addEventListener("change", async () => {
+      const files = Array.from(picker.files || []);
+      picker.remove();
+      if (files.length === 0) return;
+      attach.dataset.uploading = "true";
+      attach.disabled = true;
+      try {
+        for (const file of files) {
+          footer.querySelector<HTMLElement>(".v2-composer-status")!.textContent = `UPLOADING ${file.name}`;
+          const bridge = await readyUploadBridge();
+          const path = await bridge.uploadFile(file, (received, total) => {
+            const percent = total === 0 ? 100 : Math.round((received / total) * 100);
+            footer.querySelector<HTMLElement>(".v2-composer-status")!.textContent = `UPLOAD ${percent}%`;
+          });
+          const chip = el("div", "terminal-attachment-chip");
+          chip.title = path;
+          chip.append(
+            el("span", "terminal-attachment-icon", file.type.startsWith("image/") ? "▧" : "▤"),
+            el("span", "terminal-attachment-name", file.name),
+            el("span", "terminal-attachment-ready", "✓"),
+          );
+          attachmentList.append(chip);
+          attachmentList.hidden = false;
+          const quoted = shellQuoted(path);
+          const start = input.selectionStart ?? input.value.length;
+          const end = input.selectionEnd ?? start;
+          const prefix = start > 0 && !/\s$/.test(input.value.slice(0, start)) ? " " : "";
+          const suffix = end < input.value.length && !/^\s/.test(input.value.slice(end)) ? " " : "";
+          input.setRangeText(`${prefix}${quoted}${suffix}`, start, end, "end");
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        footer.querySelector<HTMLElement>(".v2-composer-status")!.textContent = "ATTACHED";
+        input.focus({ preventScroll: true });
+      } catch (caught) {
+        footer.querySelector<HTMLElement>(".v2-composer-status")!.textContent = caught instanceof Error ? caught.message : "UPLOAD FAILED";
+      } finally {
+        delete attach.dataset.uploading;
+        attach.disabled = composer.dataset.connected !== "true" || !encryptedBridge;
+      }
+    }, { once: true });
+    picker.addEventListener("cancel", () => picker.remove(), { once: true });
+    document.body.append(picker);
+    picker.click();
   });
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    const command = input.value.trim();
-    if (!command) return;
-    appendV2FeedEntry(feed, "command", "You", command, session ? compactPath(session.cwd) : "preview");
-    const result = v2PreviewOutput(command);
-    appendV2FeedEntry(feed, result.kind, result.label, result.content, "not executed");
+    if (!session || !input.value || composer.dataset.connected !== "true") return;
+    const command = input.value;
+    const normalized = command.replace(/\r?\n/g, "\r");
+    const pasted = state.terminal?.modes.bracketedPasteMode
+      ? `\u001b[200~${normalized}\u001b[201~`
+      : normalized;
+    if (!sendTerminalInput(`${pasted}\r`)) {
+      footer.querySelector<HTMLElement>(".v2-composer-status")!.textContent = "RECONNECTING";
+      scheduleTerminalReconnect(session);
+      return;
+    }
+    const sentCard = appendV2FeedEntry(feed, "command", "Sent to terminal", command, compactPath(session.cwd));
+    feed.insertBefore(sentCard, outputCard);
     input.value = "";
     send.disabled = true;
     suggestions.hidden = true;
+    attachmentList.replaceChildren();
+    attachmentList.hidden = true;
+    footer.querySelector<HTMLElement>(".v2-composer-status")!.textContent = "SENT";
     input.blur();
     window.requestAnimationFrame(() => feed.scrollTo({ top: feed.scrollHeight, behavior: "smooth" }));
   });
 
   page.append(header, context, tabs, feed, composer);
   app.append(page);
+
+  if (!session) return;
+
+  const terminal = new Terminal({
+    cols: Math.max(2, session.cols),
+    rows: Math.max(1, session.rows),
+    scrollback: 10_000,
+    convertEol: false,
+  });
+  state.terminal = terminal;
+  state.terminalSessionID = session.id;
+  state.terminalSnapshotApplied = false;
+  let latestText = "\u0000";
+  const syncActualOutput = (): void => {
+    if (state.view !== "v2" || state.selected !== session.id || state.terminal !== terminal || !outputBody.isConnected) return;
+    const wasNearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 96;
+    const text = terminalBufferText(terminal).replace(/[ \t]+$/gm, "").replace(/\n+$/, "");
+    if (text !== latestText) {
+      latestText = text;
+      outputBody.textContent = text || "Terminal is running and waiting for input.";
+      outputMeta.textContent = `${session.cols}×${session.rows} PTY · LIVE`;
+      if (wasNearBottom) window.requestAnimationFrame(() => feed.scrollTo({ top: feed.scrollHeight }));
+    }
+  };
+  terminal.onWriteParsed(syncActualOutput);
+  state.terminalTextSync = syncActualOutput;
+  syncActualOutput();
+  connectTerminal(session);
+
+  state.polling = window.setInterval(() => {
+    void api<{ sessions: Session[] }>("/api/sessions").then(({ sessions }) => {
+      if (state.view !== "v2" || state.selected !== session.id || state.terminal !== terminal) return;
+      const current = sessions.find((item) => item.id === session.id);
+      if (!current) return;
+      state.sessions = sessions.filter((item) => item.running && !state.closedSessions.has(item.id));
+      if (current.cols !== terminal.cols || current.rows !== terminal.rows) {
+        terminal.resize(Math.max(2, current.cols), Math.max(1, current.rows));
+        session.cols = current.cols;
+        session.rows = current.rows;
+        syncActualOutput();
+      }
+    }).catch(() => undefined);
+  }, 2500);
+
+  void Promise.allSettled([
+    api<{ agents: LocalAgent[] }>("/api/agents"),
+    api<{ projects: WorkspaceSuggestion[] }>("/api/projects/suggestions"),
+  ]).then(([agentsResult, projectsResult]) => {
+    if (state.view !== "v2" || state.selected !== session.id) return;
+    const discovered: V2Suggestion[] = [];
+    if (agentsResult.status === "fulfilled") {
+      for (const agent of agentsResult.value.agents.filter((item) => item.available && item.runnable)) {
+        discovered.push({ command: agent.command, detail: `${agent.name} · ${agent.authStatus}`, badge: "AGENT" });
+      }
+    }
+    if (projectsResult.status === "fulfilled") {
+      for (const project of projectsResult.value.projects.slice(0, 12)) {
+        discovered.push({ command: `cd ${shellQuoted(project.path)}`, detail: project.name, badge: "PATH" });
+      }
+    }
+    availableSuggestions = [...discovered, ...V2_SUGGESTIONS];
+    for (const suggestion of discovered.filter((item) => item.badge === "AGENT").slice(0, 2)) addQuickCommand(suggestion.command);
+    const recentProject = discovered.find((item) => item.badge === "PATH");
+    if (recentProject) addQuickCommand(recentProject.command);
+    if (document.activeElement === input) renderSuggestions();
+  });
 }
 
 async function renderWorkflows(message = ""): Promise<void> {
@@ -3712,23 +3821,6 @@ async function copyVisibleTerminalOutput(): Promise<void> {
   }, 1800);
 }
 
-function terminalBufferText(terminal: Terminal, first = 0, last = terminal.buffer.active.length): string {
-  const buffer = terminal.buffer.active;
-  let value = "";
-  for (let index = Math.max(0, first); index < Math.min(last, buffer.length); index += 1) {
-    const line = buffer.getLine(index);
-    if (!line) continue;
-    if (value && !line.isWrapped) value += "\n";
-    value += line.translateToString(true);
-  }
-  return value;
-}
-
-function terminalVisibleText(terminal: Terminal): string {
-  const buffer = terminal.buffer.active;
-  return terminalBufferText(terminal, buffer.viewportY, buffer.viewportY + terminal.rows);
-}
-
 async function copyToDeviceClipboard(text: string, fallback?: HTMLTextAreaElement): Promise<boolean> {
   if (!text) return false;
   try {
@@ -3792,6 +3884,7 @@ function connectTerminal(session: Session, automatic = false): void {
       if (wasAtBottom) terminal.scrollToBottom();
       else terminal.scrollToLine(Math.max(0, terminal.buffer.active.baseY - distanceFromBottom));
       state.touchSync?.();
+      state.terminalTextSync?.();
       markReady();
     };
     if (snapshot.byteLength === 0) applied();
@@ -3892,14 +3985,14 @@ function connectTerminal(session: Session, automatic = false): void {
 }
 
 function scheduleTerminalReconnect(session: Session): void {
-  if (!session.running || state.selected !== session.id || !document.querySelector(".terminal-page")) return;
+  if (!session.running || state.selected !== session.id || !document.querySelector(".terminal-page, .v2-page")) return;
   if (state.terminalReconnectTimer !== undefined) return;
   const delay = Math.min(500 * (2 ** Math.min(state.terminalReconnectAttempts, 3)), 4_000);
   state.terminalReconnectAttempts += 1;
   setConnectionState("Disconnected · reconnecting…", "connecting");
   state.terminalReconnectTimer = window.setTimeout(() => {
     state.terminalReconnectTimer = undefined;
-    if (!session.running || state.selected !== session.id || !document.querySelector(".terminal-page")) return;
+    if (!session.running || state.selected !== session.id || !document.querySelector(".terminal-page, .v2-page")) return;
     if (state.socket?.readyState === WebSocket.OPEN) return;
     if (encryptedPortal && (!state.authenticated || !encryptedBridge)) {
       void resumeEncryptedPortal();
@@ -3939,7 +4032,8 @@ function fitTerminal(): void {
 function setConnectionState(label: string, kind: "connecting" | "online" | "offline" | "warning"): void {
   const bar = document.querySelector<HTMLElement>("#connection-state");
   if (!bar) return;
-  bar.className = `connection-bar ${kind}`;
+  if (bar.classList.contains("v2-context-bar")) bar.dataset.state = kind;
+  else bar.className = `connection-bar ${kind}`;
   const text = bar.querySelector<HTMLElement>(".connection-label");
   if (text) text.textContent = label;
 
@@ -3950,19 +4044,21 @@ function setConnectionState(label: string, kind: "connecting" | "online" | "offl
     if (syncLabel) syncLabel.textContent = label.includes("waking") ? "Computer waking…" : label.includes("loading") ? "Loading terminal…" : "Reconnecting…";
   }
 
-  const composer = document.querySelector<HTMLElement>(".terminal-composer");
+  const composer = document.querySelector<HTMLElement>(".terminal-composer, .v2-composer");
   if (!composer) return;
   const connected = kind === "online";
   composer.dataset.connected = String(connected);
-  const input = composer.querySelector<HTMLTextAreaElement>(".terminal-composer-input");
-  const send = composer.querySelector<HTMLButtonElement>(".terminal-composer-send");
-  const attach = composer.querySelector<HTMLButtonElement>(".terminal-attach-button");
-  const composerState = composer.querySelector<HTMLElement>(".terminal-composer-state");
+  const input = composer.querySelector<HTMLTextAreaElement>(".terminal-composer-input, .v2-composer-input");
+  const send = composer.querySelector<HTMLButtonElement>(".terminal-composer-send, .v2-send-button");
+  const attach = composer.querySelector<HTMLButtonElement>(".terminal-attach-button, .v2-attach-button");
+  const composerState = composer.querySelector<HTMLElement>(".terminal-composer-state, .v2-composer-status");
   if (send) send.disabled = !connected || !input?.value.length;
   if (attach) attach.disabled = !connected || !encryptedBridge || attach.dataset.uploading === "true";
   for (const button of composer.querySelectorAll<HTMLButtonElement>(".terminal-control-key")) button.disabled = !connected;
   if (composerState) {
-    composerState.textContent = connected ? "Ready" : kind === "connecting" ? "Connecting…" : "Input unavailable";
+    const upperCase = composer.classList.contains("v2-composer");
+    const value = connected ? "Ready" : kind === "connecting" ? "Connecting…" : "Input unavailable";
+    composerState.textContent = upperCase ? value.toUpperCase() : value;
   }
 }
 
@@ -3992,6 +4088,7 @@ function closeConnection(): void {
   state.layoutCleanup = undefined;
   state.terminal?.dispose();
   state.terminal = undefined;
+  state.terminalTextSync = undefined;
   state.terminalSessionID = undefined;
   state.terminalSnapshotApplied = false;
   state.fit = undefined;
