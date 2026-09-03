@@ -21,12 +21,23 @@ import (
 
 func TestAllowedRoutes(t *testing.T) {
 	sessionID := "0123456789abcdef0123456789abcdef"
+	workflowID := "0123456789abcdef01234567"
+	stageID := "89abcdef0123456789abcdef"
 	allowedHTTP := []struct{ method, path string }{
 		{"POST", "/api/logout"},
 		{"GET", "/api/me"},
 		{"GET", "/api/sessions"},
 		{"POST", "/api/sessions"},
 		{"POST", "/api/sessions/" + sessionID + "/stop"},
+		{"GET", "/api/agents"},
+		{"POST", "/api/agents/refresh"},
+		{"GET", "/api/projects/suggestions"},
+		{"POST", "/api/workflows/compile"},
+		{"GET", "/api/workflows"},
+		{"POST", "/api/workflows"},
+		{"GET", "/api/workflows/" + workflowID},
+		{"POST", "/api/workflows/" + workflowID + "/cancel"},
+		{"POST", "/api/workflows/" + workflowID + "/stages/" + stageID + "/input"},
 	}
 	for _, test := range allowedHTTP {
 		if !allowedHTTPRoute(test.method, test.path) {
@@ -38,6 +49,9 @@ func TestAllowedRoutes(t *testing.T) {
 		{"GET", "/"},
 		{"GET", "/api/sessions/../../etc/passwd"},
 		{"POST", "/api/sessions/not-an-id/stop"},
+		{"GET", "/api/workflows/../../etc/passwd"},
+		{"POST", "/api/workflows/" + workflowID + "/stages/not-an-id/input"},
+		{"DELETE", "/api/workflows/" + workflowID},
 	} {
 		if allowedHTTPRoute(test.method, test.path) {
 			t.Errorf("expected %s %s to be rejected", test.method, test.path)

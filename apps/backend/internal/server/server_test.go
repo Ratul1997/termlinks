@@ -9,6 +9,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"termlinks/backend/internal/auth"
+	"termlinks/backend/internal/coordinator"
 	"termlinks/backend/internal/session"
 )
 
@@ -220,5 +222,63 @@ func TestControlAPIStartsOnlyExplicitCommand(t *testing.T) {
 	}
 	if len(manager.List()) != 1 {
 		t.Fatal("control API did not create the requested session")
+	}
+}
+
+func TestAIWorkflowRoutesRequireAuthenticationAndSameOrigin(t *testing.T) {
+	manager := session.NewManager()
+	root := t.TempDir()
+	store, err := coordinator.OpenStore(filepath.Join(root, "workflows.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflowManager := coordinator.NewManager(store, manager, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	defer workflowManager.Close()
+	handler, err := New(manager, auth.New("private-token"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.SetCoordinator(workflowManager)
+	web := httptest.NewServer(handler.WebHandler())
+	defer web.Close()
+
+	response, err := http.Get(web.URL + "/api/workflows")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated workflow status = %d", response.StatusCode)
+	}
+
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	request, _ := http.NewRequest(http.MethodPost, web.URL+"/api/login", bytes.NewBufferString(`{"token":"private-token"}`))
+	request.Header.Set("Origin", web.URL)
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+
+	request, _ = http.NewRequest(http.MethodPost, web.URL+"/api/workflows", bytes.NewBufferString(`{"request":"test","cwd":"`+root+`"}`))
+	request.Header.Set("Origin", "https://attacker.example")
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-origin workflow status = %d", response.StatusCode)
+	}
+
+	request, _ = http.NewRequest(http.MethodGet, web.URL+"/api/workflows/../../etc/passwd", nil)
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if strings.Contains(response.Header.Get("Content-Type"), "application/json") {
+		t.Fatal("path traversal unexpectedly reached the workflow API")
 	}
 }

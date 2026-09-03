@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -17,6 +19,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"termlinks/backend/internal/auth"
+	"termlinks/backend/internal/coordinator"
 	"termlinks/backend/internal/remote"
 	"termlinks/backend/internal/session"
 	"termlinks/backend/internal/webui"
@@ -30,7 +33,10 @@ type Server struct {
 	logger              *slog.Logger
 	web                 http.Handler
 	openVisibleTerminal func(string) error
+	coordinator         *coordinator.Manager
 }
+
+func (s *Server) SetCoordinator(manager *coordinator.Manager) { s.coordinator = manager }
 
 type terminalControl struct {
 	Type string `json:"type"`
@@ -82,11 +88,223 @@ func (s *Server) WebHandler() http.Handler {
 	mux.HandleFunc("GET /api/sessions", s.requireWebAuth(s.listSessions))
 	mux.HandleFunc("POST /api/sessions", s.requireWebAuth(s.createWebSession))
 	mux.HandleFunc("POST /api/sessions/{id}/stop", s.requireWebAuth(s.stopSession))
+	mux.HandleFunc("GET /api/agents", s.requireWebAuth(s.listAgents))
+	mux.HandleFunc("POST /api/agents/refresh", s.requireWebAuth(s.refreshAgents))
+	mux.HandleFunc("GET /api/projects/suggestions", s.requireWebAuth(s.workspaceSuggestions))
+	mux.HandleFunc("POST /api/workflows/compile", s.requireWebAuth(s.compileWorkflow))
+	mux.HandleFunc("GET /api/workflows", s.requireWebAuth(s.listWorkflows))
+	mux.HandleFunc("POST /api/workflows", s.requireWebAuth(s.createWorkflow))
+	mux.HandleFunc("GET /api/workflows/{id}", s.requireWebAuth(s.getWorkflow))
+	mux.HandleFunc("POST /api/workflows/{id}/cancel", s.requireWebAuth(s.cancelWorkflow))
+	mux.HandleFunc("POST /api/workflows/{id}/stages/{stageID}/input", s.requireWebAuth(s.sendWorkflowInput))
 	mux.HandleFunc("GET /ws/sessions/{id}", s.requireWebAuth(func(w http.ResponseWriter, r *http.Request) {
 		s.terminal(w, r, true)
 	}))
 	mux.Handle("/", s.web)
 	return s.securityHeaders(mux)
+}
+
+func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
+	if !s.requireCoordinator(w) {
+		return
+	}
+	agents, err := s.coordinator.Agents(r.Context())
+	if err != nil {
+		s.coordinatorError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
+}
+
+func (s *Server) refreshAgents(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "cross-origin request rejected")
+		return
+	}
+	if !s.requireCoordinator(w) {
+		return
+	}
+	agents, err := s.coordinator.RefreshAgents(r.Context())
+	if err != nil {
+		s.coordinatorError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
+}
+
+func (s *Server) workspaceSuggestions(w http.ResponseWriter, r *http.Request) {
+	if !s.requireCoordinator(w) {
+		return
+	}
+	items, err := s.coordinator.WorkspaceSuggestions(r.Context())
+	if err != nil {
+		s.coordinatorError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"projects": items})
+}
+
+func (s *Server) compileWorkflow(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "cross-origin request rejected")
+		return
+	}
+	if !s.requireCoordinator(w) {
+		return
+	}
+	var input coordinator.CreateInput
+	if !decodeCoordinatorJSON(w, r, &input) {
+		return
+	}
+	draft, err := s.coordinator.Compile(r.Context(), input)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, draft)
+}
+
+func (s *Server) createWorkflow(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "cross-origin request rejected")
+		return
+	}
+	if !s.requireCoordinator(w) {
+		return
+	}
+	var input coordinator.CreateInput
+	if !decodeCoordinatorJSON(w, r, &input) {
+		return
+	}
+	workflow, err := s.coordinator.Create(r.Context(), input)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, workflow)
+}
+
+func (s *Server) listWorkflows(w http.ResponseWriter, r *http.Request) {
+	if !s.requireCoordinator(w) {
+		return
+	}
+	workflows, err := s.coordinator.List(r.Context())
+	if err != nil {
+		s.coordinatorError(w, err)
+		return
+	}
+	for workflowIndex := range workflows {
+		for stageIndex := range workflows[workflowIndex].Stages {
+			workflows[workflowIndex].Stages[stageIndex].Output = ""
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"workflows": workflows})
+}
+
+func (s *Server) getWorkflow(w http.ResponseWriter, r *http.Request) {
+	if !s.requireCoordinator(w) {
+		return
+	}
+	if !validCoordinatorID(r.PathValue("id")) {
+		writeError(w, http.StatusBadRequest, "invalid workflow ID")
+		return
+	}
+	workflow, err := s.coordinator.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.coordinatorError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, workflow)
+}
+
+func (s *Server) cancelWorkflow(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "cross-origin request rejected")
+		return
+	}
+	if !s.requireCoordinator(w) {
+		return
+	}
+	if !validCoordinatorID(r.PathValue("id")) {
+		writeError(w, http.StatusBadRequest, "invalid workflow ID")
+		return
+	}
+	if err := s.coordinator.Cancel(r.Context(), r.PathValue("id")); err != nil {
+		s.coordinatorError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "cancelling"})
+}
+
+func (s *Server) sendWorkflowInput(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "cross-origin request rejected")
+		return
+	}
+	if !s.requireCoordinator(w) {
+		return
+	}
+	workflowID, stageID := r.PathValue("id"), r.PathValue("stageID")
+	if !validCoordinatorID(workflowID) || !validCoordinatorID(stageID) {
+		writeError(w, http.StatusBadRequest, "invalid workflow or stage ID")
+		return
+	}
+	var input struct {
+		Input string `json:"input"`
+	}
+	if !decodeCoordinatorJSON(w, r, &input) {
+		return
+	}
+	if err := s.coordinator.SendInput(r.Context(), workflowID, stageID, input.Input); err != nil {
+		s.coordinatorError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "sent"})
+}
+
+func (s *Server) requireCoordinator(w http.ResponseWriter) bool {
+	if s.coordinator == nil {
+		writeError(w, http.StatusServiceUnavailable, "AI workflows are not enabled")
+		return false
+	}
+	return true
+}
+
+func (s *Server) coordinatorError(w http.ResponseWriter, err error) {
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "workflow not found")
+		return
+	}
+	s.logger.Error("AI workflow request failed", "error", err)
+	writeError(w, http.StatusInternalServerError, "AI workflow request failed")
+}
+
+func decodeCoordinatorJSON(w http.ResponseWriter, r *http.Request, target any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	defer r.Body.Close()
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid workflow request")
+		return false
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid workflow request")
+		return false
+	}
+	return true
+}
+
+func validCoordinatorID(id string) bool {
+	if len(id) != 24 {
+		return false
+	}
+	for _, character := range id {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) createWebSession(w http.ResponseWriter, r *http.Request) {

@@ -20,14 +20,17 @@ const (
 )
 
 type Paths struct {
-	Dir       string
-	Socket    string
-	Token     string
-	Settings  string
-	DaemonLog string
-	Cloud     string
-	CloudPID  string
-	CloudLog  string
+	Dir               string
+	Socket            string
+	Token             string
+	Settings          string
+	DaemonLog         string
+	Cloud             string
+	CloudPID          string
+	CloudLog          string
+	WorkflowsDB       string
+	WorkflowArtifacts string
+	WorkflowWorktrees string
 }
 
 type Settings struct {
@@ -56,14 +59,17 @@ func ResolvePaths() (Paths, error) {
 	}
 	dir = filepath.Clean(dir)
 	return Paths{
-		Dir:       dir,
-		Socket:    filepath.Join(dir, "control.sock"),
-		Token:     filepath.Join(dir, "auth.token"),
-		Settings:  filepath.Join(dir, "settings.json"),
-		DaemonLog: filepath.Join(dir, "daemon.log"),
-		Cloud:     filepath.Join(dir, "cloud.json"),
-		CloudPID:  filepath.Join(dir, "cloud.pid"),
-		CloudLog:  filepath.Join(dir, "cloud.log"),
+		Dir:               dir,
+		Socket:            filepath.Join(dir, "control.sock"),
+		Token:             filepath.Join(dir, "auth.token"),
+		Settings:          filepath.Join(dir, "settings.json"),
+		DaemonLog:         filepath.Join(dir, "daemon.log"),
+		Cloud:             filepath.Join(dir, "cloud.json"),
+		CloudPID:          filepath.Join(dir, "cloud.pid"),
+		CloudLog:          filepath.Join(dir, "cloud.log"),
+		WorkflowsDB:       filepath.Join(dir, "workflows.db"),
+		WorkflowArtifacts: filepath.Join(dir, "workflow-artifacts"),
+		WorkflowWorktrees: filepath.Join(dir, "workflow-worktrees"),
 	}, nil
 }
 
@@ -173,6 +179,17 @@ func Ensure(paths Paths) error {
 	}
 	if err := os.Chmod(paths.Dir, 0o700); err != nil {
 		return fmt.Errorf("secure state directory: %w", err)
+	}
+	for _, directory := range []string{paths.WorkflowArtifacts, paths.WorkflowWorktrees} {
+		if directory == "" {
+			continue
+		}
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			return fmt.Errorf("create private workflow directory: %w", err)
+		}
+		if err := os.Chmod(directory, 0o700); err != nil {
+			return fmt.Errorf("secure private workflow directory: %w", err)
+		}
 	}
 	return nil
 }

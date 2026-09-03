@@ -8,7 +8,7 @@ This first version is designed for one trusted owner and supports macOS and Linu
 
 ## Quick start
 
-Requirements: Go 1.24+ (the module selects the tested Go 1.26.8 toolchain), Node.js 20+, and npm.
+Requirements: Go 1.25+ (the module selects the tested Go 1.26.8 toolchain), Node.js 20+, and npm.
 
 ```sh
 git clone https://github.com/Ratul1997/termlinks.git
@@ -168,7 +168,7 @@ Termlinks intentionally has a small configuration surface. There is no hidden ap
 | Process environment | Current environment; adds `TERM=xterm-256color` only when `TERM` is absent | Passed to locally started managed commands. Keep in mind that a child process can print environment secrets. |
 | `SHELL` | `/bin/zsh` for a command-less local launch; `/bin/sh` for a portal-created shell when `SHELL` is absent or not absolute | Selects the interactive shell. |
 | `TERMLINKS_STATE_DIR` | Operating-system user config directory plus `termlinks` | Overrides all local state paths. It must be an absolute path. Useful for isolated development/testing installations. |
-| `termlinks daemon [-p PORT] [--listen ADDR]` | `127.0.0.1:57321` | Sets and persists the browser portal listener in `settings.json`. `-p`/`--port` replaces only the port and preserves the configured host. Loopback, RFC1918 private addresses, and Tailscale's `100.64.0.0/10` range are accepted by default. |
+| `termlinks daemon [-p PORT] [--listen ADDR] [--headless]` | `127.0.0.1:57321` | Sets and persists the browser portal listener in `settings.json`. `-p`/`--port` replaces only the port and preserves the configured host. Loopback, RFC1918 private addresses, and Tailscale's `100.64.0.0/10` range are accepted by default. `--headless` keeps portal-created shells and AI stages inside the browser/API without opening native terminal windows; omit it for normal desktop use. |
 | `termlinks daemon --allow-public-bind` | Off | Allows an unspecified/public bind such as `0.0.0.0`. This is dangerous and does not add TLS; prefer an SSH/VPN/tunnel setup. |
 | Portal **New terminal → Name** | Empty/generated display name | Optional label, at most 80 characters. |
 | Portal **New terminal → Starting directory** | Home directory | Accepts `~`, `~/path`, or an absolute accessible directory, at most 4096 characters. Browser creation always opens the configured shell; commands are typed afterward. |
@@ -189,6 +189,9 @@ The state directory is created with mode `0700`; sensitive files are forced to `
 | `cloud.json` | Relay URL, connector token, desktop-enabled flag, and loopback VNC address. It contains a secret. |
 | `cloud.pid` | PID of the detached connector. |
 | `cloud.log` | Detached connector diagnostics. It should not contain tokens, but still treat logs as private. |
+| `workflows.db`, `workflows.db-wal`, `workflows.db-shm` | Local SQLite workflow, stage, project, event, and bounded agent-output state. Each file is forced to `0600`. |
+| `workflow-artifacts/` | Private `0700` directory reserved for workflow-generated artifacts. |
+| `workflow-worktrees/` | Private `0700` directory reserved for isolated Git worktrees in a later workflow phase. The current release serializes work in the same repository instead. |
 
 On macOS the default directory is normally `~/Library/Application Support/termlinks`. On Linux it follows the user config directory, normally `$XDG_CONFIG_HOME/termlinks` or `~/.config/termlinks`. Do not commit this directory.
 
@@ -197,6 +200,34 @@ The portal token is not a configurable password string: Termlinks generates it, 
 The login form exposes standard username/current-password metadata so Safari, Chrome, an installed PWA, and the operating system password manager can offer to save and autofill the portal token. Save it under the generated `termlinks` username. Face ID or device-lock confirmation is controlled by iOS and the selected password manager; Termlinks never receives biometric data and cannot force the prompt.
 
 In the hosted E2E portal, **Keep me signed in on this device** is enabled by default. After successful authentication, Termlinks stores the derived, non-exportable AES-GCM `CryptoKey` in origin-scoped IndexedDB—not the raw token. If iOS suspends or terminates the PWA, it uses that key to reconnect automatically and restores the previously open terminal when possible. **Log out** deletes the stored key. Clearing website data also deletes it. Uncheck the option on a shared or untrusted device.
+
+### Local AI workflows (experimental)
+
+The portal's **AI work** screen coordinates AI command-line tools already installed on the computer. Discovery recognizes Codex, Claude Code, OpenCode, Gemini CLI, and Aider; the initial executable adapters are enabled for Codex and Claude Code. Other installed harnesses are shown as **adapter pending** instead of being invoked through an unverified command shape. Discovery runs only bounded version/login-status checks: it does not read, copy, or store provider API keys and does not make a paid inference request. Each tool continues to use its own local login, model, plugins, and billing configuration. For unattended execution, Termlinks explicitly gives Codex its `workspace-write` sandbox rooted at the selected project and selects Claude's guarded `auto` permission mode; it never enables either provider's dangerous sandbox/permission bypass flag.
+
+Choose an existing absolute project directory and mention agents in the order they should run:
+
+```text
+@codex inspect the project and write an implementation plan
+@claude implement the preceding plan and run focused tests
+@codex review the implementation and report remaining issues
+```
+
+Termlinks first compiles those mentions into an explicit sequential preview and requires confirmation before it starts anything. Each confirmed stage is a real managed PTY, appears in the normal terminal list, opens in a native terminal window when the platform supports it, and can be opened live from the workflow detail screen. The next stage receives a bounded copy of earlier stage output. A stage succeeds only when its local process exits with code zero; explicit unavailable `@agent` targets fail instead of silently switching providers.
+
+Current safeguards and limits:
+
+- at most eight stages per workflow, two active workflows globally, and one active workflow per canonical Git repository;
+- directories must already exist and are canonicalized before execution; Termlinks does not scan the whole disk or shell history for projects;
+- prompts are sent over the PTY rather than process arguments, so task text is not exposed through ordinary process listings;
+- requests are capped at 48 KiB and stored stage output at 96 KiB; list responses omit output;
+- workflow mutation routes require portal authentication and same-origin validation, and the encrypted connector exposes only an explicit route allowlist;
+- daemon restart marks an active workflow `interrupted` rather than pretending its old PTY survived; and
+- cancellation terminates the active agent and prevents queued stages from starting.
+
+This first implementation is a deterministic sequential coordinator. It does not yet create Git worktrees, auto-merge or push, retry a failed stage, run parallel reviewer groups, infer correction loops, or resume a provider session after a daemon restart. Those behaviors remain gated in [the implementation plan](docs/ai-workflows-plan.md), and no automatic merge/push is planned without explicit authority.
+
+Workflow prompts, selected project paths, status, and bounded outputs are private local data but are not independently encrypted inside SQLite. Use FileVault, BitLocker, or LUKS for encryption at rest. When the Cloudflare portal is used, workflow API payloads travel inside the existing AES-256-GCM application-layer encrypted bridge.
 
 ### Direct portal authentication and network behavior
 

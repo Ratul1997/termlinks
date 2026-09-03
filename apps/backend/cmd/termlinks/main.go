@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,6 +26,7 @@ import (
 	"termlinks/backend/internal/client"
 	"termlinks/backend/internal/cloud"
 	"termlinks/backend/internal/config"
+	"termlinks/backend/internal/coordinator"
 	"termlinks/backend/internal/selfupdate"
 	"termlinks/backend/internal/server"
 	"termlinks/backend/internal/session"
@@ -31,7 +34,7 @@ import (
 	"termlinks/backend/internal/windowcapture"
 )
 
-const version = "0.7.2"
+const version = "0.8.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -47,6 +50,8 @@ func main() {
 func run(args []string) error {
 	if len(args) > 0 {
 		switch args[0] {
+		case "__agent-stdio":
+			return runAgentStdio(args[1:])
 		case "daemon", "serve":
 			return runDaemon(args[1:])
 		case "list", "ls":
@@ -80,6 +85,35 @@ func run(args []string) error {
 		}
 	}
 	return runCommand(args)
+}
+
+func runAgentStdio(args []string) error {
+	if len(args) != 2 || args[0] != "claude" || strings.TrimSpace(args[1]) == "" {
+		return errors.New("invalid internal agent runner invocation")
+	}
+	const maximumPromptBytes = 128 << 10
+	reader := bufio.NewReader(os.Stdin)
+	header, err := reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("read agent prompt header: %w", err)
+	}
+	fields := strings.Fields(header)
+	if len(fields) != 2 || fields[0] != "TERMLINKS_AGENT_PROMPT_V1" {
+		return errors.New("invalid internal agent prompt header")
+	}
+	promptLength, err := strconv.Atoi(fields[1])
+	if err != nil || promptLength < 1 || promptLength > maximumPromptBytes {
+		return errors.New("agent prompt is empty or too large")
+	}
+	prompt := make([]byte, promptLength)
+	if _, err := io.ReadFull(reader, prompt); err != nil {
+		return fmt.Errorf("read agent prompt: %w", err)
+	}
+	command := exec.Command(args[1], "--print", "--verbose", "--output-format", "stream-json", "--permission-mode", "auto")
+	command.Stdin = bytes.NewReader(prompt)
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	return command.Run()
 }
 
 func runUpdate(args []string) error {
@@ -578,6 +612,7 @@ func runDaemon(args []string) error {
 	port := flags.Int("port", 0, "web listen port")
 	flags.IntVar(port, "p", 0, "web listen port")
 	allowPublic := flags.Bool("allow-public-bind", false, "allow 0.0.0.0 or [::] binding")
+	headless := flags.Bool("headless", false, "do not open native terminal windows for portal-created sessions")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -608,10 +643,28 @@ func runDaemon(args []string) error {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	manager := session.NewManager()
-	handlers, err := server.New(manager, auth.New(token), logger, visibleterminal.Open)
+	var openVisibleTerminal func(string) error
+	if !*headless {
+		openVisibleTerminal = visibleterminal.Open
+	}
+	handlers, err := server.New(manager, auth.New(token), logger, openVisibleTerminal)
 	if err != nil {
 		return err
 	}
+	workflowStore, err := coordinator.OpenStore(paths.WorkflowsDB)
+	if err != nil {
+		return err
+	}
+	workflowManager := coordinator.NewManager(workflowStore, manager, logger, openVisibleTerminal)
+	defer workflowManager.Close()
+	handlers.SetCoordinator(workflowManager)
+	go func() {
+		refreshContext, refreshCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer refreshCancel()
+		if _, err := workflowManager.RefreshAgents(refreshContext); err != nil {
+			logger.Warn("could not refresh local AI agents", "error", err)
+		}
+	}()
 	unixListener, err := listenUnix(paths.Socket)
 	if err != nil {
 		return err
@@ -964,7 +1017,7 @@ Usage:
   termlinks desktop permissions     Request window view/control permissions
   termlinks desktop windows         List shareable Mac windows locally
   termlinks desktop disable         Revoke remote desktop access
-  termlinks daemon [-p port] [--listen addr]
+  termlinks daemon [-p port] [--listen addr] [--headless]
                                     Run the daemon in the foreground
 
 Examples:

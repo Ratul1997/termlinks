@@ -10,6 +10,25 @@ The same Go executable acts as the user command, local attach client, and daemon
 
 The daemon owns each pseudo-terminal and child process. A session stores identifiers and process metadata, a bounded output ring, current dimensions, subscribers, and final exit state. The manager retains at most 64 sessions and prunes the oldest completed entries as new sessions are created.
 
+## Local AI workflow coordinator
+
+The optional coordinator remains inside the local daemon. It discovers supported local harness executables, validates an explicitly selected existing directory, compiles ordered `@agent` mentions into deterministic stages, and starts each stage through the same PTY manager used by ordinary Termlinks sessions. Prompts are streamed through PTY input rather than interpolated into a shell command or placed in the child process argument list.
+
+```text
+phone AI-work UI
+      │ authenticated request (E2E ciphertext on the cloud path)
+      ▼
+local coordinator ──► private SQLite state/events
+      │
+      ├──► PTY: Codex ── result ──┐
+      ├──► PTY: Claude ◄──────────┤ bounded prior-stage context
+      └──► PTY: OpenCode ◄────────┘
+                 │
+                 └── same live child session available to browser/native terminal
+```
+
+SQLite is the authoritative durable workflow state, while the PTY manager is authoritative for live process state. If the daemon restarts, SQLite marks previously active work `interrupted`; it does not manufacture a replacement or claim the old PTY survived. Concurrent work is capped globally and serialized per canonical Git root until isolated worktree support is implemented.
+
 The daemon exposes two deliberately separate surfaces:
 
 - Local control API over the `0600` Unix socket: create, list, attach, resize, input, and stop.

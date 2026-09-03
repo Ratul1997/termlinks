@@ -1569,11 +1569,42 @@ func allowedHTTPRoute(method, requestPath string) bool {
 	if method == http.MethodPost && path == "/api/sessions" {
 		return true
 	}
+	if method == http.MethodGet && (path == "/api/agents" || path == "/api/projects/suggestions" || path == "/api/workflows") {
+		return true
+	}
+	if method == http.MethodPost && (path == "/api/agents/refresh" || path == "/api/workflows/compile" || path == "/api/workflows") {
+		return true
+	}
+	if strings.HasPrefix(path, "/api/workflows/") {
+		parts := strings.Split(strings.TrimPrefix(path, "/api/workflows/"), "/")
+		if len(parts) == 1 && method == http.MethodGet {
+			return validCoordinatorID(parts[0])
+		}
+		if len(parts) == 2 && method == http.MethodPost && parts[1] == "cancel" {
+			return validCoordinatorID(parts[0])
+		}
+		if len(parts) == 4 && method == http.MethodPost && parts[1] == "stages" && parts[3] == "input" {
+			return validCoordinatorID(parts[0]) && validCoordinatorID(parts[2])
+		}
+		return false
+	}
 	if method != http.MethodPost || !strings.HasPrefix(path, "/api/sessions/") || !strings.HasSuffix(path, "/stop") {
 		return false
 	}
 	id := strings.TrimSuffix(strings.TrimPrefix(path, "/api/sessions/"), "/stop")
 	return validSessionID(id)
+}
+
+func validCoordinatorID(id string) bool {
+	if len(id) != 24 {
+		return false
+	}
+	for _, character := range id {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func validSessionID(id string) bool {

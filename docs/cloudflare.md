@@ -17,7 +17,7 @@ As with any hosted web E2E application, the JavaScript is delivered by the hosti
 ## Requirements
 
 - A Cloudflare account
-- Node.js 20+, npm, Go 1.22+, and Wrangler
+- Node.js 20+, npm, Go 1.25+, and Wrangler
 - Two globally/account-unique project names of your choice
 
 Authenticate interactively with `npx wrangler login`, or set `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` in the shell without committing them.

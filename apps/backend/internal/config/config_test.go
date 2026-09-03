@@ -125,6 +125,15 @@ func TestTokenPersistsWithPrivatePermissions(t *testing.T) {
 	if permissions := dirInfo.Mode().Perm(); permissions != 0o700 {
 		t.Fatalf("state directory permissions = %o, want 700", permissions)
 	}
+	for _, directory := range []string{paths.WorkflowArtifacts, paths.WorkflowWorktrees} {
+		info, err := os.Stat(directory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if permissions := info.Mode().Perm(); permissions != 0o700 {
+			t.Fatalf("workflow directory permissions = %o, want 700", permissions)
+		}
+	}
 }
 
 func TestResolvePathsRejectsRelativeOverride(t *testing.T) {

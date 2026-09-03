@@ -18,6 +18,47 @@ type Session = {
   cols: number;
 };
 
+type LocalAgent = {
+  id: string;
+  name: string;
+  command: string;
+  version?: string;
+  available: boolean;
+  runnable: boolean;
+  authStatus: string;
+  transport: string;
+  detectedAt: string;
+};
+
+type WorkflowStage = {
+  id: string;
+  workflowId: string;
+  position: number;
+  agentId: string;
+  title: string;
+  prompt: string;
+  status: string;
+  sessionId?: string;
+  output?: string;
+  error?: string;
+  startedAt?: string;
+  endedAt?: string;
+};
+
+type AIWorkflow = {
+  id: string;
+  request: string;
+  cwd: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  stages: WorkflowStage[];
+};
+
+type WorkflowDraft = { request: string; cwd: string; stages: WorkflowStage[] };
+
+type WorkspaceSuggestion = { path: string; name: string; lastUsedAt: string };
+
 type StatusMessage = {
   type: "status";
   running: boolean;
@@ -92,6 +133,22 @@ type FileUploadReply = {
   path?: string;
 };
 
+type PortalView = "sessions" | "terminal" | "workflows" | "workflow" | "desktop";
+
+function readLastPortalView(): { view: PortalView; selected?: string; selectedWorkflow?: string } {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem("termlinks-last-view-v1") || "null");
+    if (!isRecord(value) || !["sessions", "terminal", "workflows", "workflow", "desktop"].includes(String(value.view))) return { view: "sessions" };
+    return {
+      view: value.view as PortalView,
+      selected: typeof value.selected === "string" ? value.selected : undefined,
+      selectedWorkflow: typeof value.selectedWorkflow === "string" ? value.selectedWorkflow : undefined,
+    };
+  } catch { return { view: "sessions" }; }
+}
+
+const lastPortalView = readLastPortalView();
+
 const state: {
   authenticated: boolean;
   sessions: Session[];
@@ -111,7 +168,12 @@ const state: {
   windowLink?: EncryptedWindowLink;
   polling?: number;
   closedSessions: Set<string>;
-} = { authenticated: false, sessions: [], terminalReconnectAttempts: 0, closedSessions: new Set() };
+  view: PortalView;
+  selectedWorkflow?: string;
+} = {
+  authenticated: false, sessions: [], terminalReconnectAttempts: 0, closedSessions: new Set(),
+  view: lastPortalView.view, selected: lastPortalView.selected, selectedWorkflow: lastPortalView.selectedWorkflow,
+};
 
 let encryptedPortal = true;
 let encryptedBridge: EncryptedBridge | undefined;
@@ -852,8 +914,11 @@ async function resumeEncryptedPortal(): Promise<void> {
     state.authenticated = true;
     await loadSessions();
     const session = selectedSession ? state.sessions.find((item) => item.id === selectedSession) : undefined;
-    if (session && state.terminal && document.querySelector(".terminal-page")) connectTerminal(session);
-    else if (session) renderTerminal(session.id);
+    if (state.view === "workflow" && state.selectedWorkflow) await renderWorkflowDetail(state.selectedWorkflow);
+    else if (state.view === "workflows") await renderWorkflows();
+    else if (state.view === "desktop") renderDesktop();
+    else if (session && state.terminal && document.querySelector(".terminal-page")) connectTerminal(session);
+    else if (session) renderTerminal(session.id, state.selectedWorkflow);
     else renderSessions();
   })().catch(async (caught: unknown) => {
     encryptedBridge = undefined;
@@ -893,7 +958,7 @@ async function boot(): Promise<void> {
     await api<{ authenticated: boolean }>("/api/me");
     state.authenticated = true;
     await loadSessions();
-    renderSessions();
+    await renderRememberedView();
   } catch (caught) {
     if (!state.authenticated) {
       const message = caught instanceof Error && caught.message.includes("offline")
@@ -916,6 +981,32 @@ async function isDirectPortal(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function renderRememberedView(): Promise<void> {
+  if (state.view === "workflow" && state.selectedWorkflow) {
+    await renderWorkflowDetail(state.selectedWorkflow);
+    return;
+  }
+  if (state.view === "workflows") {
+    await renderWorkflows();
+    return;
+  }
+  if (state.view === "desktop" && encryptedPortal) {
+    renderDesktop();
+    return;
+  }
+  if (state.view === "terminal" && state.selected && state.sessions.some((session) => session.id === state.selected)) {
+    renderTerminal(state.selected, state.selectedWorkflow);
+    return;
+  }
+  renderSessions();
+}
+
+function rememberPortalView(view: PortalView, selected = state.selected, selectedWorkflow = state.selectedWorkflow): void {
+  state.view = view;
+  try { localStorage.setItem("termlinks-last-view-v1", JSON.stringify({ view, selected, selectedWorkflow })); }
+  catch { /* Private browsing may reject presentation-state storage. */ }
 }
 
 function renderLogin(message = ""): void {
@@ -988,7 +1079,7 @@ function renderLogin(message = ""): void {
       }
       state.authenticated = true;
       await loadSessions();
-      renderSessions();
+      await renderRememberedView();
     } catch (caught) {
       error.textContent = caught instanceof Error ? caught.message : "Login failed";
       submit.disabled = false;
@@ -1011,6 +1102,8 @@ function renderSessions(): void {
   closeConnection();
   state.sessions = state.sessions.filter((session) => session.running && !state.closedSessions.has(session.id));
   state.selected = undefined;
+  state.selectedWorkflow = undefined;
+  rememberPortalView("sessions");
   app.replaceChildren();
   const page = el("main", "dashboard");
   const header = el("header", "topbar");
@@ -1065,6 +1158,11 @@ function renderSessions(): void {
     }));
     headingActions.append(desktop, upload);
   }
+
+  const workflows = el("button", "ai-work-button", "✦ AI work");
+  workflows.type = "button";
+  workflows.addEventListener("click", () => { void renderWorkflows(); });
+  headingActions.append(workflows);
   headingActions.append(create, refresh);
   heading.append(titleGroup, headingActions);
 
@@ -1085,6 +1183,308 @@ function renderSessions(): void {
   app.append(page);
   updateSessionSummary();
   startPolling();
+}
+
+async function renderWorkflows(message = ""): Promise<void> {
+  stopPolling();
+  closeConnection();
+  state.selected = undefined;
+  state.selectedWorkflow = undefined;
+  rememberPortalView("workflows");
+  app.replaceChildren();
+  const page = el("main", "dashboard workflow-page");
+  const header = el("header", "topbar");
+  const brand = el("button", "brand brand-button");
+  brand.type = "button";
+  brand.append(el("span", "brand-mark", ">_"), el("span", "brand-name", "termlinks"));
+  brand.addEventListener("click", renderSessions);
+  const back = el("button", "ghost-button", "‹ Terminals");
+  back.type = "button";
+  back.addEventListener("click", renderSessions);
+  header.append(brand, el("span", "workflow-private-badge", encryptedPortal ? "E2E · LOCAL STATE" : "LOCAL STATE"), back);
+
+  const heading = el("div", "workflow-heading");
+  heading.append(
+    el("p", "eyebrow", "LOCAL AI COORDINATOR"),
+    el("h1", "dashboard-title", "Direct the agents on your computer"),
+    el("p", "workflow-lead", "Mention installed agents in order. Termlinks opens each agent in a real managed terminal and carries the result into the next stage."),
+  );
+  const notice = el("p", "workflow-notice", message);
+  notice.hidden = !message;
+  const composer = renderWorkflowComposer();
+  const list = el("section", "workflow-list");
+  list.append(el("p", "workflow-loading", "Loading local workflows…"));
+  page.append(header, heading, notice, composer, list);
+  app.append(page);
+
+  try {
+    const [{ agents }, { projects }, { workflows }] = await Promise.all([
+      api<{ agents: LocalAgent[] }>("/api/agents"),
+      api<{ projects: WorkspaceSuggestion[] }>("/api/projects/suggestions"),
+      api<{ workflows: AIWorkflow[] }>("/api/workflows"),
+    ]);
+    populateWorkflowComposer(composer, agents, projects);
+    renderWorkflowCards(list, workflows);
+    if (workflows.some((workflow) => workflow.status === "queued" || workflow.status === "running")) {
+      state.polling = window.setInterval(() => { void refreshWorkflowCards(list); }, 2000);
+    }
+  } catch (caught) {
+    list.replaceChildren(el("p", "form-error", caught instanceof Error ? caught.message : "Could not load AI workflows"));
+  }
+}
+
+function renderWorkflowComposer(): HTMLElement {
+  const panel = el("section", "workflow-composer");
+  const agentRow = el("div", "workflow-agent-row");
+  agentRow.dataset.role = "agents";
+  agentRow.append(el("span", "agent-chip muted", "Detecting local agents…"));
+  const form = el("form", "workflow-form");
+  const request = el("textarea", "workflow-request");
+  request.name = "request";
+  request.rows = 4;
+  request.maxLength = 48 << 10;
+  request.placeholder = "@codex inspect and plan\n@claude implement the plan\n@codex review the result";
+  request.setAttribute("aria-label", "Workflow instructions");
+  const row = el("div", "workflow-form-row");
+  const cwd = el("input", "workflow-cwd");
+  cwd.name = "cwd";
+  cwd.maxLength = 4096;
+  cwd.placeholder = "/absolute/path/to/project";
+  cwd.spellcheck = false;
+  cwd.setAttribute("list", "workflow-projects");
+  cwd.setAttribute("aria-label", "Project directory");
+  const projects = el("datalist");
+  projects.id = "workflow-projects";
+  const submit = el("button", "workflow-start", "Start workflow →");
+  submit.type = "submit";
+  row.append(cwd, projects, submit);
+  const hint = el("p", "workflow-form-hint", "Runs only on this computer. Explicit @agent mentions never fall back silently.");
+  const error = el("p", "form-error");
+  error.setAttribute("role", "alert");
+  const preview = el("div", "workflow-preview");
+  preview.hidden = true;
+  const resetPreview = (): void => {
+    form.dataset.reviewed = "false";
+    preview.hidden = true;
+    preview.replaceChildren();
+    submit.textContent = "Review plan →";
+  };
+  request.addEventListener("input", resetPreview);
+  cwd.addEventListener("input", resetPreview);
+  form.append(request, row, hint, preview, error);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    error.textContent = "";
+    submit.disabled = true;
+    submit.textContent = form.dataset.reviewed === "true" ? "Starting…" : "Reviewing…";
+    try {
+      if (form.dataset.reviewed !== "true") {
+        const draft = await api<WorkflowDraft>("/api/workflows/compile", { method: "POST", body: JSON.stringify({ request: request.value.trim(), cwd: cwd.value.trim() }) });
+        preview.replaceChildren(el("strong", "workflow-preview-title", "Review before starting"));
+        for (const [index, stage] of draft.stages.entries()) {
+          preview.append(el("div", "workflow-preview-stage", `${index + 1}. @${stage.agentId} — ${stage.prompt}`));
+        }
+        preview.hidden = false;
+        form.dataset.reviewed = "true";
+        submit.disabled = false;
+        submit.textContent = "Confirm & start →";
+        return;
+      }
+      const created = await api<AIWorkflow>("/api/workflows", { method: "POST", body: JSON.stringify({ request: request.value.trim(), cwd: cwd.value.trim() }) });
+      await renderWorkflowDetail(created.id);
+    } catch (caught) {
+      error.textContent = caught instanceof Error ? caught.message : "Could not start the workflow";
+      submit.disabled = false;
+      submit.textContent = "Start workflow →";
+    }
+  });
+  panel.append(agentRow, form);
+  return panel;
+}
+
+function populateWorkflowComposer(panel: HTMLElement, agents: LocalAgent[], projects: WorkspaceSuggestion[]): void {
+  const row = panel.querySelector<HTMLElement>('[data-role="agents"]');
+  row?.replaceChildren();
+  for (const agent of agents) {
+    const ready = agent.available && agent.runnable && agent.authStatus !== "needs-login";
+    const label = !agent.available
+      ? `@${agent.id} · not installed`
+      : !agent.runnable ? `@${agent.id} · adapter pending` : `@${agent.id} · ${agent.authStatus}`;
+    const chip = el("button", `agent-chip ${ready ? "available" : "muted"}`, label);
+    chip.type = "button";
+    chip.disabled = !ready;
+    chip.title = agent.version || agent.command || agent.name;
+    chip.addEventListener("click", () => {
+      const input = panel.querySelector<HTMLTextAreaElement>(".workflow-request");
+      if (!input) return;
+      const prefix = input.value && !input.value.endsWith("\n") ? "\n" : "";
+      input.value += `${prefix}@${agent.id} `;
+      input.dispatchEvent(new Event("input"));
+      input.focus();
+    });
+    row?.append(chip);
+  }
+  const refresh = el("button", "agent-chip agent-refresh", "↻ Refresh");
+  refresh.type = "button";
+  refresh.addEventListener("click", async () => {
+    refresh.disabled = true;
+    refresh.textContent = "Checking…";
+    try {
+      const response = await api<{ agents: LocalAgent[] }>("/api/agents/refresh", { method: "POST" });
+      populateWorkflowComposer(panel, response.agents, projects);
+    } catch {
+      refresh.disabled = false;
+      refresh.textContent = "Refresh failed";
+    }
+  });
+  row?.append(refresh);
+  const datalist = panel.querySelector<HTMLDataListElement>("#workflow-projects");
+  const cwd = panel.querySelector<HTMLInputElement>(".workflow-cwd");
+  for (const project of projects) {
+    const option = document.createElement("option");
+    option.value = project.path;
+    option.label = project.name;
+    datalist?.append(option);
+  }
+  if (cwd && projects[0]) cwd.value = projects[0].path;
+}
+
+function renderWorkflowCards(container: HTMLElement, workflows: AIWorkflow[]): void {
+  container.replaceChildren();
+  if (workflows.length === 0) {
+    const empty = el("div", "empty-state");
+    empty.append(el("span", "empty-prompt", "✦"), el("h2", "empty-title", "No AI work yet"), el("p", "empty-copy", "Create a directed workflow above. Its terminals remain available beside your normal sessions."));
+    container.append(empty);
+    return;
+  }
+  for (const workflow of workflows) {
+    const card = el("button", "workflow-card");
+    card.type = "button";
+    card.addEventListener("click", () => { void renderWorkflowDetail(workflow.id); });
+    const top = el("span", "workflow-card-top");
+    top.append(el("strong", "workflow-card-title", workflow.request), el("span", `workflow-status ${workflow.status}`, workflow.status.toUpperCase()));
+    const pipeline = el("span", "workflow-pipeline");
+    workflow.stages.forEach((stage, index) => {
+      if (index) pipeline.append(el("span", "pipeline-arrow", "→"));
+      pipeline.append(el("span", `pipeline-agent ${stage.status}`, `@${stage.agentId}`));
+    });
+    card.append(top, pipeline, el("span", "workflow-card-path", compactPath(workflow.cwd)));
+    container.append(card);
+  }
+}
+
+async function refreshWorkflowCards(container: HTMLElement): Promise<void> {
+  if (!document.body.contains(container)) return stopPolling();
+  try {
+    const { workflows } = await api<{ workflows: AIWorkflow[] }>("/api/workflows");
+    renderWorkflowCards(container, workflows);
+    if (!workflows.some((workflow) => workflow.status === "queued" || workflow.status === "running")) stopPolling();
+  } catch { /* Keep the last durable snapshot during a brief reconnect. */ }
+}
+
+async function renderWorkflowDetail(id: string): Promise<void> {
+  stopPolling();
+  closeConnection();
+  state.selectedWorkflow = id;
+  rememberPortalView("workflow", undefined, id);
+  app.replaceChildren();
+  const page = el("main", "dashboard workflow-page");
+  const header = el("header", "topbar");
+  const back = el("button", "ghost-button", "‹ AI workflows");
+  back.type = "button";
+  back.addEventListener("click", () => { void renderWorkflows(); });
+  header.append(el("div", "brand", "✦ Agent work"), back);
+  const mount = el("section", "workflow-detail");
+  mount.append(el("p", "workflow-loading", "Loading workflow…"));
+  page.append(header, mount);
+  app.append(page);
+  let remainsActive = false;
+  const refresh = async (): Promise<void> => {
+    if (!document.body.contains(mount)) { stopPolling(); return; }
+    try {
+      const workflow = await api<AIWorkflow>(`/api/workflows/${encodeURIComponent(id)}`);
+      renderWorkflowDetailContent(mount, workflow);
+      remainsActive = workflow.status === "queued" || workflow.status === "running";
+      if (!remainsActive) stopPolling();
+    } catch (caught) {
+      mount.replaceChildren(el("p", "form-error", caught instanceof Error ? caught.message : "Could not load workflow"));
+      stopPolling();
+    }
+  };
+  await refresh();
+  if (document.body.contains(mount) && remainsActive && !state.polling) state.polling = window.setInterval(() => { void refresh(); }, 1500);
+}
+
+function renderWorkflowDetailContent(container: HTMLElement, workflow: AIWorkflow): void {
+  container.replaceChildren();
+  const heading = el("div", "workflow-detail-heading");
+  const title = el("div");
+  title.append(el("p", "eyebrow", compactPath(workflow.cwd)), el("h1", "workflow-detail-title", workflow.request));
+  heading.append(title, el("span", `workflow-status ${workflow.status}`, workflow.status.toUpperCase()));
+  container.append(heading);
+  const timeline = el("div", "workflow-timeline");
+  for (const stage of workflow.stages) {
+    const card = el("article", `workflow-stage ${stage.status}`);
+    const top = el("div", "workflow-stage-top");
+    top.append(el("strong", "workflow-stage-agent", `@${stage.agentId}`), el("span", "workflow-stage-status", stage.status));
+    card.append(top, el("p", "workflow-stage-prompt", stage.prompt));
+    if (stage.error) card.append(el("p", "workflow-stage-error", stage.error));
+    if (stage.output) {
+      const details = el("details", "workflow-output");
+      details.append(el("summary", undefined, "Saved agent output"), el("pre", undefined, stage.output));
+      card.append(details);
+    }
+    if (stage.sessionId && stage.status === "running") {
+      const actions = el("div", "workflow-stage-actions");
+      const open = el("button", "card-action", "Open live terminal");
+      open.type = "button";
+      open.addEventListener("click", () => { void openWorkflowTerminal(workflow.id, stage.sessionId!); });
+      actions.append(open);
+      actions.append(renderWorkflowInput(workflow.id, stage.id));
+      card.append(actions);
+    }
+    timeline.append(card);
+  }
+  container.append(timeline);
+  if (workflow.status === "queued" || workflow.status === "running") {
+    const cancel = el("button", "workflow-cancel", "Cancel workflow");
+    cancel.type = "button";
+    cancel.addEventListener("click", async () => {
+      if (!window.confirm("Cancel this workflow and stop its active agent terminal?")) return;
+      cancel.disabled = true;
+      try { await api(`/api/workflows/${encodeURIComponent(workflow.id)}/cancel`, { method: "POST" }); }
+      catch (caught) { cancel.textContent = caught instanceof Error ? caught.message : "Cancellation failed"; }
+    });
+    container.append(cancel);
+  }
+}
+
+function renderWorkflowInput(workflowID: string, stageID: string): HTMLElement {
+  const form = el("form", "workflow-input");
+  const input = el("input", "workflow-input-field");
+  input.placeholder = "Send input to this agent…";
+  input.maxLength = 48 << 10;
+  const send = el("button", "card-action", "Send");
+  send.type = "submit";
+  form.append(input, send);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!input.value) return;
+    send.disabled = true;
+    try {
+      await api(`/api/workflows/${encodeURIComponent(workflowID)}/stages/${encodeURIComponent(stageID)}/input`, { method: "POST", body: JSON.stringify({ input: input.value }) });
+      input.value = "";
+    } catch (caught) { input.value = caught instanceof Error ? caught.message : "Input failed"; }
+    finally { send.disabled = false; }
+  });
+  return form;
+}
+
+async function openWorkflowTerminal(workflowID: string, sessionID: string): Promise<void> {
+  await loadSessions();
+  const found = state.sessions.find((session) => session.id === sessionID);
+  if (!found) { await renderWorkflows("That agent terminal has already expired from the daemon."); return; }
+  renderTerminal(sessionID, workflowID);
 }
 
 function renderSessionsWithCreate(): void {
@@ -1139,6 +1539,7 @@ function renderDesktop(): void {
     renderLogin("Remote desktop requires the encrypted cloud portal");
     return;
   }
+  rememberPortalView("desktop", undefined, undefined);
 
   app.replaceChildren();
   const page = el("main", "desktop-page");
@@ -1880,19 +2281,25 @@ function stopPolling(): void {
   state.polling = undefined;
 }
 
-function renderTerminal(id: string): void {
+function renderTerminal(id: string, workflowID?: string): void {
   stopPolling();
   closeConnection();
   const session = state.sessions.find((item) => item.id === id);
   if (!session) return renderSessions();
   state.selected = id;
+  if (workflowID !== undefined) state.selectedWorkflow = workflowID;
+  else if (state.view !== "terminal") state.selectedWorkflow = undefined;
+  rememberPortalView("terminal", id, state.selectedWorkflow);
   app.replaceChildren();
   const page = el("main", "terminal-page");
   const header = el("header", "terminal-header");
   const back = el("button", "back-button terminal-back-button", "‹");
   back.type = "button";
-  back.setAttribute("aria-label", "Back to sessions");
-  back.addEventListener("click", renderSessions);
+  back.setAttribute("aria-label", state.selectedWorkflow ? "Back to AI workflow" : "Back to sessions");
+  back.addEventListener("click", () => {
+    if (state.selectedWorkflow) void renderWorkflowDetail(state.selectedWorkflow);
+    else renderSessions();
+  });
   const identity = el("div", "terminal-identity");
   const title = el("div", "terminal-title-row");
   title.append(el("strong", "terminal-name", session.name), el("span", "terminal-live-badge", "LIVE"));
