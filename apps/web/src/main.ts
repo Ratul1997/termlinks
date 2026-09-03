@@ -388,6 +388,10 @@ class EncryptedBridge {
     await authenticated;
   }
 
+  isReady(): boolean {
+    return !this.failed && this.socket?.readyState === WebSocket.OPEN;
+  }
+
   async request(method: string, path: string, body = ""): Promise<{ status: number; body: string }> {
     const id = crypto.randomUUID();
     const response = new Promise<{ status: number; body: string }>((resolve, reject) => {
@@ -877,7 +881,14 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
       throw new Error(message);
     }
     if (response.status === 204) return undefined as T;
-    return JSON.parse(response.body) as T;
+    try {
+      return JSON.parse(response.body) as T;
+    } catch {
+      if (isWorkflowAPIPath(path)) {
+        throw new Error("AI Work needs the updated local Termlinks service");
+      }
+      throw new Error("Your computer returned an invalid response");
+    }
   }
   const response = await fetch(path, {
     ...init,
@@ -897,8 +908,30 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+function isWorkflowAPIPath(path: string): boolean {
+  return path === "/api/agents" || path === "/api/agents/refresh" ||
+    path === "/api/projects/suggestions" || path === "/api/workflows" ||
+    path.startsWith("/api/workflows/");
+}
+
+async function readyUploadBridge(): Promise<EncryptedBridge> {
+  const current = encryptedBridge;
+  if (state.authenticated && current?.isReady()) return current;
+  if (!encryptedPortal || !portalResumeKey) throw new Error("The encrypted computer connection is offline");
+  if (state.authenticated) state.authenticated = false;
+  await resumeEncryptedPortal();
+  if (!state.authenticated || !encryptedBridge?.isReady()) {
+    throw new Error("The computer is reconnecting. Try the upload again in a moment");
+  }
+  return encryptedBridge;
+}
+
 async function resumeEncryptedPortal(): Promise<void> {
-  if (!encryptedPortal || !portalResumeKey || state.authenticated || portalReconnect || document.visibilityState === "hidden") return;
+  if (!encryptedPortal || !portalResumeKey || state.authenticated || document.visibilityState === "hidden") return;
+  if (portalReconnect) {
+    await portalReconnect;
+    return;
+  }
   const key = portalResumeKey;
   const selectedSession = state.selected;
   if (portalReconnectTimer) window.clearTimeout(portalReconnectTimer);
@@ -919,6 +952,12 @@ async function resumeEncryptedPortal(): Promise<void> {
     else if (state.view === "desktop") renderDesktop();
     else if (session && state.terminal && document.querySelector(".terminal-page")) connectTerminal(session);
     else if (session) renderTerminal(session.id, state.selectedWorkflow);
+    else if (state.view === "sessions" && document.querySelector("#session-list")) {
+      const container = document.querySelector<HTMLElement>("#session-list");
+      if (container) renderSessionCards(container);
+      updateSessionSummary();
+      startPolling();
+    }
     else renderSessions();
   })().catch(async (caught: unknown) => {
     encryptedBridge = undefined;
@@ -929,7 +968,20 @@ async function resumeEncryptedPortal(): Promise<void> {
       renderLogin("The saved device login is no longer valid. Enter the current portal token.");
       return;
     }
-    renderLogin("Saved login found. Reconnecting when the computer is available…");
+    // iOS briefly suspends network sockets while Photos/the file picker is on
+    // screen. Preserve the terminal/dashboard DOM and its draft instead of
+    // replacing the user's work with a login screen during that wake-up gap.
+    const activePortalView = document.querySelector(".terminal-page, .dashboard, .desktop-page");
+    if (activePortalView) {
+      setConnectionState("Computer waking · reconnecting…", "connecting");
+      const transfer = document.querySelector<HTMLElement>(".file-transfer-status");
+      if (transfer && !transfer.hidden) {
+        transfer.textContent = "Computer waking · reconnecting securely…";
+        transfer.classList.remove("failed");
+      }
+    } else {
+      renderLogin("Saved login found. Reconnecting when the computer is available…");
+    }
     if (portalResumeKey && document.visibilityState === "visible") {
       portalReconnectTimer = window.setTimeout(() => {
         portalReconnectTimer = 0;
@@ -1193,15 +1245,15 @@ async function renderWorkflows(message = ""): Promise<void> {
   rememberPortalView("workflows");
   app.replaceChildren();
   const page = el("main", "dashboard workflow-page");
-  const header = el("header", "topbar");
+  const header = el("header", "topbar workflow-topbar");
   const brand = el("button", "brand brand-button");
   brand.type = "button";
   brand.append(el("span", "brand-mark", ">_"), el("span", "brand-name", "termlinks"));
   brand.addEventListener("click", renderSessions);
-  const back = el("button", "ghost-button", "‹ Terminals");
+  const back = el("button", "ghost-button workflow-back-button", "← Terminals");
   back.type = "button";
   back.addEventListener("click", renderSessions);
-  header.append(brand, el("span", "workflow-private-badge", encryptedPortal ? "E2E · LOCAL STATE" : "LOCAL STATE"), back);
+  header.append(back, brand, el("span", "workflow-private-badge", encryptedPortal ? "E2E · LOCAL STATE" : "LOCAL STATE"));
 
   const heading = el("div", "workflow-heading");
   heading.append(
@@ -1229,7 +1281,32 @@ async function renderWorkflows(message = ""): Promise<void> {
       state.polling = window.setInterval(() => { void refreshWorkflowCards(list); }, 2000);
     }
   } catch (caught) {
-    list.replaceChildren(el("p", "form-error", caught instanceof Error ? caught.message : "Could not load AI workflows"));
+    const rawMessage = caught instanceof Error ? caught.message : "Could not load AI workflows";
+    const compatibilityFailure = rawMessage === "API route is not allowed" ||
+      rawMessage.includes("updated local Termlinks service") || rawMessage.includes("invalid response");
+    if (compatibilityFailure) rememberPortalView("sessions", undefined, undefined);
+    composer.querySelector<HTMLElement>("[data-role=agents]")?.replaceChildren(el("span", "agent-chip muted", "AI Work unavailable"));
+    for (const control of composer.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement>("input, textarea, button")) {
+      control.disabled = true;
+    }
+    const error = el("section", "workflow-error-state");
+    error.append(
+      el("strong", "workflow-error-title", compatibilityFailure ? "AI Work needs a local restart" : "Could not load AI Work"),
+      el("p", "workflow-error-copy", compatibilityFailure
+        ? "Your terminals are safe. The website is newer than the Termlinks service currently running on this computer. Return to terminals now; restart Termlinks only after you have finished or stopped the active sessions."
+        : rawMessage),
+    );
+    const actions = el("div", "workflow-error-actions");
+    const home = el("button", "workflow-error-home", "← Return to terminals");
+    home.type = "button";
+    home.addEventListener("click", renderSessions);
+    const retry = el("button", "workflow-error-retry", "Try again");
+    retry.type = "button";
+    retry.addEventListener("click", () => { void renderWorkflows(); });
+    actions.append(home, retry);
+    error.append(actions);
+    if (compatibilityFailure) error.append(el("p", "workflow-error-detail", `Technical detail: ${rawMessage}`));
+    list.replaceChildren(error);
   }
 }
 
@@ -1498,7 +1575,7 @@ function renderSessionsWithCreate(): void {
 }
 
 function chooseAndUploadFiles(button: HTMLButtonElement, setStatus: (message: string, failed: boolean) => void): void {
-  if (!encryptedBridge) {
+  if (!encryptedBridge && !portalResumeKey) {
     setStatus("The encrypted computer connection is offline", true);
     return;
   }
@@ -1515,7 +1592,8 @@ function chooseAndUploadFiles(button: HTMLButtonElement, setStatus: (message: st
       for (let index = 0; index < files.length; index++) {
         const file = files[index]!;
         setStatus(`Sending ${file.name} (${index + 1}/${files.length})…`, false);
-        const path = await encryptedBridge!.uploadFile(file, (received, total) => {
+        const bridge = await readyUploadBridge();
+        const path = await bridge.uploadFile(file, (received, total) => {
           const percent = total === 0 ? 100 : Math.round((received / total) * 100);
           setStatus(`Sending ${file.name} · ${percent}%`, false);
         });
@@ -2871,7 +2949,7 @@ function renderTerminalComposer(): HTMLElement {
   };
   const chooseAttachments = (): void => {
     const statusText = status.querySelector<HTMLElement>(".terminal-composer-state");
-    if (!encryptedBridge) {
+    if (!encryptedBridge && !portalResumeKey) {
       if (statusText) statusText.textContent = "Encrypted upload unavailable";
       return;
     }
@@ -2889,7 +2967,8 @@ function renderTerminalComposer(): HTMLElement {
       try {
         for (const file of files) {
           if (statusText) statusText.textContent = `Uploading ${file.name}…`;
-          const path = await encryptedBridge!.uploadFile(file, (received, total) => {
+          const bridge = await readyUploadBridge();
+          const path = await bridge.uploadFile(file, (received, total) => {
             const percent = total === 0 ? 100 : Math.round((received / total) * 100);
             if (statusText) statusText.textContent = `Uploading ${file.name} · ${percent}%`;
           });

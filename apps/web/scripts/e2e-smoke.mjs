@@ -15,6 +15,8 @@ const windowText = process.env.TERMLINKS_E2E_WINDOW_TEXT || "";
 const saveWindowText = process.env.TERMLINKS_E2E_WINDOW_SAVE === "1";
 const testFileUpload = process.env.TERMLINKS_E2E_FILE_UPLOAD === "1";
 const uploadName = process.env.TERMLINKS_E2E_UPLOAD_NAME || `termlinks-e2e-${Date.now()}.txt`;
+const apiProbePath = process.env.TERMLINKS_E2E_API_PATH || "";
+const apiProbeOnly = process.env.TERMLINKS_E2E_API_ONLY === "1";
 
 if (!portal.startsWith("https://") || token.length < 32) {
   throw new Error("Set TERMLINKS_E2E_PORTAL and TERMLINKS_E2E_TOKEN");
@@ -109,6 +111,29 @@ if (response.type !== "http_response" || response.id !== requestID || response.s
   throw new Error("Encrypted session list failed");
 }
 const sessions = JSON.parse(response.body).sessions;
+let apiProbe;
+if (apiProbePath) {
+  const allowedProbePaths = new Set(["/api/agents", "/api/projects/suggestions", "/api/workflows"]);
+  if (!allowedProbePaths.has(apiProbePath)) throw new Error(`Unsupported read-only API probe: ${apiProbePath}`);
+  const probeID = crypto.randomUUID();
+  await sendEncrypted({ v: 1, type: "http_request", id: probeID, method: "GET", path: apiProbePath, body: "" });
+  let probeResponse;
+  do {
+    probeResponse = await receiveEncrypted();
+  } while (probeResponse.type !== "http_response" || probeResponse.id !== probeID);
+  let json = false;
+  try {
+    JSON.parse(probeResponse.body);
+    json = true;
+  } catch { /* Record non-JSON compatibility responses without printing their body. */ }
+  apiProbe = { path: apiProbePath, status: probeResponse.status, json };
+  if (apiProbeOnly) {
+    socket.close(1000, "Smoke test complete");
+    console.log(JSON.stringify({ authenticated: true, sessions: sessions.length, apiProbe, encryption: "AES-256-GCM e2e-v1" }));
+    setTimeout(() => process.exit(0), 50);
+    await new Promise(() => undefined);
+  }
+}
 let desktopDenied = false;
 let desktopBridge = false;
 if (testDesktopDisabled) {
@@ -273,7 +298,7 @@ if (createShell) {
   }
 }
 socket.close(1000, "Smoke test complete");
-console.log(JSON.stringify({ authenticated: true, sessions: sessions.length, terminalOutput: true, keyboardInput: Boolean(input), interactiveShell: createShell, desktopDenied, desktopBridge, windowCapture, fileUpload, encryption: "AES-256-GCM e2e-v1" }));
+console.log(JSON.stringify({ authenticated: true, sessions: sessions.length, terminalOutput: true, keyboardInput: Boolean(input), interactiveShell: createShell, desktopDenied, desktopBridge, windowCapture, fileUpload, apiProbe, encryption: "AES-256-GCM e2e-v1" }));
 // Node's built-in WebSocket can retain the Cloudflare close handshake handle
 // after the protocol assertions have completed successfully.
 setTimeout(() => process.exit(0), 50);
