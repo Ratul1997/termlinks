@@ -50,6 +50,24 @@ func TestRejectsUnsafeTerminalSizes(t *testing.T) {
 	}
 }
 
+func TestEndObserverReceivesAuthoritativeFinalState(t *testing.T) {
+	manager := NewManager()
+	ended := make(chan Info, 1)
+	manager.SetEndObserver(func(info Info) { ended <- info })
+	current, err := manager.Start(StartOptions{Command: []string{"/bin/sh", "-c", "exit 7"}, Cwd: t.TempDir(), Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case info := <-ended:
+		if info.ID != current.Info().ID || info.Running || info.EndedAt == nil || info.ExitCode == nil || *info.ExitCode != 7 {
+			t.Fatalf("unexpected observer state: %#v", info)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("end observer was not called")
+	}
+}
+
 func waitForOutput(t *testing.T, output []byte, updates <-chan []byte, expected []byte) []byte {
 	t.Helper()
 	timer := time.NewTimer(3 * time.Second)

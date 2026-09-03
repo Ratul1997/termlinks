@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -22,6 +23,7 @@ import (
 	"termlinks/backend/internal/coordinator"
 	"termlinks/backend/internal/remote"
 	"termlinks/backend/internal/session"
+	"termlinks/backend/internal/terminalhistory"
 	"termlinks/backend/internal/webui"
 )
 
@@ -34,9 +36,12 @@ type Server struct {
 	web                 http.Handler
 	openVisibleTerminal func(string) error
 	coordinator         *coordinator.Manager
+	terminalHistory     *terminalhistory.Store
+	openHistoryMu       sync.Mutex
 }
 
-func (s *Server) SetCoordinator(manager *coordinator.Manager) { s.coordinator = manager }
+func (s *Server) SetCoordinator(manager *coordinator.Manager)     { s.coordinator = manager }
+func (s *Server) SetTerminalHistory(store *terminalhistory.Store) { s.terminalHistory = store }
 
 type terminalControl struct {
 	Type string `json:"type"`
@@ -89,6 +94,11 @@ func (s *Server) WebHandler() http.Handler {
 	mux.HandleFunc("POST /api/sessions", s.requireWebAuth(s.createWebSession))
 	mux.HandleFunc("PATCH /api/sessions/{id}", s.requireWebAuth(s.renameWebSession))
 	mux.HandleFunc("POST /api/sessions/{id}/stop", s.requireWebAuth(s.stopSession))
+	mux.HandleFunc("GET /api/terminal-history", s.requireWebAuth(s.listTerminalHistory))
+	mux.HandleFunc("POST /api/terminal-history/session/{sessionID}/favorite", s.requireWebAuth(s.favoriteSession))
+	mux.HandleFunc("PATCH /api/terminal-history/{id}", s.requireWebAuth(s.updateTerminalHistory))
+	mux.HandleFunc("DELETE /api/terminal-history/{id}", s.requireWebAuth(s.deleteTerminalHistory))
+	mux.HandleFunc("POST /api/terminal-history/{id}/open", s.requireWebAuth(s.openTerminalHistory))
 	mux.HandleFunc("GET /api/agents", s.requireWebAuth(s.listAgents))
 	mux.HandleFunc("POST /api/agents/refresh", s.requireWebAuth(s.refreshAgents))
 	mux.HandleFunc("GET /api/projects/suggestions", s.requireWebAuth(s.workspaceSuggestions))
@@ -355,7 +365,198 @@ func (s *Server) renameWebSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, current.Rename(input.Name))
+	renamed := current.Rename(input.Name)
+	if s.terminalHistory != nil {
+		if err := s.terminalHistory.RenameSession(r.Context(), renamed.ID, renamed.Name); err != nil {
+			s.logger.Warn("could not update saved terminal name", "session", renamed.ID, "error", err)
+		}
+	}
+	writeJSON(w, http.StatusOK, renamed)
+}
+
+func (s *Server) listTerminalHistory(w http.ResponseWriter, r *http.Request) {
+	if s.terminalHistory == nil {
+		writeError(w, http.StatusServiceUnavailable, "terminal history is unavailable")
+		return
+	}
+	if err := s.terminalHistory.Reconcile(r.Context(), s.sessions.List()); err != nil {
+		s.logger.Error("could not reconcile terminal history", "error", err)
+		writeError(w, http.StatusInternalServerError, "could not load terminal history")
+		return
+	}
+	entries, err := s.terminalHistory.List(r.Context())
+	if err != nil {
+		s.logger.Error("could not list terminal history", "error", err)
+		writeError(w, http.StatusInternalServerError, "could not load terminal history")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"terminals": entries, "maxFavorites": terminalhistory.MaxFavorites, "maxRecent": terminalhistory.MaxRecent})
+}
+
+func (s *Server) favoriteSession(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "cross-origin request rejected")
+		return
+	}
+	if s.terminalHistory == nil {
+		writeError(w, http.StatusServiceUnavailable, "terminal history is unavailable")
+		return
+	}
+	current, ok := s.sessions.Get(r.PathValue("sessionID"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	entry, err := s.terminalHistory.SaveSession(r.Context(), current.Info(), true)
+	if errors.Is(err, terminalhistory.ErrFavoriteLimit) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if err != nil {
+		s.logger.Error("could not favorite terminal", "error", err)
+		writeError(w, http.StatusInternalServerError, "could not save terminal")
+		return
+	}
+	writeJSON(w, http.StatusCreated, entry)
+}
+
+type terminalHistoryUpdate struct {
+	Name     *string `json:"name"`
+	Favorite *bool   `json:"favorite"`
+}
+
+func (s *Server) updateTerminalHistory(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "cross-origin request rejected")
+		return
+	}
+	if s.terminalHistory == nil {
+		writeError(w, http.StatusServiceUnavailable, "terminal history is unavailable")
+		return
+	}
+	if !terminalhistory.ValidID(r.PathValue("id")) {
+		writeError(w, http.StatusNotFound, "saved terminal not found")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	defer r.Body.Close()
+	var input terminalHistoryUpdate
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid terminal history request")
+		return
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) || (input.Name == nil && input.Favorite == nil) {
+		writeError(w, http.StatusBadRequest, "invalid terminal history request")
+		return
+	}
+	if input.Name != nil {
+		name, err := remote.ValidateSessionName(*input.Name)
+		if err != nil || name == "" {
+			writeError(w, http.StatusBadRequest, "session name is invalid")
+			return
+		}
+		input.Name = &name
+	}
+	entry, err := s.terminalHistory.Update(r.Context(), r.PathValue("id"), input.Name, input.Favorite)
+	if errors.Is(err, terminalhistory.ErrNotFound) {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if errors.Is(err, terminalhistory.ErrFavoriteLimit) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if err != nil {
+		s.logger.Error("could not update terminal history", "error", err)
+		writeError(w, http.StatusInternalServerError, "could not update terminal history")
+		return
+	}
+	writeJSON(w, http.StatusOK, entry)
+}
+
+func (s *Server) deleteTerminalHistory(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "cross-origin request rejected")
+		return
+	}
+	if s.terminalHistory == nil {
+		writeError(w, http.StatusServiceUnavailable, "terminal history is unavailable")
+		return
+	}
+	if !terminalhistory.ValidID(r.PathValue("id")) {
+		writeError(w, http.StatusNotFound, "saved terminal not found")
+		return
+	}
+	err := s.terminalHistory.Delete(r.Context(), r.PathValue("id"))
+	if errors.Is(err, terminalhistory.ErrNotFound) {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if err != nil {
+		s.logger.Error("could not remove terminal history", "error", err)
+		writeError(w, http.StatusInternalServerError, "could not remove terminal history")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) openTerminalHistory(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "cross-origin request rejected")
+		return
+	}
+	if s.terminalHistory == nil {
+		writeError(w, http.StatusServiceUnavailable, "terminal history is unavailable")
+		return
+	}
+	if !terminalhistory.ValidID(r.PathValue("id")) {
+		writeError(w, http.StatusNotFound, "saved terminal not found")
+		return
+	}
+	s.openHistoryMu.Lock()
+	defer s.openHistoryMu.Unlock()
+	entry, err := s.terminalHistory.Get(r.Context(), r.PathValue("id"))
+	if errors.Is(err, terminalhistory.ErrNotFound) {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not open saved terminal")
+		return
+	}
+	linkedSessionID := entry.ActiveSessionID
+	if linkedSessionID == "" {
+		linkedSessionID = entry.SourceSessionID
+	}
+	if current, ok := s.sessions.Get(linkedSessionID); ok && current.Info().Running {
+		writeJSON(w, http.StatusOK, current.Info())
+		return
+	}
+	options, err := (remote.StartRequest{Name: entry.Name, Cwd: entry.Cwd}).Options()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	created, err := s.sessions.Start(options)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := s.terminalHistory.MarkOpened(r.Context(), entry.ID, created.Info().ID, created.Info().StartedAt); err != nil {
+		_ = created.Stop()
+		s.logger.Error("could not associate opened terminal history", "error", err)
+		writeError(w, http.StatusInternalServerError, "could not open saved terminal")
+		return
+	}
+	if s.openVisibleTerminal != nil {
+		if err := s.openVisibleTerminal(created.Info().ID); err != nil {
+			s.logger.Warn("could not open a visible terminal window", "session", created.Info().ID, "error", err)
+		}
+	}
+	writeJSON(w, http.StatusCreated, created.Info())
 }
 
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
@@ -377,7 +578,8 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listSessions(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": s.sessions.List()})
+	sessions := s.sessions.List()
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
 }
 
 func (s *Server) stopSession(w http.ResponseWriter, r *http.Request) {

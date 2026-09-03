@@ -1569,6 +1569,20 @@ func allowedHTTPRoute(method, requestPath string) bool {
 	if method == http.MethodPost && path == "/api/sessions" {
 		return true
 	}
+	if method == http.MethodGet && path == "/api/terminal-history" {
+		return true
+	}
+	if strings.HasPrefix(path, "/api/terminal-history/session/") {
+		parts := strings.Split(strings.TrimPrefix(path, "/api/terminal-history/session/"), "/")
+		return len(parts) == 2 && method == http.MethodPost && validSessionID(parts[0]) && parts[1] == "favorite"
+	}
+	if strings.HasPrefix(path, "/api/terminal-history/") {
+		parts := strings.Split(strings.TrimPrefix(path, "/api/terminal-history/"), "/")
+		if len(parts) == 1 && (method == http.MethodPatch || method == http.MethodDelete) {
+			return validSessionID(parts[0])
+		}
+		return len(parts) == 2 && method == http.MethodPost && validSessionID(parts[0]) && parts[1] == "open"
+	}
 	if method == http.MethodGet && (path == "/api/agents" || path == "/api/projects/suggestions" || path == "/api/workflows") {
 		return true
 	}

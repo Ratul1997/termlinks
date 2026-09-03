@@ -19,6 +19,9 @@ func TestCloudSettingsPersistPrivately(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if paths.TerminalHistoryDB != filepath.Join(dir, "terminal-history.db") {
+		t.Fatalf("terminal history path = %q", paths.TerminalHistoryDB)
+	}
 	if err := Ensure(paths); err != nil {
 		t.Fatal(err)
 	}

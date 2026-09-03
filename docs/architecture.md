@@ -29,10 +29,27 @@ local coordinator ──► private SQLite state/events
 
 SQLite is the authoritative durable workflow state, while the PTY manager is authoritative for live process state. If the daemon restarts, SQLite marks previously active work `interrupted`; it does not manufacture a replacement or claim the old PTY survived. Concurrent work is capped globally and serialized per canonical Git root until isolated worktree support is implemented.
 
+## Local terminal history
+
+The daemon also owns a separate private SQLite database for terminal history and favorites. It stores bounded names, working directories, opaque session associations, favorite state, and timestamps. It intentionally does not store command arguments, typed input, scrollback, or output. Database files are restricted to mode `0600` inside the mode-`0700` Termlinks state directory.
+
+```text
+PTY exit with daemon timestamp
+          │
+          ▼
+local terminal-history.db ── 10 Recent / 100 Favorites
+          │
+          │ authenticated API; E2E ciphertext on cloud path
+          ▼
+phone PWA / desktop browser
+```
+
+Reconciliation is idempotent and keyed by opaque session identity, so polling never rewrites a completed terminal's close time and two sessions with the same name and directory remain separate. Reopening a saved item updates its stable record with the new active session association. The browser keeps only the current response in memory; logout, another browser, or another authenticated device cannot create a second unsynchronized history database.
+
 The daemon exposes two deliberately separate surfaces:
 
 - Local control API over the `0600` Unix socket: create, list, attach, resize, input, and stop.
-- Browser portal over TCP: authenticate, create an interactive shell, list, attach, resize, input, and stop. Browser creation deliberately accepts only a name and starting directory; commands are typed into the shell afterward.
+- Browser portal over TCP: authenticate, create an interactive shell, list, attach, resize, input, stop, and manage bounded local terminal history. Browser creation and saved-terminal reopening deliberately accept only a name and starting directory; commands are typed into the shell afterward.
 
 ### Browser portal
 

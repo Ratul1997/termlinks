@@ -16,13 +16,14 @@
     "build:backend": "node scripts/build-backend.mjs",
     "build": "npm run build:web && npm run sync:web && npm run build:backend",
     "typecheck": "npm run typecheck --workspace @termlinks/web",
+    "test:web": "npm run test --workspace @termlinks/web",
     "typecheck:relay": "tsc --project apps/relay/tsconfig.json",
     "types:relay": "cd apps/relay && npx wrangler types --config wrangler.jsonc --env-file .dev.vars.example --no-strict-vars",
     "deploy:relay": "npx wrangler deploy --config apps/relay/wrangler.jsonc",
     "deploy:pages": "npm run build:web && cd apps/web && npx wrangler pages deploy dist --project-name termlinks --branch main",
     "test:e2e:web": "node apps/web/scripts/e2e-smoke.mjs",
     "test:go": "node scripts/test-backend.mjs",
-    "test": "npm run typecheck && npm run typecheck:relay && npm run test:go"
+    "test": "npm run typecheck && npm run test:web && npm run typecheck:relay && npm run test:go"
   },
   "engines": {
     "node": ">=20"

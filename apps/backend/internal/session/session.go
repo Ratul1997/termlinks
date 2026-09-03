@@ -57,16 +57,24 @@ type Session struct {
 	subscribers map[uint64]chan []byte
 	nextSubID   uint64
 	done        chan struct{}
+	onEnded     func(Info)
 }
 
 type Manager struct {
 	mu       sync.RWMutex
 	startMu  sync.Mutex
 	sessions map[string]*Session
+	onEnded  func(Info)
 }
 
 func NewManager() *Manager {
 	return &Manager{sessions: make(map[string]*Session)}
+}
+
+func (m *Manager) SetEndObserver(observer func(Info)) {
+	m.mu.Lock()
+	m.onEnded = observer
+	m.mu.Unlock()
 }
 
 func (m *Manager) Start(options StartOptions) (*Session, error) {
@@ -119,6 +127,9 @@ func (m *Manager) Start(options StartOptions) (*Session, error) {
 		return nil, fmt.Errorf("start %q: %w", options.Command[0], err)
 	}
 
+	m.mu.RLock()
+	onEnded := m.onEnded
+	m.mu.RUnlock()
 	s := &Session{
 		info: Info{
 			ID:        id,
@@ -134,6 +145,7 @@ func (m *Manager) Start(options StartOptions) (*Session, error) {
 		ptmx:        ptmx,
 		subscribers: make(map[uint64]chan []byte),
 		done:        make(chan struct{}),
+		onEnded:     onEnded,
 	}
 	m.mu.Lock()
 	m.sessions[id] = s
@@ -312,10 +324,15 @@ func (s *Session) capture() {
 	s.info.Running = false
 	s.info.EndedAt = &ended
 	s.info.ExitCode = &exitCode
+	info := s.info
+	info.Command = append([]string(nil), s.info.Command...)
 	_ = s.ptmx.Close()
 	s.ptmx = nil
 	close(s.done)
 	s.mu.Unlock()
+	if s.onEnded != nil {
+		s.onEnded(info)
+	}
 }
 
 func (s *Session) publish(data []byte) {

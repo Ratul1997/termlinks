@@ -190,6 +190,7 @@ The state directory is created with mode `0700`; sensitive files are forced to `
 | `cloud.pid` | PID of the detached connector. |
 | `cloud.log` | Detached connector diagnostics. It should not contain tokens, but still treat logs as private. |
 | `workflows.db`, `workflows.db-wal`, `workflows.db-shm` | Local SQLite workflow, stage, project, event, and bounded agent-output state. Each file is forced to `0600`. |
+| `terminal-history.db`, `terminal-history.db-wal`, `terminal-history.db-shm` | Local SQLite terminal names, working directories, favorites, and open/close timestamps. Command arguments, terminal input, and terminal output are never stored here. Each file is forced to `0600`. |
 | `workflow-artifacts/` | Private `0700` directory reserved for workflow-generated artifacts. |
 | `workflow-worktrees/` | Private `0700` directory reserved for isolated Git worktrees in a later workflow phase. The current release serializes work in the same repository instead. |
 
@@ -348,6 +349,7 @@ These variables are for maintainers and CI; normal users do not need them:
 These limits and UI tuning values are compiled into this release rather than runtime-configurable:
 
 - 64 retained sessions; the oldest completed entry is pruned when room is needed, while 64 simultaneously running sessions reject another start.
+- 10 non-favorite Recent entries and 100 Favorites. They are stored on the local computer, shared across authenticated portal devices through the E2E channel, and never stored in browser localStorage.
 - PTYs default to 100 columns × 30 rows when no valid attached-terminal size is available, accept sizes from 20–500 columns and 5–300 rows, retain 2 MiB backend scrollback per session, and accept terminal input messages up to 64 KiB.
 - The browser terminal retains 10,000 rendered rows, uses 13 px text below 600 px viewport width and 14 px otherwise, and polls the dashboard every 2.5 seconds.
 - The relay permits eight simultaneous browser sockets and 5 MiB encrypted packets. Each browser channel permits either one VNC desktop or one selected-window stream.
@@ -374,8 +376,11 @@ After login, the portal dashboard automatically shows every managed terminal and
 - If iOS suspends the connection while opening Photos or Files, Termlinks keeps the current terminal and draft visible while the encrypted bridge reconnects. Upload waits for that bridge instead of replacing the screen with login; a successfully uploaded attachment stays in the composer, and its Send arrow becomes available again as soon as the terminal is live. Composer submit sends the text/path plus Enter as one ordered PTY message and keeps the keyboard open, avoiding the WebKit resize that could black out xterm immediately after Send.
 - If a newly deployed AI Work page reaches an older daemon that is still preserving active PTYs, it shows a clear compatibility card and **Return to terminals** action. It also resumes into the terminal dashboard next time instead of trapping the PWA on the unavailable feature. Finish or stop important sessions before restarting the daemon to activate the newer local API.
 - Terminal text stays in the terminal—there is no copy popup. Press and hold rendered output to use the browser's native text selection and Copy action. **Copy visible terminal output** remains available in the terminal's `•••` menu instead of occupying the keyboard-control strip.
-- The header shows the number of running sessions. Finished and explicitly closed sessions are removed from the dashboard automatically.
-- Each card shows the session name, command, directory, runtime, and status.
+- The header shows the number of running, favorite, and recent sessions. Finished and explicitly closed sessions leave Running and move into Recent using the daemon-recorded completion time.
+- Running cards show the live command, directory, runtime, and status. Saved cards deliberately omit command arguments so secrets passed on a process command line are not persisted.
+- Favorites and the ten most recent non-favorites live in the computer's private `terminal-history.db`, not in the browser or Cloudflare. This makes the same list available from an authenticated PWA, another phone, or the local portal. Removing browser data does not erase computer-side history.
+- **Open new shell** starts the normal interactive shell in the saved directory and opens the corresponding native terminal window on the computer. **New copy shell** does the same with a copy-style name. Neither action reruns an old command automatically.
+- Rename and Favorite/Unfavorite changes travel through the same authenticated E2E bridge as terminal control. A running favorite is shown once under Running instead of being duplicated in the Favorites section.
 - Select **Open terminal** to view and type in that terminal.
 - Select **Send file** to transfer images, PDFs, archives, or other files to `~/Downloads/Termlinks Uploads` on the computer. Transfers are E2E encrypted in cloud mode, filenames are validated, and duplicate names receive ` (1)`, ` (2)`, and so on.
 - Select **Stop & close** to terminate a running command after confirmation.

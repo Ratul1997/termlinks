@@ -3,6 +3,16 @@ import { Terminal } from "@xterm/xterm";
 import RFB from "@novnc/novnc";
 import "@xterm/xterm/css/xterm.css";
 import { base64URLToBytes, bytesToBase64URL, decryptPacket, deriveEncryptionKey, encryptPacket } from "./e2e";
+import {
+  decodeTerminalHistory,
+  duplicateTerminalName,
+  MAX_TERMINAL_NAME_LENGTH,
+  projectLabel,
+  savedActivityTime,
+  savedSessionID,
+  visibleSavedGroups,
+  type SavedTerminal,
+} from "./terminal-history";
 import "./style.css";
 
 type Session = {
@@ -59,23 +69,9 @@ type WorkflowDraft = { request: string; cwd: string; stages: WorkflowStage[] };
 
 type WorkspaceSuggestion = { path: string; name: string; lastUsedAt: string };
 
-type SavedTerminal = {
-  id: string;
-  sourceSessionId?: string;
-  name: string;
-  command: string[];
-  cwd: string;
-  favorite: boolean;
-  createdAt: string;
-  updatedAt: string;
-  lastOpenedAt: string;
-  lastClosedAt?: string;
-};
-
 type TerminalTemplate = {
   name: string;
   cwd: string;
-  command: string[];
 };
 
 type StatusMessage = {
@@ -168,14 +164,11 @@ function readLastPortalView(): { view: PortalView; selected?: string; selectedWo
 
 const lastPortalView = readLastPortalView();
 
-const SAVED_TERMINALS_STORAGE_KEY = "termlinks-saved-terminals-v1";
-const MAX_RECENT_TERMINALS = 10;
-const MAX_TERMINAL_NAME_LENGTH = 80;
-
 const state: {
   authenticated: boolean;
   sessions: Session[];
   savedTerminals: SavedTerminal[];
+  terminalHistoryAvailable: boolean;
   selected?: string;
   socket?: TerminalLink;
   terminal?: Terminal;
@@ -195,7 +188,7 @@ const state: {
   view: PortalView;
   selectedWorkflow?: string;
 } = {
-  authenticated: false, sessions: [], savedTerminals: loadSavedTerminals(), terminalReconnectAttempts: 0, closedSessions: new Set(),
+  authenticated: false, sessions: [], savedTerminals: [], terminalHistoryAvailable: true, terminalReconnectAttempts: 0, closedSessions: new Set(),
   view: lastPortalView.view, selected: lastPortalView.selected, selectedWorkflow: lastPortalView.selectedWorkflow,
 };
 
@@ -211,6 +204,10 @@ const PORTAL_KEY_STORE = "keys";
 const PORTAL_KEY_ID = "portal-e2e-key";
 const TERMINAL_TAB_ORDER_KEY = "termlinks-terminal-tab-order-v1";
 const MAX_PERSISTED_TERMINAL_TABS = 64;
+
+// Remove metadata written by the unmerged browser-local history prototype.
+// Persistent history now lives only in the user's local Termlinks database.
+try { localStorage.removeItem("termlinks-saved-terminals-v1"); } catch { /* Storage can be unavailable in private browsing. */ }
 
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
@@ -769,117 +766,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function loadSavedTerminals(): SavedTerminal[] {
-  try {
-    const raw = localStorage.getItem(SAVED_TERMINALS_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    const now = new Date().toISOString();
-    const loaded: SavedTerminal[] = [];
-    for (const value of parsed) {
-      if (!isRecord(value) || typeof value.name !== "string" || typeof value.cwd !== "string") continue;
-      const command = Array.isArray(value.command) && value.command.every((part) => typeof part === "string")
-        ? value.command.slice(0, 16) as string[]
-        : [];
-      const createdAt = normalizedDate(value.createdAt, now);
-      const updatedAt = normalizedDate(value.updatedAt, createdAt);
-      const lastOpenedAt = normalizedDate(value.lastOpenedAt, updatedAt);
-      const lastClosedAt = normalizedOptionalDate(value.lastClosedAt);
-      loaded.push({
-        id: typeof value.id === "string" && value.id ? value.id : newSavedTerminalID(),
-        sourceSessionId: typeof value.sourceSessionId === "string" && value.sourceSessionId ? value.sourceSessionId : undefined,
-        name: value.name.trim().slice(0, MAX_TERMINAL_NAME_LENGTH) || "Terminal",
-        command,
-        cwd: value.cwd,
-        favorite: value.favorite === true,
-        createdAt,
-        updatedAt,
-        lastOpenedAt,
-        lastClosedAt,
-      });
-    }
-    return pruneSavedTerminals(loaded);
-  } catch {
-    return [];
-  }
-}
-
-function saveSavedTerminals(): void {
-  try {
-    localStorage.setItem(SAVED_TERMINALS_STORAGE_KEY, JSON.stringify(state.savedTerminals));
-  } catch {
-    // Private browsing or full storage should not break active terminal use.
-  }
-}
-
-function commitSavedTerminals(next: SavedTerminal[]): void {
-  state.savedTerminals = pruneSavedTerminals(next);
-  saveSavedTerminals();
-}
-
-function pruneSavedTerminals(items: SavedTerminal[]): SavedTerminal[] {
-  const byID = new Map<string, SavedTerminal>();
-  for (const item of items) byID.set(item.id, item);
-  const deduped = Array.from(byID.values());
-  const recent = deduped
-    .filter((item) => !item.favorite)
-    .sort((a, b) => savedActivityTime(b) - savedActivityTime(a))
-    .slice(0, MAX_RECENT_TERMINALS);
-  const recentIDs = new Set(recent.map((item) => item.id));
-  return deduped
-    .filter((item) => item.favorite || recentIDs.has(item.id))
-    .sort((a, b) => savedActivityTime(b) - savedActivityTime(a));
-}
-
-function saveSessionSnapshot(session: Session, options: { savedId?: string; favorite?: boolean; opened?: boolean; closed?: boolean } = {}): SavedTerminal {
-  const now = new Date().toISOString();
-  const existing = (options.savedId ? state.savedTerminals.find((item) => item.id === options.savedId) : undefined)
-    ?? state.savedTerminals.find((item) => item.sourceSessionId === session.id)
-    ?? state.savedTerminals.find((item) => item.name === session.name && item.cwd === session.cwd && !runningSessionForSaved(item));
-  const saved: SavedTerminal = {
-    id: existing?.id ?? newSavedTerminalID(),
-    sourceSessionId: session.id,
-    name: session.name,
-    command: session.command.slice(),
-    cwd: session.cwd,
-    favorite: options.favorite ?? existing?.favorite ?? false,
-    createdAt: existing?.createdAt ?? now,
-    updatedAt: now,
-    lastOpenedAt: options.opened ? now : existing?.lastOpenedAt ?? now,
-    lastClosedAt: options.closed ? now : existing?.lastClosedAt,
-  };
-  commitSavedTerminals([...state.savedTerminals.filter((item) => item.id !== saved.id), saved]);
-  return saved;
-}
-
-function markSavedOpened(saved: SavedTerminal, session: Session): void {
-  saveSessionSnapshot(session, { savedId: saved.id, favorite: saved.favorite, opened: true });
-}
-
-function updateSavedSessionName(sessionID: string, name: string): void {
-  const next = state.savedTerminals.map((item) => (
-    item.sourceSessionId === sessionID ? { ...item, name, updatedAt: new Date().toISOString() } : item
-  ));
-  commitSavedTerminals(next);
-}
-
-function updateSavedTerminal(saved: SavedTerminal, changes: Partial<Pick<SavedTerminal, "name" | "favorite" | "sourceSessionId" | "lastOpenedAt" | "lastClosedAt">>): void {
-  commitSavedTerminals(state.savedTerminals.map((item) => (
-    item.id === saved.id ? { ...item, ...changes, updatedAt: new Date().toISOString() } : item
-  )));
-}
-
-function removeSavedTerminal(saved: SavedTerminal): void {
-  commitSavedTerminals(state.savedTerminals.filter((item) => item.id !== saved.id));
-}
-
 function savedTerminalBySession(session: Session): SavedTerminal | undefined {
-  return state.savedTerminals.find((item) => item.sourceSessionId === session.id);
+  return state.savedTerminals.find((item) => item.sourceSessionId === session.id || item.activeSessionId === session.id);
 }
 
 function runningSessionForSaved(saved: SavedTerminal): Session | undefined {
-  return saved.sourceSessionId ? state.sessions.find((item) => item.id === saved.sourceSessionId && item.running) : undefined;
+  return state.sessions.find((item) => item.id === savedSessionID(saved) && item.running);
 }
 
 function favoriteSavedTerminals(): SavedTerminal[] {
@@ -887,30 +779,47 @@ function favoriteSavedTerminals(): SavedTerminal[] {
 }
 
 function recentSavedTerminals(): SavedTerminal[] {
-  return state.savedTerminals
-    .filter((item) => !item.favorite && !runningSessionForSaved(item))
-    .sort((a, b) => savedActivityTime(b) - savedActivityTime(a));
+  return visibleSavedGroups(state.savedTerminals, new Set(state.sessions.map((item) => item.id))).recent;
 }
 
-function normalizedDate(value: unknown, fallback: string): string {
-  if (typeof value !== "string") return fallback;
-  const time = Date.parse(value);
-  return Number.isFinite(time) ? new Date(time).toISOString() : fallback;
+async function loadTerminalHistory(): Promise<void> {
+  try {
+    const response = await api<unknown>("/api/terminal-history");
+    state.savedTerminals = decodeTerminalHistory(response);
+    state.terminalHistoryAvailable = true;
+  } catch (caught) {
+    const message = caught instanceof Error ? caught.message : "";
+    const compatibilityError = message.includes("updated local Termlinks service") ||
+      message.includes("terminal history is unavailable") || message.includes("API route is not allowed");
+    if (!compatibilityError) throw caught;
+    state.savedTerminals = [];
+    state.terminalHistoryAvailable = false;
+  }
 }
 
-function normalizedOptionalDate(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const time = Date.parse(value);
-  return Number.isFinite(time) ? new Date(time).toISOString() : undefined;
+function replaceSavedTerminal(updated: SavedTerminal): void {
+  state.savedTerminals = [updated, ...state.savedTerminals.filter((item) => item.id !== updated.id)];
 }
 
-function savedActivityTime(saved: SavedTerminal): number {
-  return Date.parse(saved.lastClosedAt ?? saved.lastOpenedAt ?? saved.updatedAt ?? saved.createdAt) || 0;
+function decodeSavedTerminal(value: unknown): SavedTerminal {
+  const [decoded] = decodeTerminalHistory({ terminals: [value] });
+  if (!decoded) throw new Error("Your computer returned invalid terminal history");
+  return decoded;
 }
 
-function newSavedTerminalID(): string {
-  if (crypto.randomUUID) return crypto.randomUUID();
-  return `saved-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+async function updateSavedTerminal(saved: SavedTerminal, changes: { name?: string; favorite?: boolean }): Promise<SavedTerminal> {
+  const response = await api<unknown>(`/api/terminal-history/${encodeURIComponent(saved.id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(changes),
+  });
+  const updated = decodeSavedTerminal(response);
+  replaceSavedTerminal(updated);
+  return updated;
+}
+
+async function removeSavedTerminal(saved: SavedTerminal): Promise<void> {
+  await api(`/api/terminal-history/${encodeURIComponent(saved.id)}`, { method: "DELETE" });
+  state.savedTerminals = state.savedTerminals.filter((item) => item.id !== saved.id);
 }
 
 function normalizeTerminalNameInput(value: string | null): string | undefined {
@@ -927,11 +836,6 @@ function normalizeTerminalNameInput(value: string | null): string | undefined {
   return name;
 }
 
-function projectLabel(cwd: string): string {
-  const trimmed = cwd.trim().replace(/\/+$/, "");
-  if (!trimmed || trimmed === "/") return "/";
-  return trimmed.split("/").filter(Boolean).pop() ?? trimmed;
-}
 
 function openPortalKeyDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -1105,6 +1009,9 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     } catch {
       if (isWorkflowAPIPath(path)) {
         throw new Error("AI Work needs the updated local Termlinks service");
+      }
+      if (path.startsWith("/api/terminal-history")) {
+        throw new Error("Terminal history needs the updated local Termlinks service");
       }
       throw new Error("Your computer returned an invalid response");
     }
@@ -1366,10 +1273,8 @@ function renderLogin(message = ""): void {
 
 async function loadSessions(): Promise<void> {
   const response = await api<{ sessions: Session[] }>("/api/sessions");
-  for (const session of response.sessions) {
-    if (!session.running && !state.closedSessions.has(session.id)) saveSessionSnapshot(session, { closed: true });
-  }
   state.sessions = response.sessions.filter((session) => session.running && !state.closedSessions.has(session.id));
+  await loadTerminalHistory();
 }
 
 function renderSessions(): void {
@@ -2448,7 +2353,6 @@ function renderCreatePanel(close: () => void): HTMLElement {
       const created = await createTerminalFromTemplate({
         name: name.value.trim(),
         cwd: cwd.value.trim(),
-        command: [],
       });
       renderTerminal(created.id);
     } catch (caught) {
@@ -2473,7 +2377,6 @@ async function createTerminalFromTemplate(template: TerminalTemplate): Promise<S
 async function openSavedTerminal(saved: SavedTerminal, button?: HTMLButtonElement): Promise<void> {
   const running = runningSessionForSaved(saved);
   if (running) {
-    markSavedOpened(saved, running);
     renderTerminal(running.id);
     return;
   }
@@ -2483,8 +2386,9 @@ async function openSavedTerminal(saved: SavedTerminal, button?: HTMLButtonElemen
     button.textContent = "Opening…";
   }
   try {
-    const created = await createTerminalFromTemplate(saved);
-    markSavedOpened(saved, created);
+    const created = await api<Session>(`/api/terminal-history/${encodeURIComponent(saved.id)}/open`, { method: "POST" });
+    state.sessions = [created, ...state.sessions.filter((item) => item.id !== created.id)];
+    await loadTerminalHistory();
     renderTerminal(created.id);
   } catch (caught) {
     if (button) {
@@ -2525,7 +2429,7 @@ async function renameRunningSession(session: Session, forcedName?: string): Prom
     body: JSON.stringify({ name }),
   });
   state.sessions = state.sessions.map((item) => item.id === updated.id ? updated : item);
-  updateSavedSessionName(updated.id, updated.name);
+  await loadTerminalHistory();
   return updated;
 }
 
@@ -2541,7 +2445,12 @@ async function renameSavedTerminal(saved: SavedTerminal): Promise<void> {
       return;
     }
   } else {
-    updateSavedTerminal(saved, { name });
+    try {
+      await updateSavedTerminal(saved, { name });
+    } catch (caught) {
+      window.alert(caught instanceof Error ? caught.message : "Could not rename the saved terminal.");
+      return;
+    }
   }
   const container = document.querySelector<HTMLElement>("#session-list");
   if (container) {
@@ -2550,21 +2459,16 @@ async function renameSavedTerminal(saved: SavedTerminal): Promise<void> {
   }
 }
 
-function duplicateTerminalName(name: string): string {
-  const base = name.trim() || "Terminal";
-  const suffix = " Copy";
-  if (base.length + suffix.length <= MAX_TERMINAL_NAME_LENGTH) return `${base}${suffix}`;
-  return `${base.slice(0, MAX_TERMINAL_NAME_LENGTH - suffix.length).trimEnd()}${suffix}`;
-}
-
 function renderStartHint(): HTMLElement {
   const hint = el("aside", "start-hint");
   const icon = el("span", "hint-icon", "+");
   const copy = el("div");
   copy.append(
-    el("strong", "hint-title", "Your shells stay managed"),
-    el("p", "hint-copy", "Leaving this page only disconnects the viewer. A terminal moves to Recent history after it exits or you stop it."),
-    el("code", "hint-command", "termlinks list  ·  termlinks stop <id>"),
+    el("strong", "hint-title", state.terminalHistoryAvailable ? "Your shells stay managed" : "Terminal history needs a local update"),
+    el("p", "hint-copy", state.terminalHistoryAvailable
+      ? "Leaving this page only disconnects the viewer. A terminal moves to Recent history after it exits or you stop it. History and favorites stay privately on this computer."
+      : "Running terminals are safe and still available. Restart Termlinks after finishing active work to enable private history and favorites."),
+    el("code", "hint-command", state.terminalHistoryAvailable ? "termlinks list  ·  termlinks stop <id>" : "termlinks update  ·  termlinks restart"),
   );
   hint.append(icon, copy);
   return hint;
@@ -2589,11 +2493,12 @@ function renderTermAdsTeaser(): HTMLElement {
 }
 
 function renderSessionCards(container: HTMLElement): void {
+  const groups = visibleSavedGroups(state.savedTerminals, new Set(state.sessions.map((item) => item.id)));
   container.replaceChildren();
   container.append(
     renderRunningTerminalSection(),
-    renderSavedTerminalSection("Favorites", favoriteSavedTerminals()),
-    renderSavedTerminalSection("Recent history", recentSavedTerminals()),
+    renderSavedTerminalSection("Favorites", groups.favorites),
+    renderSavedTerminalSection("Recent history", groups.recent),
   );
 }
 
@@ -2673,8 +2578,9 @@ function renderRunningSessionCard(session: Session): HTMLElement {
   const favoriteAction = el("button", "card-action", savedTerminalBySession(session)?.favorite ? "Unfavorite" : "Favorite");
   favoriteAction.type = "button";
   favoriteAction.addEventListener("click", () => {
-    toggleFavoriteForSession(session);
-    refreshDashboardCards();
+    void toggleFavoriteForSession(session)
+      .then(refreshDashboardCards)
+      .catch((caught) => window.alert(caught instanceof Error ? caught.message : "Could not update favorite."));
   });
   const stopAction = el("button", "card-action danger", "Stop & close");
   stopAction.type = "button";
@@ -2689,7 +2595,7 @@ function renderSavedTerminalCard(saved: SavedTerminal): HTMLElement {
   const card = el("article", "session-card saved-terminal-card");
   const open = el("button", "session-open");
   open.type = "button";
-  open.setAttribute("aria-label", `${running ? "Open" : "Reconnect"} ${saved.name} terminal`);
+  open.setAttribute("aria-label", `${running ? "Open" : "Open a new shell for"} ${saved.name}`);
   open.addEventListener("click", () => { void openSavedTerminal(saved); });
   const row = el("div", "session-card-row");
   const identity = el("div", "session-identity");
@@ -2698,7 +2604,7 @@ function renderSavedTerminalCard(saved: SavedTerminal): HTMLElement {
   identity.append(el("span", `session-dot ${running ? "live" : "ended"}`), folder, el("h2", "session-name", saved.name));
   const badge = el("span", `status-badge ${running ? "running" : saved.favorite ? "favorite" : "finished"}`, running ? "RUNNING" : saved.favorite ? "FAVORITE" : "RECENT");
   row.append(identity, badge);
-  const command = el("code", "session-command", saved.command.length ? `$ ${saved.command.join(" ")}` : "$ shell");
+  const command = el("code", "session-command", running ? `$ ${running.command.join(" ")}` : "$ new interactive shell");
   const meta = el("div", "session-meta");
   const cwd = el("span", "cwd", compactPath(saved.cwd));
   cwd.title = saved.cwd;
@@ -2706,45 +2612,53 @@ function renderSavedTerminalCard(saved: SavedTerminal): HTMLElement {
   open.append(row, command, meta);
 
   const controls = el("div", "card-controls");
-  const openAction = el("button", "card-action", running ? "Open terminal" : "Reconnect");
+  const openAction = el("button", "card-action", running ? "Open terminal" : "Open new shell");
   openAction.type = "button";
   openAction.addEventListener("click", () => { void openSavedTerminal(saved, openAction); });
   const renameAction = el("button", "card-action", "Rename");
   renameAction.type = "button";
   renameAction.addEventListener("click", () => { void renameSavedTerminal(saved); });
-  const duplicateAction = el("button", "card-action", "Duplicate");
+  const duplicateAction = el("button", "card-action", "New copy shell");
   duplicateAction.type = "button";
   duplicateAction.addEventListener("click", () => { void duplicateTerminal(saved, duplicateAction); });
   const favoriteAction = el("button", "card-action", saved.favorite ? "Unfavorite" : "Favorite");
   favoriteAction.type = "button";
   favoriteAction.addEventListener("click", () => {
-    toggleFavoriteForSaved(saved);
-    refreshDashboardCards();
+    void toggleFavoriteForSaved(saved)
+      .then(refreshDashboardCards)
+      .catch((caught) => window.alert(caught instanceof Error ? caught.message : "Could not update favorite."));
   });
   const removeAction = el("button", "card-action danger", "Remove");
   removeAction.type = "button";
   removeAction.addEventListener("click", () => {
     if (!window.confirm(`Remove "${saved.name}" from saved terminals?`)) return;
-    removeSavedTerminal(saved);
-    refreshDashboardCards();
+    void removeSavedTerminal(saved)
+      .then(refreshDashboardCards)
+      .catch((caught) => window.alert(caught instanceof Error ? caught.message : "Could not remove saved terminal."));
   });
   controls.append(openAction, renameAction, duplicateAction, favoriteAction, removeAction);
   card.append(open, controls);
   return card;
 }
 
-function toggleFavoriteForSession(session: Session): void {
+async function toggleFavoriteForSession(session: Session): Promise<void> {
   const saved = savedTerminalBySession(session);
   if (saved?.favorite) {
-    if (saved.lastClosedAt) updateSavedTerminal(saved, { favorite: false });
-    else removeSavedTerminal(saved);
+    if (saved.lastClosedAt) await updateSavedTerminal(saved, { favorite: false });
+    else await removeSavedTerminal(saved);
     return;
   }
-  saveSessionSnapshot(session, { favorite: true, opened: true });
+  if (saved) {
+    await updateSavedTerminal(saved, { favorite: true });
+    return;
+  }
+  const response = await api<unknown>(`/api/terminal-history/session/${encodeURIComponent(session.id)}/favorite`, { method: "POST" });
+  const created = decodeSavedTerminal(response);
+  replaceSavedTerminal(created);
 }
 
-function toggleFavoriteForSaved(saved: SavedTerminal): void {
-  updateSavedTerminal(saved, { favorite: !saved.favorite });
+async function toggleFavoriteForSaved(saved: SavedTerminal): Promise<void> {
+  await updateSavedTerminal(saved, { favorite: !saved.favorite });
 }
 
 function refreshDashboardCards(): void {
@@ -2760,7 +2674,6 @@ async function stopFromDashboard(session: Session, button: HTMLButtonElement): P
   button.textContent = "Stopping…";
   try {
     await api(`/api/sessions/${encodeURIComponent(session.id)}/stop`, { method: "POST" });
-    saveSessionSnapshot(session, { closed: true });
     state.closedSessions.add(session.id);
     state.sessions = state.sessions.filter((item) => item.id !== session.id);
     const container = document.querySelector<HTMLElement>("#session-list");
@@ -2870,10 +2783,13 @@ function renderTerminal(id: string, workflowID?: string): void {
   favorite.type = "button";
   favorite.addEventListener("click", () => {
     actions.classList.remove("open");
-    toggleFavoriteForSession(session);
-    favorite.textContent = savedTerminalBySession(session)?.favorite ? "Remove from favorites" : "Add to favorites";
+    void toggleFavoriteForSession(session)
+      .then(() => {
+        favorite.textContent = savedTerminalBySession(session)?.favorite ? "Remove from favorites" : "Add to favorites";
+      })
+      .catch((caught) => setConnectionState(caught instanceof Error ? caught.message : "Could not update favorite", "warning"));
   });
-  const duplicate = el("button", "menu-button", "Duplicate terminal");
+  const duplicate = el("button", "menu-button", "Open copy shell");
   duplicate.type = "button";
   duplicate.addEventListener("click", () => {
     actions.classList.remove("open");
@@ -2887,7 +2803,6 @@ function renderTerminal(id: string, workflowID?: string): void {
     if (!window.confirm(`Stop “${session.name}”?`)) return;
     try {
       await api(`/api/sessions/${encodeURIComponent(session.id)}/stop`, { method: "POST" });
-      saveSessionSnapshot(session, { closed: true });
       state.closedSessions.add(session.id);
       state.sessions = state.sessions.filter((item) => item.id !== session.id);
       renderSessions();
@@ -3623,7 +3538,7 @@ function connectTerminal(session: Session, automatic = false): void {
         if (message.type === "status" && !message.running) {
           session.running = false;
           session.exitCode = message.exitCode;
-          saveSessionSnapshot(session, { closed: true });
+          void loadTerminalHistory().catch(() => undefined);
           setConnectionState(message.exitCode === 0 ? "Exited successfully" : `Exited · code ${message.exitCode ?? "?"}`, "offline");
         }
       } catch { /* Ignore unknown text control messages. */ }

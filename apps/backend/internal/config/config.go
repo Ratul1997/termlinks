@@ -29,6 +29,7 @@ type Paths struct {
 	CloudPID          string
 	CloudLog          string
 	WorkflowsDB       string
+	TerminalHistoryDB string
 	WorkflowArtifacts string
 	WorkflowWorktrees string
 }
@@ -68,6 +69,7 @@ func ResolvePaths() (Paths, error) {
 		CloudPID:          filepath.Join(dir, "cloud.pid"),
 		CloudLog:          filepath.Join(dir, "cloud.log"),
 		WorkflowsDB:       filepath.Join(dir, "workflows.db"),
+		TerminalHistoryDB: filepath.Join(dir, "terminal-history.db"),
 		WorkflowArtifacts: filepath.Join(dir, "workflow-artifacts"),
 		WorkflowWorktrees: filepath.Join(dir, "workflow-worktrees"),
 	}, nil

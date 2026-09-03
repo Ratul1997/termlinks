@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "node scripts/build.mjs --serve",
     "build": "tsc --noEmit && node scripts/build.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/test-terminal-history.mjs"
   },
   "dependencies": {
     "@novnc/novnc": "1.7.0",

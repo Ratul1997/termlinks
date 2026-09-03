@@ -30,6 +30,7 @@ import (
 	"termlinks/backend/internal/selfupdate"
 	"termlinks/backend/internal/server"
 	"termlinks/backend/internal/session"
+	"termlinks/backend/internal/terminalhistory"
 	"termlinks/backend/internal/visibleterminal"
 	"termlinks/backend/internal/windowcapture"
 )
@@ -658,6 +659,19 @@ func runDaemon(args []string) error {
 	workflowManager := coordinator.NewManager(workflowStore, manager, logger, openVisibleTerminal)
 	defer workflowManager.Close()
 	handlers.SetCoordinator(workflowManager)
+	terminalHistory, err := terminalhistory.Open(paths.TerminalHistoryDB)
+	if err != nil {
+		return err
+	}
+	defer terminalHistory.Close()
+	handlers.SetTerminalHistory(terminalHistory)
+	manager.SetEndObserver(func(info session.Info) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := terminalHistory.RecordEnded(ctx, info); err != nil {
+			logger.Warn("could not record completed terminal", "session", info.ID, "error", err)
+		}
+	})
 	go func() {
 		refreshContext, refreshCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer refreshCancel()
