@@ -80,7 +80,7 @@ Daemon creates PTY ─► starts child process in requested cwd
 
 The local CLI then attaches through a WebSocket on the same Unix socket unless `--detach` was supplied.
 
-An authenticated browser may instead send `{name, cwd}`. The daemon resolves the user's normal shell, creates it on a PTY through the private Unix control socket, and returns the new session ID. The browser immediately attaches. Termlinks also launches the computer's native terminal application with `termlinks attach <session-id>`, so the phone and local window are simultaneous viewers of the same PTY and retained history. Closing either viewer does not terminate that shell.
+An authenticated browser may instead send `{name, cwd}`. The connector forwards that request to the daemon's authenticated web API; the daemon resolves the user's normal shell, creates it on a PTY, and returns the new session ID. The browser immediately attaches. The daemon also launches the computer's native terminal application with `termlinks attach <session-id>` unless it was started with `--headless`, so the phone and local window are simultaneous viewers of the same PTY and retained history. The connector never launches a native window itself. Closing either viewer does not terminate that shell; when the managed shell ends, the dedicated native attachment exits cleanly instead of leaving an idle prompt. During a rolling update from an older daemon that rejects browser creation, the connector may create the PTY through the private Unix control socket, but it still remains headless until the daemon is safely restarted onto the current version.
 
 ## Browser attachment flow
 

@@ -93,6 +93,21 @@ func TestResolveID(t *testing.T) {
 	}
 }
 
+func TestListDefaultsToRunningSessions(t *testing.T) {
+	items := []session.Info{
+		{ID: "running", Running: true},
+		{ID: "finished", Running: false},
+	}
+	running := filterListedSessions(items, false)
+	if len(running) != 1 || running[0].ID != "running" {
+		t.Fatalf("default list = %#v, want only the running session", running)
+	}
+	all := filterListedSessions(items, true)
+	if len(all) != 2 {
+		t.Fatalf("--all list length = %d, want 2", len(all))
+	}
+}
+
 func TestDesktopOptInPersistsAndRejectsNonLoopbackTargets(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TERMLINKS_STATE_DIR", dir)

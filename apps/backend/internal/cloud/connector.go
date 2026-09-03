@@ -31,7 +31,6 @@ import (
 	"termlinks/backend/internal/client"
 	"termlinks/backend/internal/config"
 	"termlinks/backend/internal/remote"
-	"termlinks/backend/internal/visibleterminal"
 	"termlinks/backend/internal/windowcapture"
 )
 
@@ -948,10 +947,6 @@ func (state *connectionState) handleHTTPRequest(channelID string, channel *brows
 		state.sendHTTPError(channelID, message.ID, http.StatusForbidden, "API route is not allowed")
 		return
 	}
-	if message.Method == http.MethodPost && message.Path == "/api/sessions" {
-		state.createInteractiveShell(channelID, message)
-		return
-	}
 	target, err := localURL(state.localOrigin, message.Path)
 	if err != nil {
 		state.sendHTTPError(channelID, message.ID, http.StatusBadRequest, "Invalid API path")
@@ -977,13 +972,37 @@ func (state *connectionState) handleHTTPRequest(channelID string, channel *brows
 		state.sendHTTPError(channelID, message.ID, http.StatusBadGateway, "Local portal response was too large")
 		return
 	}
+	// Daemons released before browser-created shells returned this exact
+	// response. Preserve that rolling-upgrade path through the private control
+	// socket, but never open a native window from the connector. A current
+	// daemon remains the sole owner of its visible/headless policy.
+	if message.Method == http.MethodPost && message.Path == "/api/sessions" && legacyRemoteCreationDisabled(response.StatusCode, responseBody) {
+		state.createLegacyInteractiveShell(channelID, message)
+		return
+	}
 	_ = state.sendEncrypted(channelID, httpResponseMessage{
 		Version: protocolVersion, Type: "http_response", ID: message.ID,
 		Status: response.StatusCode, Body: string(responseBody),
 	})
 }
 
-func (state *connectionState) createInteractiveShell(channelID string, message httpRequestMessage) {
+func legacyRemoteCreationDisabled(status int, body []byte) bool {
+	if status != http.StatusForbidden {
+		return false
+	}
+	var response struct {
+		Error string `json:"error"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&response) != nil || response.Error != "remote session creation is disabled" {
+		return false
+	}
+	var extra any
+	return errors.Is(decoder.Decode(&extra), io.EOF)
+}
+
+func (state *connectionState) createLegacyInteractiveShell(channelID string, message httpRequestMessage) {
 	request, err := remote.DecodeStartRequest(strings.NewReader(message.Body))
 	if err != nil {
 		state.sendHTTPError(channelID, message.ID, http.StatusBadRequest, err.Error())
@@ -999,7 +1018,6 @@ func (state *connectionState) createInteractiveShell(channelID string, message h
 		state.sendHTTPError(channelID, message.ID, http.StatusBadRequest, err.Error())
 		return
 	}
-	_ = visibleterminal.Open(created.ID)
 	body, err := json.Marshal(created)
 	if err != nil {
 		state.sendHTTPError(channelID, message.ID, http.StatusInternalServerError, "could not encode the new session")

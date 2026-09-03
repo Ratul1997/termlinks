@@ -25,7 +25,7 @@ func Open(sessionID string) error {
 	var command *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		attach := shellQuote(executable) + " attach " + shellQuote(sessionID)
+		attach := darwinAttachCommand(executable, sessionID)
 		script := `on run argv
 tell application "Terminal"
   activate
@@ -60,6 +60,13 @@ end run`
 	}
 	go func() { _ = command.Wait() }()
 	return nil
+}
+
+// darwinAttachCommand ends the dedicated interactive shell after detaching.
+// Terminal.app can then apply its normal close-on-clean-exit policy instead of
+// leaving an abandoned prompt behind after every managed session.
+func darwinAttachCommand(executable, sessionID string) string {
+	return shellQuote(executable) + " attach " + shellQuote(sessionID) + "; exit 0"
 }
 
 func shellQuote(value string) string {

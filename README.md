@@ -82,10 +82,11 @@ Start a command in the background without attaching the current terminal:
 termlinks -d -- python long_import.py
 ```
 
-List all managed sessions and their IDs:
+List running sessions and their IDs (or include completed entries explicitly):
 
 ```sh
 termlinks list
+termlinks list --all
 ```
 
 Attach a local terminal to an existing session:
@@ -100,7 +101,7 @@ Stop a managed session:
 termlinks stop <session-id>
 ```
 
-`termlinks list` shows both running and finished sessions. You can use the short ID displayed in that list with `attach` or `stop`.
+`termlinks list` shows running sessions. Use `termlinks list --all` to include the bounded set of completed sessions still retained for scrollback. You can use the short ID displayed in that list with `attach` or `stop`.
 
 Start the portal daemon manually in the foreground:
 
@@ -172,7 +173,7 @@ Termlinks intentionally has a small configuration surface. There is no hidden ap
 | `termlinks daemon --allow-public-bind` | Off | Allows an unspecified/public bind such as `0.0.0.0`. This is dangerous and does not add TLS; prefer an SSH/VPN/tunnel setup. |
 | Portal **New terminal → Name** | Empty/generated display name | Optional label, at most 80 characters. |
 | Portal **New terminal → Starting directory** | Home directory | Accepts `~`, `~/path`, or an absolute accessible directory, at most 4096 characters. Browser creation always opens the configured shell; commands are typed afterward. |
-| Portal-created native window | Enabled | A portal-created session also launches the platform terminal and runs `termlinks attach <opaque-session-id>`. There is currently no disable toggle; local CLI-created sessions keep their existing attach/detach behavior. |
+| Portal-created native window | Enabled unless `termlinks daemon --headless` is used | The daemon—not the cloud connector—owns this policy. A visible session launches the platform terminal and runs `termlinks attach <opaque-session-id>`; its dedicated shell exits cleanly when the managed session ends so it does not leave an abandoned prompt. Local CLI-created sessions keep their existing attach/detach behavior. |
 
 The selected port is persisted, so later automatic daemon and cloud-connector starts reuse it. If a daemon is already running on another port, Termlinks refuses to change the listener because restarting it would terminate active PTYs. Stop that daemon first, then select the new port. `termlinks doctor` shows the effective listener, state directory, daemon status, and version without revealing tokens.
 

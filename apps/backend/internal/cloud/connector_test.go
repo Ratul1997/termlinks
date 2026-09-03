@@ -8,8 +8,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,46 +124,48 @@ func TestEncryptedPacketRoundTripAndChannelBinding(t *testing.T) {
 	}
 }
 
-func TestEncryptedPortalCreatesInteractiveShellThroughControlSocket(t *testing.T) {
+func TestEncryptedPortalForwardsShellCreationToDaemonWebAPI(t *testing.T) {
+	const portalToken = "abcdefghijklmnopqrstuvwxyz1234567890"
 	manager := session.NewManager()
-	handler, err := server.New(manager, auth.New("unused"), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	temporary, err := os.MkdirTemp("/tmp", "tl-cloud-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(temporary) })
-	socketPath := filepath.Join(temporary, "control.sock")
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	httpServer := &http.Server{Handler: handler.ControlHandler()}
-	go func() { _ = httpServer.Serve(listener) }()
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = httpServer.Shutdown(ctx)
+	opened := make(chan string, 1)
+	handler, err := server.New(manager, auth.New(portalToken), slog.New(slog.NewTextHandler(io.Discard, nil)), func(id string) error {
+		opened <- id
+		return nil
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	web := httptest.NewServer(handler.WebHandler())
+	defer web.Close()
+	jar, _ := cookiejar.New(nil)
+	httpClient := &http.Client{Jar: jar}
+	login, _ := http.NewRequest(http.MethodPost, web.URL+"/api/login", strings.NewReader(`{"token":"`+portalToken+`"}`))
+	login.Header.Set("Origin", web.URL)
+	login.Header.Set("Content-Type", "application/json")
+	loginResponse, err := httpClient.Do(login)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loginResponse.Body.Close()
+	if loginResponse.StatusCode != http.StatusOK {
+		t.Fatalf("login status = %d", loginResponse.StatusCode)
+	}
 
 	channelID := "01234567-89ab-cdef-0123-456789abcdef"
-	key := deriveKey("abcdefghijklmnopqrstuvwxyz1234567890")
+	key := deriveKey(portalToken)
+	channel := &browserChannel{httpClient: httpClient}
 	state := &connectionState{
-		ctx:      context.Background(),
-		control:  client.New(socketPath),
-		key:      key,
-		outgoing: make(chan []byte, 1),
-		channels: map[string]*browserChannel{channelID: {}},
+		ctx: context.Background(), localOrigin: web.URL, key: key,
+		outgoing: make(chan []byte, 1), channels: map[string]*browserChannel{channelID: channel},
 	}
-	state.createInteractiveShell(channelID, httpRequestMessage{
+	payload, _ := json.Marshal(map[string]string{"name": "cloud shell", "cwd": t.TempDir()})
+	state.handleHTTPRequest(channelID, channel, httpRequestMessage{
 		Version: protocolVersion,
 		Type:    "http_request",
 		ID:      "11111111-1111-4111-8111-111111111111",
 		Method:  http.MethodPost,
 		Path:    "/api/sessions",
-		Body:    `{"name":"cloud shell","cwd":"` + t.TempDir() + `"}`,
+		Body:    string(payload),
 	})
 
 	var outer encryptedOuterMessage
@@ -186,7 +191,103 @@ func TestEncryptedPortalCreatesInteractiveShellThroughControlSocket(t *testing.T
 	if !ok || !created.Running || created.Name != "cloud shell" || len(created.Command) != 1 {
 		t.Fatalf("unexpected interactive shell: %#v", created)
 	}
+	select {
+	case openedID := <-opened:
+		if openedID != created.ID {
+			t.Fatalf("daemon opened visible terminal for %q, want %q", openedID, created.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cloud creation bypassed the daemon's visible-terminal policy")
+	}
 	t.Cleanup(func() { _ = current.Stop() })
+}
+
+func TestEncryptedPortalLegacyCreationFallbackDoesNotOwnVisibleWindows(t *testing.T) {
+	manager := session.NewManager()
+	handler, err := server.New(manager, auth.New("unused"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	temporary, err := os.MkdirTemp("/tmp", "tl-cloud-legacy-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(temporary) })
+	socketPath := filepath.Join(temporary, "control.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlServer := &http.Server{Handler: handler.ControlHandler()}
+	go func() { _ = controlServer.Serve(listener) }()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = controlServer.Shutdown(ctx)
+	})
+
+	legacyWeb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/sessions" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"error":"remote session creation is disabled"}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer legacyWeb.Close()
+
+	channelID := "01234567-89ab-cdef-0123-456789abcdef"
+	key := deriveKey("abcdefghijklmnopqrstuvwxyz1234567890")
+	channel := &browserChannel{httpClient: legacyWeb.Client()}
+	state := &connectionState{
+		ctx: context.Background(), localOrigin: legacyWeb.URL, control: client.New(socketPath), key: key,
+		outgoing: make(chan []byte, 1), channels: map[string]*browserChannel{channelID: channel},
+	}
+	payload, _ := json.Marshal(map[string]string{"name": "legacy cloud shell", "cwd": t.TempDir()})
+	state.handleHTTPRequest(channelID, channel, httpRequestMessage{
+		Version: protocolVersion, Type: "http_request", ID: "11111111-1111-4111-8111-111111111111",
+		Method: http.MethodPost, Path: "/api/sessions", Body: string(payload),
+	})
+
+	var outer encryptedOuterMessage
+	if err := json.Unmarshal(<-state.outgoing, &outer); err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := decryptPacket(key, channelID, "connector", 0, outer.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response httpResponseMessage
+	if err := json.Unmarshal(plaintext, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Status != http.StatusCreated {
+		t.Fatalf("legacy create status = %d: %s", response.Status, response.Body)
+	}
+	var created session.Info
+	if err := json.Unmarshal([]byte(response.Body), &created); err != nil {
+		t.Fatal(err)
+	}
+	current, ok := manager.Get(created.ID)
+	if !ok || !created.Running || created.Name != "legacy cloud shell" {
+		t.Fatalf("unexpected legacy interactive shell: %#v", created)
+	}
+	t.Cleanup(func() { _ = current.Stop() })
+}
+
+func TestLegacyCreationFallbackIsExact(t *testing.T) {
+	if !legacyRemoteCreationDisabled(http.StatusForbidden, []byte(`{"error":"remote session creation is disabled"}`)) {
+		t.Fatal("known legacy response did not enable the compatibility fallback")
+	}
+	for _, body := range []string{`{"error":"cross-origin request rejected"}`, `{"error":"remote session creation is disabled","extra":true}`, `not json`} {
+		if legacyRemoteCreationDisabled(http.StatusForbidden, []byte(body)) {
+			t.Fatalf("unsafe legacy fallback accepted %q", body)
+		}
+	}
+	if legacyRemoteCreationDisabled(http.StatusUnauthorized, []byte(`{"error":"remote session creation is disabled"}`)) {
+		t.Fatal("legacy fallback accepted the wrong HTTP status")
+	}
 }
 
 func TestEncryptedDesktopBridgesLoopbackVNCBytes(t *testing.T) {

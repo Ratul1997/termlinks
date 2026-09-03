@@ -56,7 +56,7 @@ func run(args []string) error {
 		case "daemon", "serve":
 			return runDaemon(args[1:])
 		case "list", "ls":
-			return listSessions()
+			return listSessions(args[1:])
 		case "attach":
 			if len(args) != 2 {
 				return errors.New("usage: termlinks attach <session-id>")
@@ -817,7 +817,14 @@ func flagWasSet(flags *flag.FlagSet, names ...string) bool {
 	return found
 }
 
-func listSessions() error {
+func listSessions(args []string) error {
+	flags := flag.NewFlagSet("list", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	showAll := flags.Bool("all", false, "include completed sessions retained for scrollback")
+	flags.BoolVar(showAll, "a", false, "include completed sessions retained for scrollback")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return errors.New("usage: termlinks list [--all]")
+	}
 	paths, err := readyDaemon()
 	if err != nil {
 		return err
@@ -826,11 +833,16 @@ func listSessions() error {
 	if err != nil {
 		return err
 	}
-	if len(items) == 0 {
-		fmt.Println("No sessions. Start one with: termlinks <command>")
+	visible := filterListedSessions(items, *showAll)
+	if len(visible) == 0 {
+		if *showAll {
+			fmt.Println("No sessions. Start one with: termlinks <command>")
+		} else {
+			fmt.Println("No running sessions. Use --all to include completed sessions.")
+		}
 		return nil
 	}
-	for _, item := range items {
+	for _, item := range visible {
 		status := "running"
 		if !item.Running {
 			status = "exited"
@@ -841,6 +853,16 @@ func listSessions() error {
 		fmt.Printf("%-10s  %-18s  %-12s  %s\n", shortID(item.ID), truncate(item.Name, 18), status, strings.Join(item.Command, " "))
 	}
 	return nil
+}
+
+func filterListedSessions(items []session.Info, showAll bool) []session.Info {
+	visible := make([]session.Info, 0, len(items))
+	for _, item := range items {
+		if item.Running || showAll {
+			visible = append(visible, item)
+		}
+	}
+	return visible
 }
 
 func attachSession(id string) error {
@@ -1016,7 +1038,8 @@ func printHelp() {
 Usage:
   termlinks [-p port] [-n name] [-d] [--] <command> [args...]
   termlinks                         Start your default shell
-  termlinks list                    List sessions
+  termlinks list                    List running sessions
+  termlinks list --all              Include completed sessions
   termlinks attach <id>             Reattach locally
   termlinks stop <id>               Gracefully stop a session
   termlinks token                   Print the private portal login token
