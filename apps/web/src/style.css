@@ -182,7 +182,10 @@ button { color: inherit; }
 .empty-copy { max-width: 330px; margin: auto; color: var(--muted); font-size: 13px; line-height: 1.5; }
 
 .workflow-page { width: min(100%, 920px); }
-.workflow-topbar { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; min-width: 0; }
+.workflow-topbar {
+  position: sticky; z-index: 4; top: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; min-width: 0;
+  background: rgba(8, 12, 10, .94); box-shadow: 0 8px 24px rgba(0, 0, 0, .16); backdrop-filter: blur(14px);
+}
 .workflow-topbar .brand { min-width: 0; justify-self: start; }
 .workflow-back-button {
   min-height: 38px; padding: 0 11px; border: 1px solid #334039; border-radius: 9px;

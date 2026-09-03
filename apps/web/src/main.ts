@@ -2991,17 +2991,27 @@ function renderTerminalComposer(): HTMLElement {
   const submit = (): void => {
     if (!input.value || section.dataset.connected !== "true") return;
     const value = input.value;
-    // Use xterm's paste path so full-screen terminal programs receive bracketed
-    // paste markers when they have enabled that mode, then submit with Enter.
-    state.terminal?.paste(value);
-    sendTerminalInput("\r");
+    // Send the composer value and Enter as one ordered PTY message. Calling
+    // xterm.paste() and then sending Enter separately can race a just-resumed
+    // encrypted link, clearing the composer after only one half was delivered.
+    const normalized = value.replace(/\r?\n/g, "\r");
+    const pasted = state.terminal?.modes.bracketedPasteMode
+      ? `\u001b[200~${normalized}\u001b[201~`
+      : normalized;
+    if (!sendTerminalInput(`${pasted}\r`)) {
+      const statusText = status.querySelector<HTMLElement>(".terminal-composer-state");
+      if (statusText) statusText.textContent = "Not sent · reconnecting";
+      const activeSession = state.sessions.find((session) => session.id === state.selected);
+      if (activeSession) scheduleTerminalReconnect(activeSession);
+      return;
+    }
     input.value = "";
     attachmentList.replaceChildren();
     attachmentList.hidden = true;
     syncSend();
-    // Submitting is a natural end to one mobile interaction. Release focus so
-    // iOS/Android dismiss the software keyboard and return space to the PTY.
-    if (document.activeElement === input) input.blur();
+    // Keep focus after submit. On iOS, blurring here closes the keyboard and
+    // resizes the visual viewport during xterm's redraw, which can leave the
+    // terminal canvas black even though the PTY is still connected.
   };
   input.addEventListener("input", () => {
     syncSend();
