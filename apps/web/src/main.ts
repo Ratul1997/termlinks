@@ -2032,11 +2032,16 @@ function renderTerminalTabs(activeSessionId: string): HTMLElement {
       }
       if (!active) renderTerminal(session.id);
     });
-    installTerminalTabReorder(tab, dragHandle, list);
+    tab.addEventListener("keydown", (event) => {
+      if (!event.altKey || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
+      event.preventDefault();
+      moveTerminalTabWithKeyboard(tab, list, event.key === "ArrowLeft" ? -1 : 1);
+    });
     list.append(tab);
     if (active) activeTab = tab;
   }
   updateTerminalTabPositions(list);
+  installTerminalTabRailGestures(list);
 
   const create = el("button", "terminal-tab-action terminal-tab-create", "+");
   create.type = "button";
@@ -2123,56 +2128,116 @@ function moveTerminalTabWithKeyboard(tab: HTMLButtonElement, list: HTMLElement, 
   tab.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
 }
 
-function installTerminalTabReorder(tab: HTMLButtonElement, handle: HTMLElement, list: HTMLElement): void {
+function installTerminalTabRailGestures(list: HTMLElement): void {
   let pointerId: number | undefined;
   let pressTimer = 0;
-  let dragging = false;
+  let reorderTab: HTMLButtonElement | undefined;
+  let pressedTab: HTMLButtonElement | undefined;
+  let scrolling = false;
   let startX = 0;
   let startY = 0;
+  let lastX = 0;
+  let lastTime = 0;
+  let velocity = 0;
+  let momentumFrame = 0;
 
   const clearPressTimer = (): void => {
     if (pressTimer) window.clearTimeout(pressTimer);
     pressTimer = 0;
   };
+  const stopMomentum = (): void => {
+    if (momentumFrame) window.cancelAnimationFrame(momentumFrame);
+    momentumFrame = 0;
+  };
   const beginDrag = (): void => {
     pressTimer = 0;
-    if (pointerId === undefined) return;
-    dragging = true;
-    tab.dataset.suppressClick = "true";
-    tab.classList.add("dragging");
+    if (pointerId === undefined || !pressedTab || scrolling) return;
+    reorderTab = pressedTab;
+    reorderTab.dataset.suppressClick = "true";
+    reorderTab.classList.add("dragging");
     list.classList.add("reordering");
-    try { handle.setPointerCapture(pointerId); } catch { /* Older WebKit may already own capture. */ }
   };
-  const finishDrag = (): void => {
+  const startMomentum = (): void => {
+    if (Math.abs(velocity) < 0.08) return;
+    let previous = performance.now();
+    const step = (now: number): void => {
+      const elapsed = Math.min(32, now - previous);
+      previous = now;
+      list.scrollLeft += velocity * elapsed;
+      velocity *= Math.pow(0.9, elapsed / 16.67);
+      if (Math.abs(velocity) >= 0.02) momentumFrame = window.requestAnimationFrame(step);
+      else momentumFrame = 0;
+    };
+    momentumFrame = window.requestAnimationFrame(step);
+  };
+  const finishGesture = (): void => {
     clearPressTimer();
-    if (dragging) {
+    if (reorderTab) {
       persistTerminalTabOrder(list);
       updateTerminalTabPositions(list);
     }
-    dragging = false;
-    tab.classList.remove("dragging");
+    reorderTab?.classList.remove("dragging");
     list.classList.remove("reordering");
+    if (scrolling) startMomentum();
+    if (pressedTab && (scrolling || reorderTab)) {
+      pressedTab.dataset.suppressClick = "true";
+      const tab = pressedTab;
+      window.setTimeout(() => { delete tab.dataset.suppressClick; }, 120);
+    }
     pointerId = undefined;
-    window.setTimeout(() => { delete tab.dataset.suppressClick; }, 0);
+    reorderTab = undefined;
+    pressedTab = undefined;
+    scrolling = false;
   };
   const onPointerDown = (event: PointerEvent): void => {
     if (event.pointerType === "mouse" && event.button !== 0) return;
+    const target = event.target instanceof Element ? event.target : undefined;
+    const tab = target?.closest<HTMLButtonElement>(".terminal-tab") || undefined;
+    stopMomentum();
     clearPressTimer();
     pointerId = event.pointerId;
+    pressedTab = tab;
     startX = event.clientX;
     startY = event.clientY;
-    pressTimer = window.setTimeout(beginDrag, event.pointerType === "mouse" ? 120 : 320);
+    lastX = event.clientX;
+    lastTime = performance.now();
+    velocity = 0;
+    scrolling = false;
+    reorderTab = undefined;
+    try { list.setPointerCapture(pointerId); } catch { /* Older WebKit can still deliver the gesture without capture. */ }
+    if (tab && target?.closest(".terminal-tab-drag-handle")) {
+      pressTimer = window.setTimeout(beginDrag, event.pointerType === "mouse" ? 120 : 320);
+    }
   };
   const onPointerMove = (event: PointerEvent): void => {
     if (pointerId !== event.pointerId) return;
-    if (!dragging) {
-      if (Math.hypot(event.clientX - startX, event.clientY - startY) > 10) {
+    if (!reorderTab) {
+      const horizontal = Math.abs(event.clientX - startX);
+      const vertical = Math.abs(event.clientY - startY);
+      if (!scrolling && (horizontal > 6 || vertical > 6)) {
         clearPressTimer();
-        pointerId = undefined;
+        if (horizontal <= vertical) {
+          // This fixed page has no vertical navigation gesture on the tab
+          // rail, but suppress the synthetic click after an aborted drag.
+          scrolling = true;
+          lastX = event.clientX;
+          lastTime = performance.now();
+          return;
+        }
+        scrolling = true;
       }
+      if (!scrolling) return;
+      if (event.cancelable) event.preventDefault();
+      const now = performance.now();
+      const elapsed = Math.max(1, now - lastTime);
+      const delta = lastX - event.clientX;
+      list.scrollLeft += delta;
+      velocity = (velocity * 0.65) + ((delta / elapsed) * 0.35);
+      lastX = event.clientX;
+      lastTime = now;
       return;
     }
-    event.preventDefault();
+    if (event.cancelable) event.preventDefault();
     const listRect = list.getBoundingClientRect();
     if (event.clientX < listRect.left + 34) list.scrollLeft -= 18;
     else if (event.clientX > listRect.right - 34) list.scrollLeft += 18;
@@ -2182,25 +2247,20 @@ function installTerminalTabReorder(tab: HTMLButtonElement, handle: HTMLElement, 
     for (const sibling of siblings) {
       const rect = sibling.getBoundingClientRect();
       if (event.clientX < rect.left + (rect.width / 2)) {
-        list.insertBefore(tab, sibling);
+        list.insertBefore(reorderTab, sibling);
         placed = true;
         break;
       }
     }
-    if (!placed) list.append(tab);
+    if (!placed) list.append(reorderTab);
     updateTerminalTabPositions(list);
   };
 
-  handle.addEventListener("pointerdown", onPointerDown);
-  handle.addEventListener("pointermove", onPointerMove);
-  handle.addEventListener("pointerup", finishDrag);
-  handle.addEventListener("pointercancel", finishDrag);
-  handle.addEventListener("lostpointercapture", finishDrag);
-  tab.addEventListener("keydown", (event) => {
-    if (!event.altKey || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
-    event.preventDefault();
-    moveTerminalTabWithKeyboard(tab, list, event.key === "ArrowLeft" ? -1 : 1);
-  });
+  list.addEventListener("pointerdown", onPointerDown);
+  list.addEventListener("pointermove", onPointerMove);
+  list.addEventListener("pointerup", finishGesture);
+  list.addEventListener("pointercancel", finishGesture);
+  list.addEventListener("lostpointercapture", finishGesture);
 }
 
 function installTerminalViewportSizing(page: HTMLElement): () => void {
@@ -2351,7 +2411,7 @@ function renderTerminalComposer(): HTMLElement {
   const attachmentList = el("div", "terminal-attachment-list");
   attachmentList.hidden = true;
   const input = el("textarea", "terminal-composer-input");
-  input.rows = 1;
+  input.rows = 3;
   input.wrap = "soft";
   input.placeholder = "Ask or type a command…";
   input.spellcheck = false;
@@ -2448,14 +2508,22 @@ function renderTerminalComposer(): HTMLElement {
     // Use xterm's paste path so full-screen terminal programs receive bracketed
     // paste markers when they have enabled that mode, then submit with Enter.
     state.terminal?.paste(value);
-    sendTerminalInput("\r");
+    // Always follow the pasted composer value with the PTY's Enter byte so
+    // shells and full-screen terminal programs submit it immediately.
+    if (!sendTerminalInput("\r")) return;
     input.value = "";
     attachmentList.replaceChildren();
     attachmentList.hidden = true;
     syncSend();
-    // Submitting is a natural end to one mobile interaction. Release focus so
-    // iOS/Android dismiss the software keyboard and return space to the PTY.
-    if (document.activeElement === input) input.blur();
+    // Keep the send button from retaining focus, then repeat the blur after
+    // the submit event. iOS can otherwise preserve its keyboard when focus
+    // moves from a textarea to the submit button during the same tap.
+    input.blur();
+    send.blur();
+    window.setTimeout(() => {
+      input.blur();
+      send.blur();
+    }, 0);
   };
   input.addEventListener("input", () => {
     syncSend();
@@ -2469,6 +2537,7 @@ function renderTerminalComposer(): HTMLElement {
     event.preventDefault();
     submit();
   });
+  send.addEventListener("pointerdown", (event) => event.preventDefault());
   attach.addEventListener("pointerdown", (event) => event.preventDefault());
   attach.addEventListener("click", chooseAttachments);
 
