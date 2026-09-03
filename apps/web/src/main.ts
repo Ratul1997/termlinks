@@ -125,7 +125,6 @@ const PORTAL_KEY_STORE = "keys";
 const PORTAL_KEY_ID = "portal-e2e-key";
 const TERMINAL_TAB_ORDER_KEY = "termlinks-terminal-tab-order-v1";
 const MAX_PERSISTED_TERMINAL_TABS = 64;
-const terminalComposerDrafts = new Map<string, string>();
 
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
@@ -2266,35 +2265,24 @@ function installTerminalTabRailGestures(list: HTMLElement): void {
 
 function installTerminalViewportSizing(page: HTMLElement): () => void {
   const viewport = window.visualViewport;
-  const standalone = window.matchMedia("(display-mode: standalone)").matches
-    || (navigator as Navigator & { standalone?: boolean }).standalone === true;
   document.documentElement.classList.add("terminal-active");
   let animationFrame = 0;
   let settleTimer = 0;
-  let lastLayout = "";
 
   const sync = (): void => {
     animationFrame = 0;
     if (document.visibilityState === "hidden") return;
     const height = viewport?.height ?? window.innerHeight;
-    // In an installed iOS PWA, visualViewport offsets can oscillate while
-    // WebKit pans to the focused textarea. Feeding those transient offsets
-    // back into a fixed page creates a focus/layout feedback loop. The PWA is
-    // already anchored to its standalone viewport, so only its height changes.
-    const width = standalone ? document.documentElement.clientWidth : (viewport?.width ?? document.documentElement.clientWidth);
+    const width = viewport?.width ?? document.documentElement.clientWidth;
     // WebKit can briefly report zero while a standalone PWA is suspended.
     // Keeping the last valid layout prevents the composer from collapsing.
     if (!Number.isFinite(height) || height < 160 || !Number.isFinite(width) || width < 240) return;
-    const offsetTop = standalone ? 0 : Math.max(0, viewport?.offsetTop ?? 0);
-    const offsetLeft = standalone ? 0 : Math.max(0, viewport?.offsetLeft ?? 0);
-    const rounded = [height, width, offsetTop, offsetLeft].map((value) => Math.round(value * 2) / 2);
-    const layout = rounded.join(":");
-    if (layout === lastLayout) return;
-    lastLayout = layout;
-    page.style.setProperty("--terminal-viewport-height", `${rounded[0]}px`);
-    page.style.setProperty("--terminal-viewport-top", `${rounded[2]}px`);
-    page.style.setProperty("--terminal-viewport-width", `${rounded[1]}px`);
-    page.style.setProperty("--terminal-viewport-left", `${rounded[3]}px`);
+    const offsetTop = Math.max(0, viewport?.offsetTop ?? 0);
+    const offsetLeft = Math.max(0, viewport?.offsetLeft ?? 0);
+    page.style.setProperty("--terminal-viewport-height", `${height}px`);
+    page.style.setProperty("--terminal-viewport-top", `${offsetTop}px`);
+    page.style.setProperty("--terminal-viewport-width", `${width}px`);
+    page.style.setProperty("--terminal-viewport-left", `${offsetLeft}px`);
     fitTerminal();
   };
   const schedule = (): void => {
@@ -2420,11 +2408,10 @@ function enableTouchScroll(terminal: Terminal): { cleanup: () => void; align: ()
 function renderTerminalComposer(): HTMLElement {
   const section = el("section", "terminal-composer");
   section.dataset.connected = "false";
-  const sessionId = state.selected;
   const attachmentList = el("div", "terminal-attachment-list");
   attachmentList.hidden = true;
   const input = el("textarea", "terminal-composer-input");
-  input.rows = 3;
+  input.rows = 1;
   input.wrap = "soft";
   input.placeholder = "Ask or type a command…";
   input.spellcheck = false;
@@ -2432,10 +2419,9 @@ function renderTerminalComposer(): HTMLElement {
   input.autocomplete = "off";
   input.setAttribute("enterkeyhint", "send");
   input.setAttribute("aria-label", "Terminal command or message");
-  if (sessionId) input.value = terminalComposerDrafts.get(sessionId) ?? "";
 
   const send = el("button", "terminal-composer-send", "↑");
-  send.type = "button";
+  send.type = "submit";
   send.disabled = true;
   send.setAttribute("aria-label", "Send to terminal");
   const attach = el("button", "terminal-attach-button", "+");
@@ -2519,16 +2505,11 @@ function renderTerminalComposer(): HTMLElement {
   const submit = (): void => {
     if (!input.value || section.dataset.connected !== "true") return;
     const value = input.value;
-    // Send the composer value and Enter in one ordered packet. This avoids a
-    // mobile tap racing two encrypted sends while preserving xterm's newline
-    // normalization and bracketed-paste behavior for full-screen programs.
-    const normalized = value.replace(/\r?\n/g, "\r");
-    const pasted = state.terminal?.modes.bracketedPasteMode
-      ? `\u001b[200~${normalized}\u001b[201~`
-      : normalized;
-    if (!sendTerminalInput(`${pasted}\r`)) return;
+    // Use xterm's paste path so full-screen terminal programs receive bracketed
+    // paste markers when they have enabled that mode, then submit with Enter.
+    state.terminal?.paste(value);
+    sendTerminalInput("\r");
     input.value = "";
-    if (sessionId) terminalComposerDrafts.delete(sessionId);
     attachmentList.replaceChildren();
     attachmentList.hidden = true;
     syncSend();
@@ -2537,10 +2518,6 @@ function renderTerminalComposer(): HTMLElement {
     if (document.activeElement === input) input.blur();
   };
   input.addEventListener("input", () => {
-    if (sessionId) {
-      if (input.value) terminalComposerDrafts.set(sessionId, input.value);
-      else terminalComposerDrafts.delete(sessionId);
-    }
     syncSend();
   });
   input.addEventListener("keydown", (event) => {
@@ -2550,22 +2527,6 @@ function renderTerminalComposer(): HTMLElement {
   });
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    submit();
-  });
-  let ignoreClickUntil = 0;
-  send.addEventListener("pointerdown", (event) => {
-    if (event.pointerType === "mouse" && event.button !== 0) return;
-    if (send.disabled) return;
-    // Submit before iOS starts moving the focused composer to dismiss its
-    // keyboard. A later click can otherwise be cancelled when the button's
-    // screen position changes between touch-down and touch-up.
-    event.preventDefault();
-    ignoreClickUntil = performance.now() + 750;
-    submit();
-  });
-  send.addEventListener("click", (event) => {
-    event.preventDefault();
-    if (performance.now() < ignoreClickUntil) return;
     submit();
   });
   attach.addEventListener("pointerdown", (event) => event.preventDefault());

@@ -344,20 +344,20 @@ button { color: inherit; }
   padding: 4px; border: 0; background: transparent;
 }
 .terminal-composer-input {
-  display: block; width: 100%; min-width: 0; height: 88px; min-height: 88px; max-height: 88px; padding: 10px 8px;
+  display: block; width: 100%; min-width: 0; height: 46px; min-height: 46px; max-height: 46px; padding: 12px 8px;
   overflow-x: hidden; overflow-y: auto; border: 0; border-radius: 11px; outline: none; resize: none;
   color: var(--ink); background: transparent; font: 14px/1.45 ui-monospace, "SFMono-Regular", "Cascadia Code", monospace;
   white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
   caret-color: var(--terminal-accent); -webkit-user-select: text; user-select: text; touch-action: manipulation;
 }
 .terminal-attach-button {
-  align-self: end; width: 36px; height: 36px; margin-bottom: 5px; border: 1px solid #2d414e; border-radius: 10px;
+  width: 36px; height: 36px; border: 1px solid #2d414e; border-radius: 10px;
   color: #aebdca; background: #121c24; font-size: 24px; line-height: 1; cursor: pointer;
 }
 .terminal-attach-button:disabled { opacity: .38; cursor: not-allowed; }
 .terminal-composer-input::placeholder { color: #68756e; }
 .terminal-composer-send {
-  align-self: end; width: 40px; height: 40px; margin: 3px 0 5px; border: 0; border-radius: 11px;
+  width: 40px; height: 40px; margin: 3px 0; border: 0; border-radius: 11px;
   color: #071019; background: var(--terminal-accent); font-size: 22px; font-weight: 780; line-height: 1; cursor: pointer;
 }
 .terminal-composer-send:active:not(:disabled) { transform: translateY(1px); }
