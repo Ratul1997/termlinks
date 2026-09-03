@@ -1,5 +1,7 @@
 # Termlinks
 
+> **A private, local-first continuity layer for terminals and AI coding agents—letting you leave your computer without leaving your work.**
+
 Termlinks is an open-source, self-hosted bridge that keeps terminal work running on your computer and lets you view and control it from a phone browser. It is command-agnostic: Codex, Claude, development servers, import scripts, shells, and other terminal programs all use the same PTY bridge. A shell created from the portal also opens in a native terminal window on the computer, so both screens share the same PTY and history. Termlinks can carry an opt-in full Mac desktop or one selected macOS window and can transfer files from the encrypted portal to the computer.
 
 No Termlinks-hosted account or service is required. Run it only on the local computer, reach it through SSH or a private VPN, expose it through an HTTPS tunnel provider, or deploy the included Cloudflare Pages + Workers relay. Cloudflare is the documented default public option, not a requirement.
