@@ -41,13 +41,37 @@ jobs:
       - run: npm run build
       - if: runner.os == 'Linux'
         name: Audit production dependencies
+        shell: bash
         run: |
+          audit_json="$RUNNER_TEMP/npm-audit.json"
+          audit_error="$RUNNER_TEMP/npm-audit-error.log"
           for attempt in 1 2 3; do
-            if npm audit --audit-level=high --fetch-timeout=60000; then
+            if npm audit --audit-level=high --fetch-timeout=60000 --json >"$audit_json" 2>"$audit_error"; then
               exit 0
             fi
-            if [ "$attempt" -eq 3 ]; then
+
+            set +e
+            node - "$audit_json" <<'NODE'
+          const fs = require("node:fs");
+          try {
+            const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+            const counts = report.metadata?.vulnerabilities;
+            if (!counts) process.exit(2);
+            process.exit((Number(counts.high) || 0) + (Number(counts.critical) || 0) > 0 ? 1 : 2);
+          } catch {
+            process.exit(2);
+          }
+          NODE
+            report_status=$?
+            set -e
+            if [ "$report_status" -eq 1 ]; then
+              cat "$audit_json"
               exit 1
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::warning::npm audit service remained unavailable after 3 attempts; local audit or a later CI run is required"
+              cat "$audit_error"
+              exit 0
             fi
             echo "npm audit service unavailable; retrying ($attempt/3)"
             sleep 5
