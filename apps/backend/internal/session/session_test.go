@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -81,4 +82,31 @@ func waitForOutput(t *testing.T, output []byte, updates <-chan []byte, expected 
 		}
 	}
 	return output
+}
+
+func TestSignalledSessionRecordsSignalAndShellStatus(t *testing.T) {
+	manager := NewManager()
+	ended := make(chan Info, 1)
+	manager.SetEndObserver(func(info Info) { ended <- info })
+	current, err := manager.Start(StartOptions{Command: []string{"/bin/sh", "-c", "echo ready; sleep 30"}, Cwd: t.TempDir(), Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, updates, detach := current.Subscribe()
+	defer detach()
+	waitForOutput(t, initial, updates, []byte("ready"))
+	if err := current.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case info := <-ended:
+		if info.Signal != "SIGTERM" {
+			t.Fatalf("expected SIGTERM, got %q (info %#v)", info.Signal, info)
+		}
+		if info.ExitCode == nil || *info.ExitCode != 128+int(syscall.SIGTERM) {
+			t.Fatalf("expected shell status %d, got %#v", 128+int(syscall.SIGTERM), info.ExitCode)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stopped session never reported its final state")
+	}
 }

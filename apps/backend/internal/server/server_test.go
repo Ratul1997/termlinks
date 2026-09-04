@@ -454,3 +454,52 @@ func TestAIWorkflowRoutesRequireAuthenticationAndSameOrigin(t *testing.T) {
 		t.Fatal("path traversal unexpectedly reached the workflow API")
 	}
 }
+
+func TestAttachToFinishedSessionReportsAlreadyExited(t *testing.T) {
+	manager := session.NewManager()
+	handler, err := New(manager, auth.New("token"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := manager.Start(session.StartOptions{Name: "gone", Command: []string{"/bin/sh", "-c", "sleep 30"}, Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := current.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-current.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("session did not stop")
+	}
+	web := httptest.NewServer(handler.ControlHandler())
+	defer web.Close()
+	connection, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(web.URL, "http")+"/v1/sessions/"+current.Info().ID+"/attach", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	connection.SetReadDeadline(time.Now().Add(2 * time.Second))
+	assertTerminalSnapshot(t, connection, nil)
+	kind, payload, err := connection.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var status struct {
+		Type          string `json:"type"`
+		Running       bool   `json:"running"`
+		ExitCode      *int   `json:"exitCode"`
+		Signal        string `json:"signal"`
+		AlreadyExited bool   `json:"alreadyExited"`
+	}
+	if kind != websocket.TextMessage || json.Unmarshal(payload, &status) != nil {
+		t.Fatalf("expected a text status frame, got kind %d payload %q", kind, payload)
+	}
+	if status.Type != "status" || status.Running || !status.AlreadyExited {
+		t.Fatalf("unexpected status frame: %+v", status)
+	}
+	if status.Signal != "SIGTERM" || status.ExitCode == nil || *status.ExitCode != 143 {
+		t.Fatalf("expected SIGTERM/143, got signal %q code %v", status.Signal, status.ExitCode)
+	}
+}

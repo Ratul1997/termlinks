@@ -42,7 +42,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "termlinks:", err)
 		var status exitStatus
 		if errors.As(err, &status) {
-			os.Exit(int(status))
+			os.Exit(processExitCode(status.code))
 		}
 		os.Exit(1)
 	}
@@ -586,12 +586,12 @@ func runCommand(args []string) error {
 		fmt.Printf("Started %s (%s)\n", created.Name, shortID(created.ID))
 		return nil
 	}
-	exitCode, err := local.Attach(context.Background(), created.ID)
+	result, err := local.Attach(context.Background(), created.ID)
 	if err != nil {
 		return fmt.Errorf("attach to session %s: %w", shortID(created.ID), err)
 	}
-	if exitCode != 0 {
-		return exitStatus(exitCode)
+	if result.ExitCode != 0 {
+		return exitStatus{code: result.ExitCode, signal: result.Signal}
 	}
 	return nil
 }
@@ -846,11 +846,14 @@ func listSessions(args []string) error {
 		status := "running"
 		if !item.Running {
 			status = "exited"
-			if item.ExitCode != nil {
+			switch {
+			case item.Signal != "":
+				status = fmt.Sprintf("killed (%s)", item.Signal)
+			case item.ExitCode != nil:
 				status = fmt.Sprintf("exited (%d)", *item.ExitCode)
 			}
 		}
-		fmt.Printf("%-10s  %-18s  %-12s  %s\n", shortID(item.ID), truncate(item.Name, 18), status, strings.Join(item.Command, " "))
+		fmt.Printf("%-10s  %-18s  %-17s  %s\n", shortID(item.ID), truncate(item.Name, 18), status, strings.Join(item.Command, " "))
 	}
 	return nil
 }
@@ -878,12 +881,18 @@ func attachSession(id string) error {
 	if err != nil {
 		return err
 	}
-	exitCode, err := client.New(paths.Socket).Attach(context.Background(), resolved)
+	result, err := client.New(paths.Socket).Attach(context.Background(), resolved)
 	if err != nil {
 		return err
 	}
-	if exitCode != 0 {
-		return exitStatus(exitCode)
+	if result.AlreadyExited {
+		// The session was over before this attach; that is not an attach failure,
+		// so report the outcome and leave the exit status clean.
+		fmt.Fprintf(os.Stderr, "\nSession %s already ended (%s).\n", shortID(resolved), result.Describe())
+		return nil
+	}
+	if result.ExitCode != 0 {
+		return exitStatus{code: result.ExitCode, signal: result.Signal}
 	}
 	return nil
 }
@@ -1028,9 +1037,27 @@ func truncate(value string, length int) string {
 	return value[:length-1] + "…"
 }
 
-type exitStatus int
+type exitStatus struct {
+	code   int
+	signal string
+}
 
-func (e exitStatus) Error() string { return fmt.Sprintf("command exited with status %d", int(e)) }
+func (e exitStatus) Error() string {
+	if e.signal != "" {
+		return fmt.Sprintf("command killed by %s", e.signal)
+	}
+	return fmt.Sprintf("command exited with status %d", e.code)
+}
+
+// processExitCode keeps a status os.Exit cannot represent from being truncated
+// into a misleading one (on Unix only the low 8 bits survive, so -1 would
+// surface as 255 and 256 as success).
+func processExitCode(code int) int {
+	if code < 0 || code > 255 {
+		return 1
+	}
+	return code
+}
 
 func printHelp() {
 	fmt.Print(`Termlinks — keep local terminal work reachable from your phone
