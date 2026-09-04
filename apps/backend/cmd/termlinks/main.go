@@ -36,7 +36,7 @@ import (
 	"termlinks/backend/internal/windowcapture"
 )
 
-const version = "0.8.12"
+const version = "0.8.13"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {

@@ -128,7 +128,7 @@ func TestEncryptedPacketRoundTripAndChannelBinding(t *testing.T) {
 	}
 }
 
-func TestEncryptedPortalCreatesShellHeadlesslyThroughDaemonWebAPI(t *testing.T) {
+func TestEncryptedPortalCreatesShellHeadlesslyThroughPrivateControl(t *testing.T) {
 	const portalToken = "abcdefghijklmnopqrstuvwxyz1234567890"
 	manager := session.NewManager()
 	opened := make(chan string, 1)
@@ -139,6 +139,23 @@ func TestEncryptedPortalCreatesShellHeadlesslyThroughDaemonWebAPI(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	temporary, err := os.MkdirTemp("/tmp", "tl-cloud-current-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(temporary) })
+	socketPath := filepath.Join(temporary, "control.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlServer := &http.Server{Handler: handler.ControlHandler()}
+	go func() { _ = controlServer.Serve(listener) }()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = controlServer.Shutdown(ctx)
+	})
 	web := httptest.NewServer(handler.WebHandler())
 	defer web.Close()
 	jar, _ := cookiejar.New(nil)
@@ -159,7 +176,7 @@ func TestEncryptedPortalCreatesShellHeadlesslyThroughDaemonWebAPI(t *testing.T) 
 	key := deriveKey(portalToken)
 	channel := &browserChannel{httpClient: httpClient}
 	state := &connectionState{
-		ctx: context.Background(), localOrigin: web.URL, key: key,
+		ctx: context.Background(), localOrigin: web.URL, control: client.New(socketPath), key: key,
 		outgoing: make(chan []byte, 1), channels: map[string]*browserChannel{channelID: channel},
 	}
 	payload, _ := json.Marshal(map[string]string{"name": "cloud shell", "cwd": t.TempDir()})
@@ -206,7 +223,7 @@ func TestEncryptedPortalCreatesShellHeadlesslyThroughDaemonWebAPI(t *testing.T) 
 	t.Cleanup(func() { _ = current.Stop() })
 }
 
-func TestEncryptedPortalLegacyCreationFallbackDoesNotOwnVisibleWindows(t *testing.T) {
+func TestEncryptedPortalCreationBypassesLegacyWebRoute(t *testing.T) {
 	manager := session.NewManager()
 	handler, err := server.New(manager, auth.New("unused"), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
@@ -230,7 +247,9 @@ func TestEncryptedPortalLegacyCreationFallbackDoesNotOwnVisibleWindows(t *testin
 		_ = controlServer.Shutdown(ctx)
 	})
 
+	webCalled := make(chan struct{}, 1)
 	legacyWeb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		webCalled <- struct{}{}
 		if r.Method == http.MethodPost && r.URL.Path == "/api/sessions" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
@@ -277,21 +296,12 @@ func TestEncryptedPortalLegacyCreationFallbackDoesNotOwnVisibleWindows(t *testin
 	if !ok || !created.Running || created.Name != "legacy cloud shell" {
 		t.Fatalf("unexpected legacy interactive shell: %#v", created)
 	}
+	select {
+	case <-webCalled:
+		t.Fatal("portal creation reached the legacy browser route")
+	default:
+	}
 	t.Cleanup(func() { _ = current.Stop() })
-}
-
-func TestLegacyCreationFallbackIsExact(t *testing.T) {
-	if !legacyRemoteCreationDisabled(http.StatusForbidden, []byte(`{"error":"remote session creation is disabled"}`)) {
-		t.Fatal("known legacy response did not enable the compatibility fallback")
-	}
-	for _, body := range []string{`{"error":"cross-origin request rejected"}`, `{"error":"remote session creation is disabled","extra":true}`, `not json`} {
-		if legacyRemoteCreationDisabled(http.StatusForbidden, []byte(body)) {
-			t.Fatalf("unsafe legacy fallback accepted %q", body)
-		}
-	}
-	if legacyRemoteCreationDisabled(http.StatusUnauthorized, []byte(`{"error":"remote session creation is disabled"}`)) {
-		t.Fatal("legacy fallback accepted the wrong HTTP status")
-	}
 }
 
 func TestEncryptedDesktopBridgesLoopbackVNCBytes(t *testing.T) {

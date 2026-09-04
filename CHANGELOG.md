@@ -4,6 +4,12 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 
 ## [Unreleased]
 
+## [0.8.13] - 2026-09-05
+
+### Fixed
+
+- The cloud connector now creates portal terminals through the daemon's private control socket, ensuring they remain in the background even during a rolling upgrade from an older daemon that used to open a native Terminal window automatically.
+
 ## [0.8.12] - 2026-09-05
 
 ### Changed
@@ -113,7 +119,8 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 - Private SQLite workflow and terminal-history state.
 - Browser-created terminal continuity with native terminal attachment.
 
-[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.12...HEAD
+[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.13...HEAD
+[0.8.13]: https://github.com/Ratul1997/termlinks/compare/v0.8.12...v0.8.13
 [0.8.12]: https://github.com/Ratul1997/termlinks/compare/v0.8.11...v0.8.12
 [0.8.11]: https://github.com/Ratul1997/termlinks/compare/v0.8.10...v0.8.11
 [0.8.10]: https://github.com/Ratul1997/termlinks/compare/v0.8.9...v0.8.10
