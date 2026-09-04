@@ -14,8 +14,8 @@ import {
   type SavedTerminal,
 } from "./terminal-history";
 import { TerminalStreamReconciler, terminalStreamControl } from "./terminal-reconnect";
-import { nextTerminalInputMode, parseTerminalInputMode, terminalInputModeForAttachment, type TerminalInputMode } from "./terminal-input-mode";
-import { insertAttachmentPath } from "./terminal-attachments";
+import { nextTerminalInputMode, parseTerminalInputMode, type TerminalInputMode } from "./terminal-input-mode";
+import { directAttachmentInput, insertAttachmentPath } from "./terminal-attachments";
 import { TerminalReplyGate } from "./terminal-reply-gate";
 import { binaryStringToBytes, consumeTouchWheel } from "./terminal-touch";
 import "./style.css";
@@ -2928,8 +2928,7 @@ function renderTerminal(id: string, workflowID?: string): void {
   const composer = renderTerminalComposer();
   const attachFromTerminalBar = (): void => {
     const currentMode = parseTerminalInputMode(page.dataset.inputMode);
-    if (terminalInputModeForAttachment(currentMode) !== currentMode) inputModeButton.click();
-    composer.dispatchEvent(new Event("termlinks:attach"));
+    composer.dispatchEvent(new CustomEvent("termlinks:attach", { detail: { direct: currentMode === "direct" } }));
   };
   page.append(header, actions, connection, frame, renderTerminalTabs(session.id, attachFromTerminalBar), composer);
   app.append(page);
@@ -2996,8 +2995,8 @@ function renderTerminal(id: string, workflowID?: string): void {
   const applyInputMode = (mode: TerminalInputMode, persist: boolean): void => {
     page.dataset.inputMode = mode;
     const direct = mode === "direct";
-    inputModeButton.textContent = direct ? "Compose" : "Direct";
-    inputModeButton.title = direct ? "Use the message composer" : "Use Termius-style direct terminal input";
+    inputModeButton.textContent = direct ? "Version 2" : "Version 1";
+    inputModeButton.title = direct ? "Version 2 active · switch to Version 1" : "Version 1 active · switch to Version 2";
     inputModeButton.setAttribute("aria-label", inputModeButton.title);
     inputModeButton.setAttribute("aria-pressed", String(direct));
     if (direct && document.activeElement?.classList.contains("terminal-composer-input")) {
@@ -3628,7 +3627,7 @@ function renderTerminalComposer(): HTMLElement {
     attachmentList.append(chip);
     attachmentList.hidden = false;
   };
-  const chooseAttachments = (): void => {
+  const chooseAttachments = (direct: boolean): void => {
     const statusText = status.querySelector<HTMLElement>(".terminal-composer-state");
     if (uploadInProgress) return;
     if (section.dataset.connected !== "true") {
@@ -3656,11 +3655,15 @@ function renderTerminalComposer(): HTMLElement {
             const percent = total === 0 ? 100 : Math.round((received / total) * 100);
             if (statusText) statusText.textContent = `Uploading ${file.name} · ${percent}%`;
           });
-          showAttachment(file, path);
-          addPathToComposer(path);
+          if (direct) {
+            if (!sendTerminalInput(directAttachmentInput(path))) throw new Error("Path not inserted · terminal is reconnecting");
+          } else {
+            showAttachment(file, path);
+            addPathToComposer(path);
+          }
         }
-        if (statusText) statusText.textContent = "Attached · saved on computer";
-        input.focus({ preventScroll: true });
+        if (statusText) statusText.textContent = direct ? "Path inserted · press Enter to send" : "Attached · saved on computer";
+        if (!direct) input.focus({ preventScroll: true });
       } catch (caught) {
         if (statusText) statusText.textContent = caught instanceof Error ? caught.message : "Upload failed";
       } finally {
@@ -3708,7 +3711,10 @@ function renderTerminalComposer(): HTMLElement {
     event.preventDefault();
     submit();
   });
-  section.addEventListener("termlinks:attach", chooseAttachments);
+  section.addEventListener("termlinks:attach", (event) => {
+    const direct = event instanceof CustomEvent && event.detail?.direct === true;
+    chooseAttachments(direct);
+  });
 
   section.append(renderExtraKeys(input), panel, status);
   return section;

@@ -4,6 +4,13 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 
 ## [Unreleased]
 
+## [0.8.10] - 2026-09-05
+
+### Changed
+
+- The composer interface is labeled **Version 1** and the Termius-style direct interface is labeled **Version 2**. The header always names the active version.
+- The right-side attachment **+** preserves the active version. Version 1 inserts the uploaded path into its composer; Version 2 types the path directly into the live terminal without sending Enter.
+
 ## [0.8.9] - 2026-09-05
 
 ### Fixed
@@ -94,7 +101,8 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 - Private SQLite workflow and terminal-history state.
 - Browser-created terminal continuity with native terminal attachment.
 
-[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.9...HEAD
+[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.10...HEAD
+[0.8.10]: https://github.com/Ratul1997/termlinks/compare/v0.8.9...v0.8.10
 [0.8.9]: https://github.com/Ratul1997/termlinks/compare/v0.8.8...v0.8.9
 [0.8.8]: https://github.com/Ratul1997/termlinks/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/Ratul1997/termlinks/compare/v0.8.6...v0.8.7

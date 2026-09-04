@@ -7,6 +7,10 @@ export function shellQuotePath(path: string): string {
   return `'${path.replaceAll("'", `'\\''`)}'`;
 }
 
+export function directAttachmentInput(path: string): string {
+  return ` ${shellQuotePath(path)}`;
+}
+
 export function insertAttachmentPath(
   value: string,
   path: string,
