@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -44,6 +45,7 @@ type Info struct {
 	EndedAt   *time.Time `json:"endedAt,omitempty"`
 	Running   bool       `json:"running"`
 	ExitCode  *int       `json:"exitCode,omitempty"`
+	Signal    string     `json:"signal,omitempty"`
 	Rows      uint16     `json:"rows"`
 	Cols      uint16     `json:"cols"`
 }
@@ -312,10 +314,17 @@ func (s *Session) capture() {
 	err := s.cmd.Wait()
 	ended := time.Now().UTC()
 	exitCode := 0
+	signalName := ""
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			exitCode = exitErr.ExitCode()
+			// A signalled child reports ExitCode() == -1, which loses the reason it
+			// died. Record the signal and the shell's 128+n status instead.
+			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+				signalName = signalLabel(status.Signal())
+				exitCode = 128 + int(status.Signal())
+			}
 		} else {
 			exitCode = -1
 		}
@@ -324,6 +333,7 @@ func (s *Session) capture() {
 	s.info.Running = false
 	s.info.EndedAt = &ended
 	s.info.ExitCode = &exitCode
+	s.info.Signal = signalName
 	info := s.info
 	info.Command = append([]string(nil), s.info.Command...)
 	_ = s.ptmx.Close()
@@ -333,6 +343,13 @@ func (s *Session) capture() {
 	if s.onEnded != nil {
 		s.onEnded(info)
 	}
+}
+
+func signalLabel(sig syscall.Signal) string {
+	if name := unix.SignalName(sig); name != "" {
+		return name
+	}
+	return fmt.Sprintf("SIG%d", int(sig))
 }
 
 func (s *Session) publish(data []byte) {

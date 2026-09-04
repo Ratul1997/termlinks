@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"testing"
 
+	"termlinks/backend/internal/client"
 	"termlinks/backend/internal/config"
 	"termlinks/backend/internal/session"
 )
@@ -105,6 +107,41 @@ func TestListDefaultsToRunningSessions(t *testing.T) {
 	all := filterListedSessions(items, true)
 	if len(all) != 2 {
 		t.Fatalf("--all list length = %d, want 2", len(all))
+	}
+}
+
+func TestAttachResultPreservesFailedAndSignalledStatuses(t *testing.T) {
+	tests := []struct {
+		name   string
+		result client.AttachResult
+		code   int
+		signal string
+	}{
+		{name: "live failure", result: client.AttachResult{ExitCode: 7}, code: 7},
+		{name: "already-finished failure", result: client.AttachResult{ExitCode: 7, AlreadyExited: true}, code: 7},
+		{name: "already-finished signal", result: client.AttachResult{ExitCode: 143, Signal: "SIGTERM", AlreadyExited: true}, code: 143, signal: "SIGTERM"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var status exitStatus
+			if err := attachResultError(test.result); !errors.As(err, &status) {
+				t.Fatalf("attach result error = %v, want exitStatus", err)
+			}
+			if status.code != test.code || status.signal != test.signal {
+				t.Fatalf("exit status = %#v, want code %d signal %q", status, test.code, test.signal)
+			}
+		})
+	}
+	if err := attachResultError(client.AttachResult{AlreadyExited: true}); err != nil {
+		t.Fatalf("successful finished session returned %v", err)
+	}
+}
+
+func TestProcessExitCodeClampsUnrepresentableStatuses(t *testing.T) {
+	for input, want := range map[int]int{-1: 1, 0: 0, 7: 7, 143: 143, 255: 255, 256: 1} {
+		if got := processExitCode(input); got != want {
+			t.Errorf("processExitCode(%d) = %d, want %d", input, got, want)
+		}
 	}
 }
 

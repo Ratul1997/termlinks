@@ -25,6 +25,7 @@ type Session = {
   endedAt?: string;
   running: boolean;
   exitCode?: number;
+  signal?: string;
   rows: number;
   cols: number;
 };
@@ -762,6 +763,12 @@ async function waitForBridge(socket: WebSocket): Promise<{ id: string }> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function describeSessionExit(session: Session): string {
+  if (session.signal) return `Killed · ${session.signal}`;
+  if (session.exitCode === 0) return "Exited successfully";
+  return `Exited · code ${session.exitCode ?? "?"}`;
 }
 
 function savedTerminalBySession(session: Session): SavedTerminal | undefined {
@@ -3588,8 +3595,9 @@ function connectTerminal(session: Session, automatic = false): void {
           ended = true;
           session.running = false;
           session.exitCode = typeof message.exitCode === "number" ? message.exitCode : undefined;
+          session.signal = typeof message.signal === "string" && message.signal ? message.signal : undefined;
           void loadTerminalHistory().catch(() => undefined);
-          setConnectionState(session.exitCode === 0 ? "Exited successfully" : `Exited · code ${session.exitCode ?? "?"}`, "offline");
+          setConnectionState(describeSessionExit(session), "offline");
         }
       } catch {
         if (state.socket === socket) {

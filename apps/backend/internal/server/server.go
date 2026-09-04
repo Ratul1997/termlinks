@@ -711,7 +711,7 @@ func (s *Server) terminal(w http.ResponseWriter, r *http.Request, browser bool) 
 		return
 	}
 	if !current.Info().Running {
-		s.writeTerminalStatus(connection, current.Info())
+		s.writeTerminalStatus(connection, current.Info(), true)
 		return
 	}
 
@@ -726,7 +726,7 @@ func (s *Server) terminal(w http.ResponseWriter, r *http.Request, browser bool) 
 				return
 			}
 		case <-current.Done():
-			s.writeTerminalStatus(connection, current.Info())
+			s.writeTerminalStatus(connection, current.Info(), false)
 			return
 		case <-ping.C:
 			if err := connection.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second)); err != nil {
@@ -766,11 +766,15 @@ func (s *Server) readTerminal(connection *websocket.Conn, current *session.Sessi
 	}
 }
 
-func (s *Server) writeTerminalStatus(connection *websocket.Conn, info session.Info) {
+// alreadyExited reports that the session was finished before this client
+// attached, rather than ending while it watched.
+func (s *Server) writeTerminalStatus(connection *websocket.Conn, info session.Info, alreadyExited bool) {
 	payload, _ := json.Marshal(map[string]any{
-		"type":     "status",
-		"running":  info.Running,
-		"exitCode": info.ExitCode,
+		"type":          "status",
+		"running":       info.Running,
+		"exitCode":      info.ExitCode,
+		"signal":        info.Signal,
+		"alreadyExited": alreadyExited,
 	})
 	_ = connection.WriteMessage(websocket.TextMessage, payload)
 }
