@@ -2,6 +2,9 @@ package main
 
 import (
 	"flag"
+	"io"
+	"os"
+	"strings"
 	"testing"
 
 	"termlinks/backend/internal/config"
@@ -145,5 +148,162 @@ func TestDesktopOptInPersistsAndRejectsNonLoopbackTargets(t *testing.T) {
 	loaded, err = config.LoadCloudSettings(paths)
 	if err != nil || loaded.DesktopEnabled {
 		t.Fatalf("desktop opt-out was not persisted: %#v, %v", loaded, err)
+	}
+}
+
+// captureOutput runs a CLI command with standard output redirected so the test
+// can assert on what the owner sees.
+func captureOutput(t *testing.T, command func() error) (string, error) {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stdout
+	os.Stdout = writer
+	runErr := command()
+	os.Stdout = original
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(output), runErr
+}
+
+func TestAuthConfigureStoresOriginAndStatusReportsIt(t *testing.T) {
+	t.Setenv("TERMLINKS_STATE_DIR", t.TempDir())
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := captureOutput(t, func() error { return authStatus() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output, "not configured") {
+		t.Fatalf("status before configuration = %q", output)
+	}
+
+	output, err = captureOutput(t, func() error {
+		return runAuth([]string{"configure", "--origin", "https://Local.Example.COM/"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output, "https://local.example.com") || !strings.Contains(output, "relying party ID local.example.com") {
+		t.Fatalf("configure output = %q", output)
+	}
+	settings, err := config.LoadSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.PublicOrigin != "https://local.example.com" || settings.Listen != config.DefaultListen {
+		t.Fatalf("settings = %+v", settings)
+	}
+
+	output, err = captureOutput(t, func() error { return authStatus() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"https://local.example.com", "local.example.com", "Enrolled keys:   0", "Client IP header: none"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("status output %q is missing %q", output, want)
+		}
+	}
+}
+
+func TestAuthConfigureStoresATrustedClientIPHeader(t *testing.T) {
+	t.Setenv("TERMLINKS_STATE_DIR", t.TempDir())
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureOutput(t, func() error {
+		return runAuth([]string{"configure", "--origin", "https://local.example.com", "--client-ip-header", "cf-connecting-ip"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := config.LoadSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.TrustedClientIPHeader != "Cf-Connecting-Ip" {
+		t.Fatalf("trusted client IP header = %q", settings.TrustedClientIPHeader)
+	}
+	output, err := captureOutput(t, func() error { return authStatus() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output, "Client IP header: Cf-Connecting-Ip") {
+		t.Fatalf("status output = %q", output)
+	}
+
+	// Reconfiguring the origin alone keeps the header; --no-client-ip-header drops it.
+	if _, err := captureOutput(t, func() error {
+		return runAuth([]string{"configure", "--origin", "https://local.example.com"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if settings, err = config.LoadSettings(paths); err != nil || settings.TrustedClientIPHeader != "Cf-Connecting-Ip" {
+		t.Fatalf("header = %q, err = %v", settings.TrustedClientIPHeader, err)
+	}
+	if _, err := captureOutput(t, func() error {
+		return runAuth([]string{"configure", "--origin", "https://local.example.com", "--no-client-ip-header"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if settings, err = config.LoadSettings(paths); err != nil || settings.TrustedClientIPHeader != "" {
+		t.Fatalf("header = %q, err = %v", settings.TrustedClientIPHeader, err)
+	}
+}
+
+func TestAuthConfigureWarnsWhenTheHostnameChanges(t *testing.T) {
+	t.Setenv("TERMLINKS_STATE_DIR", t.TempDir())
+	if _, err := captureOutput(t, func() error {
+		return runAuth([]string{"configure", "--origin", "https://first.example.com"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	output, err := captureOutput(t, func() error {
+		return runAuth([]string{"configure", "--origin", "https://second.example.com"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output, "no longer work") {
+		t.Fatalf("hostname change output = %q", output)
+	}
+}
+
+func TestAuthConfigureRejectsInvalidUsage(t *testing.T) {
+	t.Setenv("TERMLINKS_STATE_DIR", t.TempDir())
+	invocations := [][]string{
+		{"configure"},
+		{"configure", "--origin", "http://local.example.com"},
+		{"configure", "--origin", "https://local.example.com", "extra"},
+		{"configure", "--origin", "https://192.0.2.10"},
+		{"configure", "--origin", "https://local.example.com", "--client-ip-header", "bad header"},
+		{"configure", "--origin", "https://local.example.com", "--client-ip-header", "CF-Connecting-IP", "--no-client-ip-header"},
+		{"nonsense"},
+	}
+	for _, args := range invocations {
+		if err := runAuth(args); err == nil {
+			t.Fatalf("runAuth(%v) accepted an invalid invocation", args)
+		}
+	}
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := config.LoadSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.PublicOrigin != "" {
+		t.Fatalf("a rejected configuration stored %q", settings.PublicOrigin)
 	}
 }

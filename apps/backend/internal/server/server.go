@@ -21,6 +21,7 @@ import (
 
 	"termlinks/backend/internal/auth"
 	"termlinks/backend/internal/coordinator"
+	"termlinks/backend/internal/passkey"
 	"termlinks/backend/internal/remote"
 	"termlinks/backend/internal/session"
 	"termlinks/backend/internal/terminalhistory"
@@ -38,10 +39,44 @@ type Server struct {
 	coordinator         *coordinator.Manager
 	terminalHistory     *terminalhistory.Store
 	openHistoryMu       sync.Mutex
+	passkeys            *passkey.Service
+	publicOrigin        string
+	publicAuthority     string
+	// passkeyMu orders issuing a passkey session against removing a passkey, so
+	// a login already in flight cannot outlive the credential it used.
+	passkeyMu sync.Mutex
+	// passkeyCeremonies and passkeyFailures are budgets of their own. Neither can
+	// exhaust the portal token budget, which stays available for recovery.
+	passkeyCeremonies     *auth.Limiter
+	passkeyFailures       *auth.Limiter
+	trustedClientIPHeader string
+	// afterPasskeyVerify runs between verifying an assertion and issuing its
+	// session. It is nil in production and exists so a test can drive the
+	// removal race deterministically instead of hoping to hit it.
+	afterPasskeyVerify func()
 }
 
 func (s *Server) SetCoordinator(manager *coordinator.Manager)     { s.coordinator = manager }
 func (s *Server) SetTerminalHistory(store *terminalhistory.Store) { s.terminalHistory = store }
+
+// SetPasskeys enables browser-managed passkey authentication for the one HTTPS
+// origin the daemon was configured with. Passing a nil service leaves portal
+// token login as the only way in.
+func (s *Server) SetPasskeys(service *passkey.Service) {
+	s.passkeys = service
+	s.publicOrigin, s.publicAuthority = "", ""
+	if service == nil {
+		return
+	}
+	s.publicOrigin = service.Origin()
+	s.publicAuthority = strings.TrimPrefix(service.Origin(), "https://")
+}
+
+// SetTrustedClientIPHeader names the header a trusted reverse proxy sets to the
+// real client address. Rate limiting reads it only on the configured public
+// origin; without it every request through the proxy shares one bucket and one
+// attacker could lock the owner out.
+func (s *Server) SetTrustedClientIPHeader(header string) { s.trustedClientIPHeader = header }
 
 type terminalControl struct {
 	Type string `json:"type"`
@@ -60,10 +95,12 @@ func New(sessions *session.Manager, authManager *auth.Manager, logger *slog.Logg
 		return nil, fmt.Errorf("load embedded web client: %w", err)
 	}
 	server := &Server{
-		sessions: sessions,
-		auth:     authManager,
-		logger:   logger,
-		web:      spaHandler(root),
+		sessions:          sessions,
+		auth:              authManager,
+		logger:            logger,
+		web:               spaHandler(root),
+		passkeyCeremonies: auth.NewLimiter(passkeyCeremonyMaximum, passkeyCeremonyWindow),
+		passkeyFailures:   auth.NewLimiter(passkeyFailureMaximum, passkeyFailureWindow),
 	}
 	if len(visibleTerminal) > 0 {
 		server.openVisibleTerminal = visibleTerminal[0]
@@ -91,6 +128,13 @@ func (s *Server) WebHandler() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"mode": "direct"})
 	})
 	mux.HandleFunc("POST /api/login", s.login)
+	mux.HandleFunc("GET /api/auth/capabilities", s.authCapabilities)
+	mux.HandleFunc("POST /api/auth/passkeys/register/begin", s.requireWebAuth(s.beginPasskeyRegistration))
+	mux.HandleFunc("POST /api/auth/passkeys/register/finish", s.requireWebAuth(s.finishPasskeyRegistration))
+	mux.HandleFunc("POST /api/auth/passkeys/login/begin", s.beginPasskeyLogin)
+	mux.HandleFunc("POST /api/auth/passkeys/login/finish", s.finishPasskeyLogin)
+	mux.HandleFunc("GET /api/auth/passkeys", s.requireWebAuth(s.listPasskeys))
+	mux.HandleFunc("DELETE /api/auth/passkeys/{credentialID}", s.requireWebAuth(s.deletePasskey))
 	mux.HandleFunc("POST /api/logout", s.requireWebAuth(s.logout))
 	mux.HandleFunc("GET /api/me", s.requireWebAuth(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
@@ -618,7 +662,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid login request")
 		return
 	}
-	sessionID, expires, err := s.auth.Login(remoteIP(r), input.Token)
+	sessionID, expires, err := s.auth.Login(s.clientIdentity(r), input.Token)
 	if errors.Is(err, auth.ErrRateLimited) {
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, "too many login attempts")
@@ -628,16 +672,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid token")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     cookieName,
-		Value:    sessionID,
-		Path:     "/",
-		Expires:  expires,
-		MaxAge:   int(auth.SessionDuration.Seconds()),
-		HttpOnly: true,
-		Secure:   r.TLS != nil,
-		SameSite: http.SameSiteStrictMode,
-	})
+	s.setSessionCookie(w, r, sessionID, expires)
 	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
 }
 
@@ -649,15 +684,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(cookieName); err == nil {
 		s.auth.Logout(cookie.Value)
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     cookieName,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   r.TLS != nil,
-		SameSite: http.SameSiteStrictMode,
-	})
+	s.clearSessionCookie(w, r)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -784,6 +811,10 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
 		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/ws/") {
 			w.Header().Set("Cache-Control", "no-store")
+		} else if r.URL.Path == "/" || r.URL.Path == "/index.html" || r.URL.Path == "/sw.js" || strings.HasPrefix(r.URL.Path, "/assets/") {
+			// The direct portal uses stable asset names. Force revalidation so an
+			// HTTPS proxy or browser cannot pin an older UI after an upgrade.
+			w.Header().Set("Cache-Control", "no-cache")
 		}
 		next.ServeHTTP(w, r)
 	})

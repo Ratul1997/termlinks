@@ -13,6 +13,18 @@ import {
   visibleSavedGroups,
   type SavedTerminal,
 } from "./terminal-history";
+import {
+  ceremonyMessage,
+  noPasskeySupport,
+  passkeyLoginOffered,
+  serializeAssertion,
+  serializeAttestation,
+  toCreationOptions,
+  toRequestOptions,
+  webAuthnAvailable,
+  type AuthCapabilities,
+  type Passkey,
+} from "./passkeys";
 import { TerminalStreamReconciler, terminalStreamControl } from "./terminal-reconnect";
 import "./style.css";
 
@@ -143,12 +155,12 @@ type FileUploadReply = {
   path?: string;
 };
 
-type PortalView = "sessions" | "terminal" | "workflows" | "workflow" | "desktop";
+type PortalView = "sessions" | "terminal" | "workflows" | "workflow" | "desktop" | "security";
 
 function readLastPortalView(): { view: PortalView; selected?: string; selectedWorkflow?: string } {
   try {
     const value: unknown = JSON.parse(localStorage.getItem("termlinks-last-view-v1") || "null");
-    if (!isRecord(value) || !["sessions", "terminal", "workflows", "workflow", "desktop"].includes(String(value.view))) return { view: "sessions" };
+    if (!isRecord(value) || !["sessions", "terminal", "workflows", "workflow", "desktop", "security"].includes(String(value.view))) return { view: "sessions" };
     return {
       view: value.view as PortalView,
       selected: typeof value.selected === "string" ? value.selected : undefined,
@@ -196,6 +208,7 @@ let installPrompt: BeforeInstallPromptEvent | undefined;
 let portalResumeKey: CryptoKey | undefined;
 let portalReconnect: Promise<void> | undefined;
 let portalReconnectTimer = 0;
+let authCapabilities: AuthCapabilities = noPasskeySupport;
 
 const PORTAL_KEY_DATABASE = "termlinks-secure-session";
 const PORTAL_KEY_STORE = "keys";
@@ -1118,6 +1131,63 @@ async function resumeEncryptedPortal(): Promise<void> {
   await portalReconnect;
 }
 
+/**
+ * loadAuthCapabilities asks the daemon whether passkeys are configured for this
+ * exact origin. An older daemon has no such endpoint, which simply leaves token
+ * login as the only option.
+ */
+async function loadAuthCapabilities(): Promise<void> {
+  if (encryptedPortal) {
+    authCapabilities = noPasskeySupport;
+    return;
+  }
+  try {
+    const response = await fetch("/api/auth/capabilities", { headers: { Accept: "application/json" }, cache: "no-store" });
+    if (!response.ok) throw new Error("unavailable");
+    const value = await response.json() as Partial<AuthCapabilities>;
+    authCapabilities = {
+      configured: value.configured === true,
+      supported: value.supported === true,
+      enrolled: value.enrolled === true,
+      origin: typeof value.origin === "string" ? value.origin : "",
+      count: typeof value.count === "number" ? value.count : undefined,
+    };
+  } catch {
+    authCapabilities = noPasskeySupport;
+  }
+}
+
+/**
+ * signInWithPasskey runs a usernameless ceremony. The browser decides whether to
+ * unlock a local passkey or to show its own QR code for a phone or tablet, so
+ * Termlinks never generates or scans a QR itself.
+ */
+async function signInWithPasskey(): Promise<void> {
+  const challenge = await api<{ publicKey: Record<string, unknown> }>("/api/auth/passkeys/login/begin", {
+    method: "POST",
+    body: "{}",
+  });
+  const credential = await navigator.credentials.get({ publicKey: toRequestOptions(challenge.publicKey) });
+  if (!credential) throw new Error("The passkey prompt was dismissed. Try again.");
+  await api("/api/auth/passkeys/login/finish", {
+    method: "POST",
+    body: serializeAssertion(credential as unknown as Parameters<typeof serializeAssertion>[0]),
+  });
+}
+
+async function enrollPasskey(label: string): Promise<Passkey> {
+  const challenge = await api<{ publicKey: Record<string, unknown> }>("/api/auth/passkeys/register/begin", {
+    method: "POST",
+    body: JSON.stringify({ label }),
+  });
+  const credential = await navigator.credentials.create({ publicKey: toCreationOptions(challenge.publicKey) });
+  if (!credential) throw new Error("Passkey setup was cancelled. Try again.");
+  return api<Passkey>("/api/auth/passkeys/register/finish", {
+    method: "POST",
+    body: serializeAttestation(credential as unknown as Parameters<typeof serializeAttestation>[0]),
+  });
+}
+
 async function boot(): Promise<void> {
   encryptedPortal = !(await isDirectPortal());
   if (encryptedPortal) {
@@ -1130,6 +1200,7 @@ async function boot(): Promise<void> {
     }
     return;
   }
+  await loadAuthCapabilities();
   try {
     await api<{ authenticated: boolean }>("/api/me");
     state.authenticated = true;
@@ -1172,6 +1243,10 @@ async function renderRememberedView(): Promise<void> {
     renderDesktop();
     return;
   }
+  if (state.view === "security" && !encryptedPortal) {
+    await renderSecurity();
+    return;
+  }
   if (state.view === "terminal" && state.selected && state.sessions.some((session) => session.id === state.selected)) {
     renderTerminal(state.selected, state.selectedWorkflow);
     return;
@@ -1193,14 +1268,19 @@ function renderLogin(message = ""): void {
   const panel = el("section", "login-panel");
   const brand = el("div", "brand");
   brand.append(el("span", "brand-mark", ">_"), el("span", "brand-name", "termlinks"));
+  const offerPasskey = passkeyLoginOffered(authCapabilities);
   panel.append(
     brand,
     el("p", "eyebrow", encryptedPortal ? "END-TO-END ENCRYPTED BRIDGE" : "PRIVATE TERMINAL BRIDGE"),
     el("h1", "login-title", "Your terminal, still running."),
-    el("p", "login-copy", "Enter the token from your computer to open its managed terminal sessions."),
+    el("p", "login-copy", offerPasskey
+      ? "Unlock this portal with the passkey on this device, or with the one saved on your phone."
+      : "Enter the token from your computer to open its managed terminal sessions."),
   );
 
   const form = el("form", "login-form");
+  form.id = "token-login-form";
+  form.hidden = offerPasskey;
   form.autocomplete = "on";
   form.method = "post";
   form.action = "/api/login";
@@ -1263,10 +1343,54 @@ function renderLogin(message = ""): void {
       input.focus();
     }
   });
+  if (offerPasskey) panel.append(renderPasskeyLogin(form));
   panel.append(form, createInstallButton(), el("p", "login-hint", "On your computer: termlinks token · A remembered device reconnects automatically after iOS suspension"));
   page.append(panel);
   app.append(page);
-  if (!window.matchMedia("(pointer: coarse)").matches) input.focus();
+  if (!form.hidden && !window.matchMedia("(pointer: coarse)").matches) input.focus();
+}
+
+/**
+ * renderPasskeyLogin builds the primary passkey action and the recovery toggle
+ * that reveals the portal token form behind it.
+ */
+function renderPasskeyLogin(tokenForm: HTMLFormElement): HTMLElement {
+  const section = el("section", "passkey-login");
+  const unlock = el("button", "primary-button", "Continue with passkey");
+  unlock.type = "button";
+  const error = el("p", "form-error");
+  error.setAttribute("role", "alert");
+  const toggle = el("button", "ghost-button token-toggle", "Use portal token instead");
+  toggle.type = "button";
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.setAttribute("aria-controls", tokenForm.id);
+  unlock.addEventListener("click", async () => {
+    unlock.disabled = true;
+    unlock.textContent = "Waiting for your passkey…";
+    error.textContent = "";
+    try {
+      await signInWithPasskey();
+      state.authenticated = true;
+      await loadSessions();
+      await renderRememberedView();
+    } catch (caught) {
+      error.textContent = ceremonyMessage(caught, "Passkey sign-in failed. Use your portal token instead.");
+      unlock.disabled = false;
+      unlock.textContent = "Continue with passkey";
+    }
+  });
+  toggle.addEventListener("click", () => {
+    tokenForm.hidden = !tokenForm.hidden;
+    toggle.setAttribute("aria-expanded", String(!tokenForm.hidden));
+    if (!tokenForm.hidden) tokenForm.querySelector<HTMLInputElement>("#token")?.focus();
+  });
+  section.append(
+    unlock,
+    error,
+    el("p", "passkey-login-hint", "Choosing “a phone or tablet” shows your browser's own QR code. A passkey saved on this device signs in without one."),
+    toggle,
+  );
+  return section;
 }
 
 async function loadSessions(): Promise<void> {
@@ -1303,7 +1427,14 @@ function renderSessions(): void {
       renderLogin();
     }
   });
-  header.append(brand, status, createInstallButton(), logout);
+  header.append(brand, status, createInstallButton());
+  if (!encryptedPortal && authCapabilities.configured) {
+    const security = el("button", "ghost-button", "Security");
+    security.type = "button";
+    security.addEventListener("click", () => { void renderSecurity(); });
+    header.append(security);
+  }
+  header.append(logout);
 
   const heading = el("div", "dashboard-heading");
   const titleGroup = el("div");
@@ -1360,6 +1491,168 @@ function renderSessions(): void {
   app.append(page);
   updateSessionSummary();
   startPolling();
+}
+
+/**
+ * renderSecurity is the authenticated panel for managing this installation's
+ * passkeys. It never shows credential material, only names and timestamps.
+ */
+async function renderSecurity(message = ""): Promise<void> {
+  stopPolling();
+  closeConnection();
+  state.selected = undefined;
+  state.selectedWorkflow = undefined;
+  rememberPortalView("security");
+  await loadAuthCapabilities();
+  app.replaceChildren();
+  const page = el("main", "dashboard security-page");
+  const header = el("header", "topbar");
+  const back = el("button", "ghost-button", "‹ Terminals");
+  back.type = "button";
+  back.addEventListener("click", renderSessions);
+  header.append(back);
+  const heading = el("div", "dashboard-heading");
+  const titleGroup = el("div");
+  titleGroup.append(
+    el("p", "eyebrow", "SECURITY · THIS COMPUTER"),
+    el("h1", "dashboard-title", "Passkeys"),
+    el("p", "session-summary", authCapabilities.origin
+      ? `Sign in to ${authCapabilities.origin} without pasting your portal token.`
+      : "Sign in without pasting your portal token."),
+  );
+  heading.append(titleGroup);
+  const error = el("p", "form-error", message);
+  error.setAttribute("role", "alert");
+  const list = el("section", "passkey-list");
+  page.append(header, heading, error);
+
+  if (!authCapabilities.configured) {
+    page.append(securityNotice(
+      "Passkeys are not configured yet.",
+      "On your computer, stop the daemon and run:",
+      "termlinks auth configure --origin https://your-hostname",
+      "Start the daemon again, then open the portal at that address.",
+    ));
+  } else if (!authCapabilities.supported) {
+    page.append(securityNotice(
+      "This address cannot use passkeys.",
+      `Passkeys are bound to ${authCapabilities.origin}. Open the portal there to add or remove them.`,
+    ));
+  } else if (!webAuthnAvailable()) {
+    page.append(securityNotice(
+      "This browser cannot use passkeys.",
+      "Open the portal in a browser that supports passkeys over HTTPS, or keep using your portal token.",
+    ));
+  } else {
+    page.append(renderPasskeyEnrollment(), list);
+    await refreshPasskeyList(list);
+  }
+  page.append(renderAppNavigation("home"));
+  app.append(page);
+}
+
+function securityNotice(title: string, ...lines: string[]): HTMLElement {
+  const notice = el("section", "security-notice");
+  notice.append(el("h2", "security-notice-title", title));
+  for (const line of lines) {
+    notice.append(el("p", line.startsWith("termlinks ") ? "security-notice-command" : "security-notice-copy", line));
+  }
+  return notice;
+}
+
+function renderPasskeyEnrollment(): HTMLElement {
+  const form = el("form", "passkey-form");
+  const label = el("label", "field-label", "Name this passkey");
+  label.htmlFor = "passkey-label";
+  const input = el("input", "token-input");
+  input.id = "passkey-label";
+  input.type = "text";
+  input.maxLength = 60;
+  input.placeholder = "iPhone";
+  input.autocomplete = "off";
+  const submit = el("button", "primary-button", "Add a passkey");
+  submit.type = "submit";
+  const error = el("p", "form-error");
+  error.setAttribute("role", "alert");
+  form.append(
+    label,
+    input,
+    el("p", "passkey-login-hint", "The QR code appears only if you choose a phone or tablet. A passkey created on this device, or synced through your account, signs in without one."),
+    submit,
+    error,
+  );
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    submit.textContent = "Follow your browser's prompt…";
+    error.textContent = "";
+    try {
+      await enrollPasskey(input.value.trim() || "Passkey");
+      input.value = "";
+      await renderSecurity();
+      return;
+    } catch (caught) {
+      error.textContent = ceremonyMessage(caught, "Could not add this passkey. Try again.");
+    }
+    submit.disabled = false;
+    submit.textContent = "Add a passkey";
+  });
+  return form;
+}
+
+async function refreshPasskeyList(list: HTMLElement): Promise<void> {
+  list.replaceChildren(el("p", "session-summary", "Loading passkeys…"));
+  let passkeys: Passkey[] = [];
+  try {
+    passkeys = (await api<{ passkeys: Passkey[] }>("/api/auth/passkeys")).passkeys ?? [];
+  } catch (caught) {
+    list.replaceChildren(el("p", "form-error", caught instanceof Error ? caught.message : "Could not load passkeys"));
+    return;
+  }
+  if (passkeys.length === 0) {
+    list.replaceChildren(el("p", "session-summary", "No passkeys yet. Add one above to stop pasting your portal token."));
+    return;
+  }
+  list.replaceChildren();
+  for (const passkey of passkeys) {
+    list.append(renderPasskeyCard(passkey, list));
+  }
+}
+
+function renderPasskeyCard(passkey: Passkey, list: HTMLElement): HTMLElement {
+  const card = el("article", "session-card passkey-card");
+  const row = el("div", "session-card-row");
+  const identity = el("div", "session-identity");
+  identity.append(el("span", "session-dot live"), el("h2", "session-name", passkey.label));
+  const remove = el("button", "card-action", "Remove");
+  remove.type = "button";
+  remove.addEventListener("click", async () => {
+    if (!window.confirm(`Remove "${passkey.label}"? Any session it signed in will be signed out immediately.`)) return;
+    remove.disabled = true;
+    try {
+      await api(`/api/auth/passkeys/${encodeURIComponent(passkey.id)}`, { method: "DELETE" });
+      // Removing the last passkey must also stop the login page leading with one.
+      await loadAuthCapabilities();
+      await refreshPasskeyList(list);
+    } catch (caught) {
+      remove.disabled = false;
+      await renderSecurity(caught instanceof Error ? caught.message : "Could not remove this passkey");
+    }
+  });
+  row.append(identity, remove);
+  const meta = el("div", "session-meta");
+  meta.append(
+    el("span", "passkey-added", `Added ${passkeyTimestamp(passkey.createdAt)}`),
+    el("span", "passkey-used", passkey.lastUsedAt ? `Last used ${passkeyTimestamp(passkey.lastUsedAt)}` : "Never used"),
+  );
+  card.append(row, meta);
+  return card;
+}
+
+function passkeyTimestamp(value: string): string {
+  const time = Date.parse(value);
+  if (Number.isNaN(time)) return "recently";
+  return new Date(time).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
 async function renderWorkflows(message = ""): Promise<void> {
