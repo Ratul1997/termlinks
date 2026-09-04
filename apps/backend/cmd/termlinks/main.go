@@ -885,16 +885,13 @@ func attachSession(id string) error {
 	if err != nil {
 		return err
 	}
-	if result.AlreadyExited {
-		// The session was over before this attach; that is not an attach failure,
-		// so report the outcome and leave the exit status clean.
+	if result.AlreadyExited && result.ExitCode == 0 {
+		// A successfully completed session is a normal attach outcome. Failed and
+		// signal-killed sessions still return their real status below.
 		fmt.Fprintf(os.Stderr, "\nSession %s already ended (%s).\n", shortID(resolved), result.Describe())
 		return nil
 	}
-	if result.ExitCode != 0 {
-		return exitStatus{code: result.ExitCode, signal: result.Signal}
-	}
-	return nil
+	return attachResultError(result)
 }
 
 func stopSession(id string) error {
@@ -1047,6 +1044,13 @@ func (e exitStatus) Error() string {
 		return fmt.Sprintf("command killed by %s", e.signal)
 	}
 	return fmt.Sprintf("command exited with status %d", e.code)
+}
+
+func attachResultError(result client.AttachResult) error {
+	if result.ExitCode == 0 {
+		return nil
+	}
+	return exitStatus{code: result.ExitCode, signal: result.Signal}
 }
 
 // processExitCode keeps a status os.Exit cannot represent from being truncated

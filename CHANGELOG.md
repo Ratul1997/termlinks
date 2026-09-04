@@ -12,7 +12,7 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 ### Fixed
 
 - Sessions killed by a signal report the signal and the shell's 128+n status instead of exit code -1, so `termlinks list` shows `killed (SIGTERM)` rather than `exited (-1)`.
-- Attaching to a session that already finished reports the outcome and exits 0 instead of failing with `command exited with status -1`.
+- Attaching to a successfully finished session reports the outcome and exits 0; failed or signal-killed sessions preserve their real non-zero status.
 
 ## [0.8.2] - 2026-09-04
 
