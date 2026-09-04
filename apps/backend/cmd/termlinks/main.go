@@ -27,6 +27,7 @@ import (
 	"termlinks/backend/internal/cloud"
 	"termlinks/backend/internal/config"
 	"termlinks/backend/internal/coordinator"
+	"termlinks/backend/internal/passkey"
 	"termlinks/backend/internal/selfupdate"
 	"termlinks/backend/internal/server"
 	"termlinks/backend/internal/session"
@@ -71,6 +72,8 @@ func run(args []string) error {
 			return printToken()
 		case "doctor":
 			return doctor()
+		case "auth":
+			return runAuth(args[1:])
 		case "cloud":
 			return runCloud(args[1:])
 		case "desktop":
@@ -151,6 +154,169 @@ func runUpdate(args []string) error {
 	}
 	fmt.Println("Active terminal sessions and the running daemon were not restarted.")
 	return nil
+}
+
+func runAuth(args []string) error {
+	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		printAuthHelp()
+		return nil
+	}
+	switch args[0] {
+	case "configure":
+		return configureAuth(args[1:])
+	case "status":
+		if len(args) != 1 {
+			return errors.New("usage: termlinks auth status")
+		}
+		return authStatus()
+	default:
+		return errors.New("usage: termlinks auth <configure|status>")
+	}
+}
+
+func configureAuth(args []string) error {
+	flags := flag.NewFlagSet("auth configure", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	origin := flags.String("origin", "", "public https origin browsers use to reach this portal")
+	clientIPHeader := flags.String("client-ip-header", "", "header a trusted proxy sets to the real client address, for example CF-Connecting-IP")
+	noClientIPHeader := flags.Bool("no-client-ip-header", false, "stop trusting any forwarded client address header")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || strings.TrimSpace(*origin) == "" {
+		return errors.New("usage: termlinks auth configure --origin https://terminal.example.com [--client-ip-header CF-Connecting-IP]")
+	}
+	if *noClientIPHeader && strings.TrimSpace(*clientIPHeader) != "" {
+		return errors.New("choose either --client-ip-header or --no-client-ip-header")
+	}
+	normalized, err := config.NormalizePublicOrigin(*origin)
+	if err != nil {
+		return err
+	}
+	header := ""
+	if strings.TrimSpace(*clientIPHeader) != "" {
+		if header, err = config.NormalizeClientIPHeader(*clientIPHeader); err != nil {
+			return err
+		}
+	}
+	relyingPartyID, err := config.RelyingPartyID(normalized)
+	if err != nil {
+		return err
+	}
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		return err
+	}
+	if err := config.Ensure(paths); err != nil {
+		return err
+	}
+	if daemonIsRunning(paths) {
+		return errors.New("the daemon is running; stop it, run this command, then start it again so the new origin takes effect")
+	}
+	settings, err := config.LoadSettings(paths)
+	if err != nil {
+		return err
+	}
+	previous := settings.PublicOrigin
+	settings.PublicOrigin = normalized
+	switch {
+	case header != "":
+		settings.TrustedClientIPHeader = header
+	case *noClientIPHeader:
+		settings.TrustedClientIPHeader = ""
+	}
+	if err := config.SaveSettings(paths, settings); err != nil {
+		return err
+	}
+	fmt.Printf("Passkey origin set to %s (relying party ID %s).\n", normalized, relyingPartyID)
+	if settings.TrustedClientIPHeader != "" {
+		fmt.Printf("Rate limits will identify clients by the %s header on that origin.\n", settings.TrustedClientIPHeader)
+	} else {
+		fmt.Println("Rate limits will identify clients by the connecting address. Behind a proxy, pass --client-ip-header so one visitor cannot spend everyone's budget.")
+	}
+	if previous != "" && previous != normalized {
+		fmt.Println("The hostname changed, so passkeys enrolled for the old hostname no longer work. Sign in with your portal token and enroll them again.")
+	}
+	fmt.Println("Start the daemon to use it: termlinks daemon")
+	return nil
+}
+
+func authStatus() error {
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		return err
+	}
+	settings, err := config.LoadSettings(paths)
+	if err != nil {
+		return err
+	}
+	if settings.PublicOrigin == "" {
+		fmt.Println("Passkeys:        not configured")
+		fmt.Println("Configure them with: termlinks auth configure --origin https://terminal.example.com")
+		return nil
+	}
+	relyingPartyID, err := config.RelyingPartyID(settings.PublicOrigin)
+	if err != nil {
+		return err
+	}
+	fmt.Println("Public origin:   " + settings.PublicOrigin)
+	fmt.Println("Relying party:   " + relyingPartyID)
+	if settings.TrustedClientIPHeader != "" {
+		fmt.Println("Client IP header: " + settings.TrustedClientIPHeader)
+	} else {
+		fmt.Println("Client IP header: none (rate limits use the connecting address)")
+	}
+	count, err := passkeyCount(paths)
+	if err != nil {
+		fmt.Println("Enrolled keys:   unavailable (" + err.Error() + ")")
+		return nil
+	}
+	fmt.Printf("Enrolled keys:   %d\n", count)
+	if count == 0 {
+		fmt.Println("Sign in with your portal token at " + settings.PublicOrigin + " and add a passkey from the Security panel.")
+	}
+	return nil
+}
+
+func passkeyCount(paths config.Paths) (int, error) {
+	if _, err := os.Stat(paths.AuthDB); errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	store, err := passkey.Open(paths.AuthDB)
+	if err != nil {
+		return 0, err
+	}
+	defer store.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return store.Count(ctx)
+}
+
+func daemonIsRunning(paths config.Paths) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	return client.New(paths.Socket).Healthy(ctx)
+}
+
+func printAuthHelp() {
+	fmt.Print(`Termlinks passkey authentication (direct HTTPS portal)
+
+Usage:
+  termlinks auth configure --origin https://terminal.example.com
+                           [--client-ip-header CF-Connecting-IP]
+  termlinks auth status
+
+The origin must be the exact https address browsers use. Its hostname becomes the
+WebAuthn relying party ID, so changing it makes existing passkeys unusable; portal
+token login always stays available to remove and re-enroll them.
+
+Behind a reverse proxy every request carries the proxy's address, so --client-ip-header
+names the header the proxy sets to the real client address. Without it a single
+visitor's failed sign-ins share one rate-limit budget with everyone else. The header is
+read only on the configured origin.
+
+Termlinks refuses a sign-in whose signature counter did not advance, because that is how
+a cloned authenticator looks. A restored or migrated security key can look the same until
+its counter passes the stored value: sign in with your portal token, remove that passkey,
+and enroll it again.
+`)
 }
 
 func runCloud(args []string) error {
@@ -665,6 +831,24 @@ func runDaemon(args []string) error {
 	}
 	defer terminalHistory.Close()
 	handlers.SetTerminalHistory(terminalHistory)
+	if settings.PublicOrigin != "" {
+		relyingPartyID, err := config.RelyingPartyID(settings.PublicOrigin)
+		if err != nil {
+			return err
+		}
+		passkeyStore, err := passkey.Open(paths.AuthDB)
+		if err != nil {
+			return err
+		}
+		defer passkeyStore.Close()
+		passkeys, err := passkey.NewService(passkeyStore, settings.PublicOrigin, relyingPartyID)
+		if err != nil {
+			return err
+		}
+		handlers.SetPasskeys(passkeys)
+		handlers.SetTrustedClientIPHeader(settings.TrustedClientIPHeader)
+		logger.Info("passkey authentication is enabled", "origin", settings.PublicOrigin, "relyingParty", relyingPartyID, "clientIPHeader", settings.TrustedClientIPHeader)
+	}
 	manager.SetEndObserver(func(info session.Info) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -1044,6 +1228,8 @@ Usage:
   termlinks stop <id>               Gracefully stop a session
   termlinks token                   Print the private portal login token
   termlinks doctor                  Show safe local diagnostics
+  termlinks auth configure ...      Set the public HTTPS origin for passkeys
+  termlinks auth status             Show the passkey origin and enrollment
   termlinks update                  Securely install the newest release
   termlinks cloud configure ...     Configure the Cloudflare relay
   termlinks cloud start             Connect this computer to the cloud portal

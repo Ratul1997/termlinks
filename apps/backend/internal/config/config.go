@@ -30,12 +30,22 @@ type Paths struct {
 	CloudLog          string
 	WorkflowsDB       string
 	TerminalHistoryDB string
+	AuthDB            string
 	WorkflowArtifacts string
 	WorkflowWorktrees string
 }
 
 type Settings struct {
 	Listen string `json:"listen"`
+	// PublicOrigin is the canonical https origin browsers reach the portal on.
+	// It is empty until "termlinks auth configure --origin" is run, and passkey
+	// authentication stays disabled while it is.
+	PublicOrigin string `json:"publicOrigin,omitempty"`
+	// TrustedClientIPHeader names the header a trusted reverse proxy sets to the
+	// real client address, for example CF-Connecting-IP. It is empty unless the
+	// owner opts in, and it is only ever read on PublicOrigin, because that is
+	// the one hostname the proxy is known to front.
+	TrustedClientIPHeader string `json:"trustedClientIpHeader,omitempty"`
 }
 
 type CloudSettings struct {
@@ -70,6 +80,7 @@ func ResolvePaths() (Paths, error) {
 		CloudLog:          filepath.Join(dir, "cloud.log"),
 		WorkflowsDB:       filepath.Join(dir, "workflows.db"),
 		TerminalHistoryDB: filepath.Join(dir, "terminal-history.db"),
+		AuthDB:            filepath.Join(dir, "auth.db"),
 		WorkflowArtifacts: filepath.Join(dir, "workflow-artifacts"),
 		WorkflowWorktrees: filepath.Join(dir, "workflow-worktrees"),
 	}, nil
@@ -211,6 +222,24 @@ func LoadSettings(paths Paths) (Settings, error) {
 	if strings.TrimSpace(settings.Listen) == "" {
 		settings.Listen = DefaultListen
 	}
+	if strings.TrimSpace(settings.PublicOrigin) == "" {
+		settings.PublicOrigin = ""
+		return settings, nil
+	}
+	origin, err := NormalizePublicOrigin(settings.PublicOrigin)
+	if err != nil {
+		return Settings{}, fmt.Errorf("stored public origin is invalid: %w", err)
+	}
+	settings.PublicOrigin = origin
+	if strings.TrimSpace(settings.TrustedClientIPHeader) == "" {
+		settings.TrustedClientIPHeader = ""
+		return settings, nil
+	}
+	header, err := NormalizeClientIPHeader(settings.TrustedClientIPHeader)
+	if err != nil {
+		return Settings{}, fmt.Errorf("stored trusted client IP header is invalid: %w", err)
+	}
+	settings.TrustedClientIPHeader = header
 	return settings, nil
 }
 

@@ -100,6 +100,13 @@ Generate or display your private portal login token:
 termlinks token
 ```
 
+Enable passkey sign-in for a public HTTPS hostname, and check it:
+
+```sh
+termlinks auth configure --origin https://terminal.example.com
+termlinks auth status
+```
+
 Start a managed command and keep it visible in the current terminal:
 
 ```sh
@@ -211,6 +218,9 @@ Termlinks intentionally has a small configuration surface. There is no hidden ap
 | `TERMLINKS_STATE_DIR` | Operating-system user config directory plus `termlinks` | Overrides all local state paths. It must be an absolute path. Useful for isolated development/testing installations. |
 | `termlinks daemon [-p PORT] [--listen ADDR] [--headless]` | `127.0.0.1:57321` | Sets and persists the browser portal listener in `settings.json`. `-p`/`--port` replaces only the port and preserves the configured host. Loopback, RFC1918 private addresses, and Tailscale's `100.64.0.0/10` range are accepted by default. `--headless` keeps portal-created shells and AI stages inside the browser/API without opening native terminal windows; omit it for normal desktop use. |
 | `termlinks daemon --allow-public-bind` | Off | Allows an unspecified/public bind such as `0.0.0.0`. This is dangerous and does not add TLS; prefer an SSH/VPN/tunnel setup. |
+| `termlinks auth configure --origin URL` | Unset | Persists the canonical `https://` origin browsers use to reach the direct portal and enables passkey sign-in. The value must be a plain HTTPS origin with no path, query, fragment, credentials, wildcard, or IP address; its hostname becomes the WebAuthn relying party ID. The daemon must be stopped, because the relying party ID is derived at startup. |
+| `termlinks auth configure --client-ip-header NAME` | Unset | Names the header a trusted reverse proxy sets to the real client address, such as `CF-Connecting-IP`. It is read only on the configured origin. Pass `--no-client-ip-header` to stop trusting it again. |
+| `termlinks auth status` | — | Prints the configured origin, relying party ID, trusted client IP header, and enrolled passkey count. It never prints credential material. |
 | Portal **New terminal → Name** | Empty/generated display name | Optional label, at most 80 characters. |
 | Portal **New terminal → Starting directory** | Home directory | Accepts `~`, `~/path`, or an absolute accessible directory, at most 4096 characters. Browser creation always opens the configured shell; commands are typed afterward. |
 | Portal-created native window | Enabled unless `termlinks daemon --headless` is used | The daemon—not the cloud connector—owns this policy. A visible session launches the platform terminal and runs `termlinks attach <opaque-session-id>`; its dedicated shell exits cleanly when the managed session ends so it does not leave an abandoned prompt. Local CLI-created sessions keep their existing attach/detach behavior. |
@@ -224,13 +234,14 @@ The state directory is created with mode `0700`; sensitive files are forced to `
 | File | Contents |
 | --- | --- |
 | `auth.token` | Random 256-bit portal login token created by `termlinks token` or the first daemon start. Treat it as full shell access. |
-| `settings.json` | Persisted `listen` address. |
+| `settings.json` | Persisted `listen` address, and the optional `publicOrigin` and `trustedClientIpHeader` used by passkey sign-in. |
 | `control.sock` | Private Unix socket used by the CLI and daemon; never expose or proxy it. |
 | `daemon.log` | Output from an automatically detached daemon. |
 | `cloud.json` | Relay URL, connector token, desktop-enabled flag, and loopback VNC address. It contains a secret. |
 | `cloud.pid` | PID of the detached connector. |
 | `cloud.log` | Detached connector diagnostics. It should not contain tokens, but still treat logs as private. |
 | `workflows.db`, `workflows.db-wal`, `workflows.db-shm` | Local SQLite workflow, stage, project, event, and bounded agent-output state. Each file is forced to `0600`. |
+| `auth.db`, `auth.db-wal`, `auth.db-shm` | Local SQLite owner identifier and enrolled passkeys: credential ID, public key, your label, creation and last-used times, and signature-counter state. It holds public keys only, never a private key or anything that can sign on your behalf. Each file is forced to `0600`. |
 | `terminal-history.db`, `terminal-history.db-wal`, `terminal-history.db-shm` | Local SQLite terminal names, working directories, favorites, and open/close timestamps. Command arguments, terminal input, and terminal output are never stored here. Each file is forced to `0600`. |
 | `workflow-artifacts/` | Private `0700` directory reserved for workflow-generated artifacts. |
 | `workflow-worktrees/` | Private `0700` directory reserved for isolated Git worktrees in a later workflow phase. The current release serializes work in the same repository instead. |
@@ -276,12 +287,37 @@ Workflow prompts, selected project paths, status, and bounded outputs are privat
 | Setting | Value |
 | --- | --- |
 | Local URL | `http://127.0.0.1:57321` for a new installation unless `-p` or `--listen` changed it. Existing installations retain their saved listener. |
-| Login | Portal token exchanged for a random `HttpOnly`, `SameSite=Strict` cookie. |
-| Cookie lifetime | 12 hours. |
-| Direct login rate limit | Five attempts per direct peer IP per minute. Proxy forwarding headers are intentionally ignored. |
+| Login | Portal token, or a passkey once one is enrolled, exchanged for the same random `HttpOnly`, `SameSite=Strict` cookie. |
+| Cookie lifetime | 12 hours for both, and `Secure` whenever the request arrives over TLS or on the configured public origin. |
+| Direct login rate limit | Five failed portal token attempts per client per minute. Successful sign-ins are never charged. |
+| Passkey rate limits | Five failed passkey sign-ins and thirty started ceremonies per client per minute, in budgets of their own. Passkey traffic can never close portal token recovery, and starting a ceremony proves nothing so it never spends the sign-in budget. |
+| Client identity for rate limits | The connecting peer address, unless `termlinks auth configure --client-ip-header` names a header a trusted proxy sets. Without it every request through a proxy shares one budget, so one visitor's failures would throttle everyone. |
 | TLS | Not built into the daemon. Use loopback, SSH, an encrypted private network, or an HTTPS reverse tunnel/proxy. |
 | WebSockets | A proxy must preserve Upgrade/Connection headers and long-lived WebSocket connections. |
 | Portal mode detection | `GET /api/mode` returns `{"mode":"direct"}` from the daemon. A static hosted portal without that response uses the encrypted connector-relay mode. |
+
+### Passkey sign-in (direct HTTPS portal)
+
+Passkeys are off until you name the public HTTPS hostname browsers use. Stop the daemon, configure it, then start it again:
+
+```sh
+termlinks auth configure --origin https://terminal.example.com --client-ip-header CF-Connecting-IP
+termlinks daemon
+```
+
+Open that address, sign in once with your portal token, then add a passkey from **Security**. After that the login page leads with **Continue with passkey**, and **Use portal token instead** stays available for recovery.
+
+Termlinks does not draw or scan a QR code. It starts a standard discoverable WebAuthn ceremony and the browser owns the rest: choosing "a phone or tablet" is what makes Chrome or Safari display its own cross-device QR and run the proximity check. A passkey stored on the device you are using, or synced to it through your platform account, signs in without any QR at all.
+
+Things worth knowing before you rely on it:
+
+- The relying party ID is the exact hostname. Changing the hostname makes every enrolled passkey unusable; sign in with your portal token to remove and re-enroll them.
+- Ceremonies are validated only against the configured origin and relying party ID. They are never inferred from forwarded headers.
+- Opening the portal over `http://` on localhost or a raw LAN address shows token login only, because WebAuthn needs a secure context.
+- Removing a passkey immediately signs out the sessions it created, and leaves token sessions and other passkeys alone.
+- A sign-in whose signature counter did not advance is refused, because that is how a cloned authenticator looks. A restored or migrated security key can look the same until its counter passes the stored value: sign in with your portal token, remove that passkey, and enroll it again. The daemon logs the event; the browser only sees a generic failure.
+- Passkeys apply to the direct HTTPS portal. The hosted Pages/Worker relay portal keeps its existing end-to-end encrypted token login.
+- Cloudflare stores no passkey credentials, challenges, cookies, portal tokens, or terminal keys.
 
 ### Cloud connector
 

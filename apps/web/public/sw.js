@@ -1,9 +1,9 @@
-const CACHE_NAME = "termlinks-app-shell-v35";
+const CACHE_NAME = "termlinks-app-shell-v36";
 const APP_SHELL = [
   "/",
   "/index.html",
-  "/assets/main.css",
-  "/assets/main.js",
+  "/assets/main.css?v=36",
+  "/assets/main.js?v=36",
   "/manifest.webmanifest",
   "/icons/icon-192.png",
   "/icons/icon-512.png",

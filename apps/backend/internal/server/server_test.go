@@ -29,6 +29,16 @@ func TestWebAuthenticationAndInteractiveTerminal(t *testing.T) {
 	}
 	web := httptest.NewServer(handler.WebHandler())
 	defer web.Close()
+	for _, path := range []string{"/", "/index.html", "/sw.js", "/assets/main.js"} {
+		response, requestErr := http.Get(web.URL + path)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		response.Body.Close()
+		if response.Header.Get("Cache-Control") != "no-cache" {
+			t.Fatalf("%s Cache-Control = %q, want no-cache", path, response.Header.Get("Cache-Control"))
+		}
+	}
 
 	jar, err := cookiejar.New(nil)
 	if err != nil {

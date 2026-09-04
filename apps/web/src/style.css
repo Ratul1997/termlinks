@@ -686,6 +686,32 @@ button { color: inherit; }
   .terminal-frame { padding: 14px 10px 6px 14px; }
 }
 
+/* Passkey sign-in and the Security panel */
+.passkey-login { margin-top: 30px; }
+.passkey-login > .primary-button { margin-top: 0; }
+.passkey-login-hint { margin: 12px 0 0; color: #7d8b83; font-size: 12px; line-height: 1.5; }
+.token-toggle { width: 100%; margin-top: 14px; padding: 10px; color: #9acaaa; }
+.login-form[hidden] { display: none; }
+
+.security-page .dashboard-heading { align-items: start; }
+.security-notice {
+  margin: 4px 0 22px; padding: 16px 17px; border: 1px solid var(--line); border-radius: 14px;
+  background: linear-gradient(150deg, #131a16, #0e1411);
+}
+.security-notice-title { margin: 0 0 9px; font-size: 15px; }
+.security-notice-copy { margin: 0 0 8px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.security-notice-copy:last-child { margin-bottom: 0; }
+.security-notice-command {
+  overflow-x: auto; margin: 0 0 10px; padding: 10px 11px; border: 1px solid #2b3830; border-radius: 9px;
+  color: #9eddb0; background: #0a100c; font: 12px/1.5 ui-monospace, monospace; white-space: pre;
+}
+.passkey-form { margin: 4px 0 26px; }
+.passkey-form .primary-button { margin-top: 14px; }
+.passkey-list { display: grid; gap: 11px; }
+.passkey-card { padding: 16px 17px; }
+.passkey-card .session-meta { margin-top: 11px; }
+.passkey-card .passkey-used { margin-left: auto; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
 }
