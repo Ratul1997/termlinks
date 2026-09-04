@@ -7,3 +7,7 @@ export function parseTerminalInputMode(value: string | null | undefined): Termin
 export function nextTerminalInputMode(value: TerminalInputMode): TerminalInputMode {
   return value === "direct" ? "compose" : "direct";
 }
+
+export function terminalInputModeForAttachment(_value: TerminalInputMode): TerminalInputMode {
+  return "compose";
+}

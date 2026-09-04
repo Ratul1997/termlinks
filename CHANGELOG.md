@@ -4,6 +4,12 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 
 ## [Unreleased]
 
+## [0.8.9] - 2026-09-05
+
+### Fixed
+
+- The terminal bar's existing right-side **+** now opens file attachment instead of leaving the terminal for New Terminal. It switches Direct mode to Compose when needed, accepts any file supported by the encrypted transfer, saves it on the connected computer, and inserts its shell-quoted local path exactly at the command cursor.
+
 ## [0.8.8] - 2026-09-05
 
 ### Added
@@ -11,7 +17,7 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 - Portal and AI-work terminals now start headlessly, so remote work no longer creates unwanted Terminal windows on the computer.
 - Running-session cards and terminal menus provide explicit **Open on computer** and **Hide on computer** actions. The CLI provides the same lifecycle through `termlinks show <id>` and `termlinks hide <id>`, while `termlinks list` reports the managed viewer state.
 - Managed native viewers attach to the exact existing PTY and retained history. Show is idempotent, and Hide disconnects only that viewer without stopping the session, browser, or ordinary local attachments. macOS records and closes the exact Terminal window instead of relying on the user's close-on-exit profile.
-- Compose mode's **+** button accepts any file supported by the encrypted transfer, saves it on the connected computer, and inserts its shell-quoted local path exactly at the command cursor.
+- Compose mode's attachment control accepts any file supported by the encrypted transfer, saves it on the connected computer, and inserts its shell-quoted local path exactly at the command cursor.
 
 ## [0.8.7] - 2026-09-05
 
@@ -88,7 +94,8 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 - Private SQLite workflow and terminal-history state.
 - Browser-created terminal continuity with native terminal attachment.
 
-[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.8...HEAD
+[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.9...HEAD
+[0.8.9]: https://github.com/Ratul1997/termlinks/compare/v0.8.8...v0.8.9
 [0.8.8]: https://github.com/Ratul1997/termlinks/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/Ratul1997/termlinks/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/Ratul1997/termlinks/compare/v0.8.5...v0.8.6

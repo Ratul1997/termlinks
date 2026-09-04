@@ -14,7 +14,7 @@ import {
   type SavedTerminal,
 } from "./terminal-history";
 import { TerminalStreamReconciler, terminalStreamControl } from "./terminal-reconnect";
-import { nextTerminalInputMode, parseTerminalInputMode, type TerminalInputMode } from "./terminal-input-mode";
+import { nextTerminalInputMode, parseTerminalInputMode, terminalInputModeForAttachment, type TerminalInputMode } from "./terminal-input-mode";
 import { insertAttachmentPath } from "./terminal-attachments";
 import { TerminalReplyGate } from "./terminal-reply-gate";
 import { binaryStringToBytes, consumeTouchWheel } from "./terminal-touch";
@@ -2926,7 +2926,12 @@ function renderTerminal(id: string, workflowID?: string): void {
   tuiHint.setAttribute("aria-live", "polite");
   frame.append(mount, sync, tuiHint);
   const composer = renderTerminalComposer();
-  page.append(header, actions, connection, frame, renderTerminalTabs(session.id), composer);
+  const attachFromTerminalBar = (): void => {
+    const currentMode = parseTerminalInputMode(page.dataset.inputMode);
+    if (terminalInputModeForAttachment(currentMode) !== currentMode) inputModeButton.click();
+    composer.dispatchEvent(new Event("termlinks:attach"));
+  };
+  page.append(header, actions, connection, frame, renderTerminalTabs(session.id, attachFromTerminalBar), composer);
   app.append(page);
 
   const terminal = new Terminal({
@@ -3019,7 +3024,7 @@ function renderTerminal(id: string, workflowID?: string): void {
   };
 }
 
-function renderTerminalTabs(activeSessionId: string): HTMLElement {
+function renderTerminalTabs(activeSessionId: string, chooseAttachment: () => void): HTMLElement {
   const navigation = el("nav", "terminal-tab-bar");
   navigation.setAttribute("aria-label", "Terminal navigation");
 
@@ -3071,12 +3076,12 @@ function renderTerminalTabs(activeSessionId: string): HTMLElement {
   updateTerminalTabPositions(list);
   installTerminalTabRailGestures(list);
 
-  const create = el("button", "terminal-tab-action terminal-tab-create", "+");
-  create.type = "button";
-  create.title = "Open a new terminal";
-  create.setAttribute("aria-label", "Open a new terminal");
-  create.addEventListener("click", renderSessionsWithCreate);
-  navigation.append(sessions, list, create);
+  const attach = el("button", "terminal-tab-action terminal-tab-attach", "+");
+  attach.type = "button";
+  attach.title = "Attach a file to this terminal";
+  attach.setAttribute("aria-label", "Attach a file to this terminal");
+  attach.addEventListener("click", chooseAttachment);
+  navigation.append(sessions, list, attach);
   window.requestAnimationFrame(() => {
     if (!activeTab) return;
     list.scrollLeft = Math.max(0, activeTab.offsetLeft - ((list.clientWidth - activeTab.clientWidth) / 2));
@@ -3589,13 +3594,8 @@ function renderTerminalComposer(): HTMLElement {
   send.type = "submit";
   send.disabled = true;
   send.setAttribute("aria-label", "Send to terminal");
-  const attach = el("button", "terminal-attach-button", "+");
-  attach.type = "button";
-  attach.disabled = true;
-  attach.setAttribute("aria-label", "Attach a file and insert its path");
-  attach.title = "Attach file";
   const form = el("form", "terminal-composer-form");
-  form.append(attach, input, send);
+  form.append(input, send);
   const panel = el("div", "terminal-composer-panel");
   panel.append(attachmentList, form);
   const status = el("div", "terminal-composer-meta");
@@ -3604,6 +3604,7 @@ function renderTerminalComposer(): HTMLElement {
     el("span", "terminal-direct-hint", "Tap terminal to type · swipe to navigate"),
     el("span", "terminal-composer-state", "Connecting…"),
   );
+  let uploadInProgress = false;
 
   const syncSend = (): void => {
     send.disabled = section.dataset.connected !== "true" || input.value.length === 0;
@@ -3629,6 +3630,11 @@ function renderTerminalComposer(): HTMLElement {
   };
   const chooseAttachments = (): void => {
     const statusText = status.querySelector<HTMLElement>(".terminal-composer-state");
+    if (uploadInProgress) return;
+    if (section.dataset.connected !== "true") {
+      if (statusText) statusText.textContent = "Terminal is reconnecting";
+      return;
+    }
     if (!encryptedBridge && !portalResumeKey) {
       if (statusText) statusText.textContent = "Encrypted upload unavailable";
       return;
@@ -3641,8 +3647,7 @@ function renderTerminalComposer(): HTMLElement {
       const files = Array.from(picker.files || []);
       picker.remove();
       if (files.length === 0) return;
-      attach.dataset.uploading = "true";
-      attach.disabled = true;
+      uploadInProgress = true;
       try {
         for (const file of files) {
           if (statusText) statusText.textContent = `Uploading ${file.name}…`;
@@ -3659,8 +3664,7 @@ function renderTerminalComposer(): HTMLElement {
       } catch (caught) {
         if (statusText) statusText.textContent = caught instanceof Error ? caught.message : "Upload failed";
       } finally {
-        delete attach.dataset.uploading;
-        attach.disabled = section.dataset.connected !== "true" || !encryptedBridge;
+        uploadInProgress = false;
       }
     }, { once: true });
     picker.addEventListener("cancel", () => picker.remove(), { once: true });
@@ -3704,8 +3708,7 @@ function renderTerminalComposer(): HTMLElement {
     event.preventDefault();
     submit();
   });
-  attach.addEventListener("pointerdown", (event) => event.preventDefault());
-  attach.addEventListener("click", chooseAttachments);
+  section.addEventListener("termlinks:attach", chooseAttachments);
 
   section.append(renderExtraKeys(input), panel, status);
   return section;
@@ -4004,10 +4007,8 @@ function setConnectionState(label: string, kind: "connecting" | "online" | "offl
   composer.dataset.connected = String(connected);
   const input = composer.querySelector<HTMLTextAreaElement>(".terminal-composer-input");
   const send = composer.querySelector<HTMLButtonElement>(".terminal-composer-send");
-  const attach = composer.querySelector<HTMLButtonElement>(".terminal-attach-button");
   const composerState = composer.querySelector<HTMLElement>(".terminal-composer-state");
   if (send) send.disabled = !connected || !input?.value.length;
-  if (attach) attach.disabled = !connected || !encryptedBridge || attach.dataset.uploading === "true";
   for (const button of composer.querySelectorAll<HTMLButtonElement>(".terminal-control-key")) button.disabled = !connected;
   if (composerState) {
     composerState.textContent = connected ? "Ready" : kind === "connecting" ? "Connecting…" : "Input unavailable";
