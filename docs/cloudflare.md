@@ -106,6 +106,28 @@ termlinks cloud stop
 
 `cloud stop` disconnects public access but does not stop the Termlinks daemon or its managed terminal sessions.
 
+### One-command local and Pages updates
+
+After the first deployment has created the Pages project and configured `RELAY_ORIGIN`, an installed Termlinks release can update itself and that Pages portal together. Create a narrowly scoped Cloudflare API token with Pages edit access, keep it in a private local secret store or shell profile, and expose these Termlinks-specific variables to the command:
+
+```sh
+export TERMLINKS_CLOUDFLARE_API_TOKEN='<private-api-token>'
+export TERMLINKS_CLOUDFLARE_ACCOUNT_ID='<32-character-account-id>'
+export TERMLINKS_CLOUDFLARE_PAGES_PROJECT="$TERMLINKS_PAGES_PROJECT"
+export TERMLINKS_CLOUDFLARE_PAGES_BRANCH=main
+termlinks update
+```
+
+The first two variables are required to enable automatic Pages deployment. The project and branch are optional and default to `termlinks` and `main`. Termlinks stages the portal and its Pages Function from assets embedded in the installed executable, then invokes an installed Wrangler or pinned `npx wrangler@4.129.0`. Secrets are supplied only in that child process's environment and are never put in command arguments. The command does not deploy the Worker, modify `RELAY_ORIGIN`, rotate secrets, restart the daemon, or stop active PTYs.
+
+If the variables are absent, `termlinks update` performs only the local binary update. Use the following explicit override on a configured machine:
+
+```sh
+termlinks update --local-only
+```
+
+When upgrading from a release that predates this feature, the old updater installs the new executable but cannot perform the new Pages step itself. Run `termlinks update` one additional time after that first upgrade; later releases require only one command.
+
 One deployment currently represents one computer. Do not configure another computer with the same connector secret: there is no device identity or selector, so connectors would replace each other. Give each computer its own Worker/Pages deployment and private secrets until multi-device pairing and routing are implemented.
 
 ## Rotate the connector secret

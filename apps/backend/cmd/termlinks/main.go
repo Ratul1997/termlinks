@@ -25,6 +25,7 @@ import (
 	"termlinks/backend/internal/auth"
 	"termlinks/backend/internal/client"
 	"termlinks/backend/internal/cloud"
+	"termlinks/backend/internal/cloudflarepages"
 	"termlinks/backend/internal/config"
 	"termlinks/backend/internal/coordinator"
 	"termlinks/backend/internal/selfupdate"
@@ -35,7 +36,7 @@ import (
 	"termlinks/backend/internal/windowcapture"
 )
 
-const version = "0.8.2"
+const version = "0.8.3"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -53,6 +54,8 @@ func run(args []string) error {
 		switch args[0] {
 		case "__agent-stdio":
 			return runAgentStdio(args[1:])
+		case "__cloudflare-pages-deploy":
+			return runCloudflarePagesDeploy(args[1:])
 		case "daemon", "serve":
 			return runDaemon(args[1:])
 		case "list", "ls":
@@ -118,8 +121,11 @@ func runAgentStdio(args []string) error {
 }
 
 func runUpdate(args []string) error {
-	if len(args) != 0 {
-		return errors.New("usage: termlinks update")
+	flags := flag.NewFlagSet("update", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	localOnly := flags.Bool("local-only", false, "skip optional Cloudflare Pages deployment")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return errors.New("usage: termlinks update [--local-only]")
 	}
 	connectorWasRunning := false
 	if paths, err := config.ResolvePaths(); err == nil {
@@ -134,13 +140,12 @@ func runUpdate(args []string) error {
 	if err != nil {
 		return fmt.Errorf("update: %w", err)
 	}
-	if !result.Updated {
+	if result.Updated {
+		fmt.Printf("Updated Termlinks %s -> %s using %s (SHA-256 verified).\n", result.From, result.To, result.AssetName)
+	} else {
 		fmt.Printf("Termlinks %s is already the newest release.\n", result.From)
-		return nil
 	}
-
-	fmt.Printf("Updated Termlinks %s -> %s using %s (SHA-256 verified).\n", result.From, result.To, result.AssetName)
-	if connectorWasRunning {
+	if result.Updated && connectorWasRunning {
 		fmt.Println("Restarting the cloud connector; active terminal sessions will stay running...")
 		if err := stopCloud(); err != nil {
 			return fmt.Errorf("update installed, but cloud connector restart could not stop the old process: %w", err)
@@ -149,8 +154,58 @@ func runUpdate(args []string) error {
 			return fmt.Errorf("update installed, but cloud connector restart failed: %w", err)
 		}
 	}
-	fmt.Println("Active terminal sessions and the running daemon were not restarted.")
+	if result.Updated {
+		fmt.Println("Active terminal sessions and the running daemon were not restarted.")
+	}
+	if *localOnly {
+		fmt.Println("Cloudflare Pages deployment skipped (--local-only).")
+		return nil
+	}
+	config, configured, configErr := cloudflarepages.FromEnvironment()
+	if configErr != nil {
+		return fmt.Errorf("local update finished, but Cloudflare Pages configuration is invalid: %w", configErr)
+	}
+	if !configured {
+		fmt.Printf("Cloudflare Pages not configured; set %s and %s to include it in future updates.\n", cloudflarepages.TokenEnv, cloudflarepages.AccountEnv)
+		return nil
+	}
+	fmt.Printf("Cloudflare Pages configuration found; deploying project %q from the bundled portal...\n", config.Project)
+	deployContext, deployCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer deployCancel()
+	if result.Updated {
+		executable, executableErr := os.Executable()
+		if executableErr != nil {
+			return fmt.Errorf("local update finished, but the updated executable could not be located: %w", executableErr)
+		}
+		command := exec.CommandContext(deployContext, executable, "__cloudflare-pages-deploy")
+		command.Stdin = nil
+		command.Stdout = os.Stdout
+		command.Stderr = os.Stderr
+		if commandErr := command.Run(); commandErr != nil {
+			return fmt.Errorf("local update finished, but the updated executable could not deploy Cloudflare Pages: %w", commandErr)
+		}
+		return nil
+	}
+	if err := cloudflarepages.Deploy(deployContext, config, os.Stdout, os.Stderr); err != nil {
+		return fmt.Errorf("local update finished, but Cloudflare Pages deployment failed: %w", err)
+	}
 	return nil
+}
+
+func runCloudflarePagesDeploy(args []string) error {
+	if len(args) != 0 {
+		return errors.New("invalid internal Cloudflare Pages deploy invocation")
+	}
+	config, configured, err := cloudflarepages.FromEnvironment()
+	if err != nil {
+		return err
+	}
+	if !configured {
+		return errors.New("Cloudflare Pages deployment is not configured")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	return cloudflarepages.Deploy(ctx, config, os.Stdout, os.Stderr)
 }
 
 func runCloud(args []string) error {
@@ -1075,7 +1130,7 @@ Usage:
   termlinks stop <id>               Gracefully stop a session
   termlinks token                   Print the private portal login token
   termlinks doctor                  Show safe local diagnostics
-  termlinks update                  Securely install the newest release
+  termlinks update [--local-only]   Update locally and optionally deploy configured Pages
   termlinks cloud configure ...     Configure the Cloudflare relay
   termlinks cloud start             Connect this computer to the cloud portal
   termlinks cloud status            Show cloud connector status

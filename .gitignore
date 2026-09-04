@@ -3,6 +3,8 @@ node_modules/
 apps/web/dist/
 apps/backend/internal/webui/dist/*
 !apps/backend/internal/webui/dist/.gitkeep
+apps/backend/internal/cloudflarepages/bundle/functions/*
+!apps/backend/internal/cloudflarepages/bundle/functions/.gitkeep
 /dist/
 coverage/
 *.log

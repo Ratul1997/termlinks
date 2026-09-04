@@ -165,6 +165,18 @@ termlinks update
 
 That one command checks the official GitHub Releases feed, selects the build for the computer's operating system and CPU, verifies the published SHA-256 checksum, verifies the downloaded executable's reported version, and replaces the current executable atomically. If the cloud connector was online, Termlinks restarts only that connector. It deliberately does **not** restart the daemon or active terminal sessions, so work in progress stays alive; the running daemon adopts the new executable the next time it is safely restarted.
 
+If the two Termlinks-specific Cloudflare variables below are present, the same command also deploys the newly bundled portal and Pages Function to that Pages project. If they are absent, the update remains completely local. Use `termlinks update --local-only` to suppress deployment for one run even when they are configured.
+
+```sh
+export TERMLINKS_CLOUDFLARE_API_TOKEN='<private-api-token>'
+export TERMLINKS_CLOUDFLARE_ACCOUNT_ID='<32-character-account-id>'
+export TERMLINKS_CLOUDFLARE_PAGES_PROJECT='my-termlinks-portal' # optional; default: termlinks
+export TERMLINKS_CLOUDFLARE_PAGES_BRANCH='main'                # optional; default: main
+termlinks update
+```
+
+Store these exports in a private shell/profile or operating-system secret manager, never in the repository. The API token needs permission to edit Cloudflare Pages for that account, and the Pages project plus its `RELAY_ORIGIN` setting must already exist. Termlinks uses an installed `wrangler` command when available, otherwise pinned `npx wrangler@4.129.0`; it passes credentials only through the child process environment, not command arguments. This updates Pages only—the relay Worker and its connector secret are deliberately not redeployed or changed.
+
 The command updates the exact executable that invoked it, whether it is `~/.local/bin/termlinks`, `/usr/local/bin/termlinks`, or a standalone copy. The containing directory must be writable by the current user. An administrator-owned installation may require running the same command with appropriate privileges. Source-only or unsupported-platform installations can still update with `git pull && make install`.
 
 Control the outbound cloud connection:
@@ -331,12 +343,16 @@ These are used only by the included default Cloudflare adapter:
 | `RELAY_ORIGIN` | Pages Function environment variable/secret | Plain HTTPS origin of the deployed relay Worker. The Pages Function refuses `/ws/bridge` with `503` when absent or invalid. |
 | `CLOUDFLARE_API_TOKEN` | Wrangler process environment | Optional non-interactive Cloudflare API credential. Never commit it. Interactive `wrangler login` is the alternative. |
 | `CLOUDFLARE_ACCOUNT_ID` | Wrangler process environment | Selects the Cloudflare account for non-interactive deployment. |
+| `TERMLINKS_CLOUDFLARE_API_TOKEN` | Local `termlinks update` environment | Opts the updater into Pages deployment. Keep it private; it is mapped to Wrangler's API-token variable only inside the deployment child process. |
+| `TERMLINKS_CLOUDFLARE_ACCOUNT_ID` | Local `termlinks update` environment | Required with the preceding token; must be a 32-character hexadecimal account ID. |
+| `TERMLINKS_CLOUDFLARE_PAGES_PROJECT` | Local `termlinks update` environment | Optional Pages project; defaults to `termlinks`. Lowercase letters, numbers, and hyphens only. |
+| `TERMLINKS_CLOUDFLARE_PAGES_BRANCH` | Local `termlinks update` environment | Optional deployment branch; defaults to `main`. |
 | Worker `name` | `apps/relay/wrangler.jsonc` or Wrangler `--name` | Choose a unique relay Worker name for each deployment/computer. |
 | Pages project name | Wrangler `--project-name` | Choose a Pages project name; its generated `.pages.dev` URL becomes the portal URL. |
 
 The checked-in Worker configuration also sets `main` to `src/index.ts`, enables `workers.dev`, uses compatibility date `2026-09-02` with `nodejs_compat`, creates the `TermlinksRelay` SQLite Durable Object as migration `v1`, enables logs at sampling rate `1`, and enables traces at `0.01`. The reference Worker routes one computer through Durable Object key `personal-computer` with location hint `apac`; a fork serving multiple devices must replace that fixed key with authenticated device routing. Change these values in `apps/relay/wrangler.jsonc` or `apps/relay/src/index.ts` if a fork needs different Cloudflare behavior.
 
-For local Worker development, copy `apps/relay/.dev.vars.example` to the gitignored `apps/relay/.dev.vars` and replace its placeholder `CONNECTOR_TOKEN`. The `TERMLINKS_RELAY_NAME`, `TERMLINKS_PAGES_PROJECT`, `TERMLINKS_RELAY_URL`, `TERMLINKS_PORTAL_URL`, and `TERMLINKS_CONNECTOR_SECRET_FILE` names used in [docs/cloudflare.md](docs/cloudflare.md) are shell convenience variables for the documented commands; Termlinks itself does not read them.
+For local Worker development, copy `apps/relay/.dev.vars.example` to the gitignored `apps/relay/.dev.vars` and replace its placeholder `CONNECTOR_TOKEN`. The `TERMLINKS_RELAY_NAME`, `TERMLINKS_PAGES_PROJECT`, `TERMLINKS_RELAY_URL`, `TERMLINKS_PORTAL_URL`, and `TERMLINKS_CONNECTOR_SECRET_FILE` names used in [docs/cloudflare.md](docs/cloudflare.md) are shell convenience variables for the documented commands; unlike the explicitly listed `TERMLINKS_CLOUDFLARE_*` updater settings, Termlinks itself does not read them.
 
 ### Build, install, and development
 
@@ -351,7 +367,7 @@ For local Worker development, copy `apps/relay/.dev.vars.example` to the gitigno
 | `npm run build:backend` | Produces stripped `dist/termlinks`; macOS uses external linking and ad-hoc signs identifier `dev.termlinks.cli`. |
 | `npm run build` / `make build` | Runs web build, embed sync, and backend build in order. |
 | `make install` | Builds and installs to `$HOME/.local/bin/termlinks`. The Makefile currently has no `PREFIX` override. |
-| `termlinks update` | Installs the newest compatible GitHub release after HTTPS, host, archive, version, and SHA-256 validation. It restarts an active cloud connector but preserves the daemon and PTYs. |
+| `termlinks update [--local-only]` | Installs the newest compatible GitHub release after HTTPS, host, archive, version, and SHA-256 validation. It restarts an active cloud connector but preserves the daemon and PTYs. When the explicit `TERMLINKS_CLOUDFLARE_*` credentials are configured, it also deploys the bundled Pages portal unless `--local-only` is supplied. |
 | `npm run dev --workspace @termlinks/web` | Rebuilds on change and serves static UI assets on `127.0.0.1:5173`; it does not proxy the daemon API. |
 | `npm run types:relay` | Regenerates Cloudflare Worker types using `.dev.vars.example`. |
 | `npm run deploy:relay` | Convenience deployment using the checked-in Worker name. Use the explicit commands in the Cloudflare guide for a custom name. |

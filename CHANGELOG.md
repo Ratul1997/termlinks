@@ -4,10 +4,13 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-09-04
+
 ### Added
 
 - A checksum-verifying macOS/Linux release installer and a shorter binary-first quick start.
 - GitHub-native CI, release, and license badges for clearer project status.
+- `termlinks update` can optionally deploy the bundled portal and Pages Function when explicit `TERMLINKS_CLOUDFLARE_*` credentials are configured; `--local-only` provides a per-run override.
 
 ### Fixed
 
@@ -44,7 +47,8 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 - Private SQLite workflow and terminal-history state.
 - Browser-created terminal continuity with native terminal attachment.
 
-[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/Ratul1997/termlinks/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/Ratul1997/termlinks/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/Ratul1997/termlinks/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/Ratul1997/termlinks/releases/tag/v0.8.0
