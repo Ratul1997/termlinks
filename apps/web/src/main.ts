@@ -14,6 +14,7 @@ import {
   type SavedTerminal,
 } from "./terminal-history";
 import { TerminalStreamReconciler, terminalStreamControl } from "./terminal-reconnect";
+import { nextTerminalInputMode, parseTerminalInputMode, type TerminalInputMode } from "./terminal-input-mode";
 import { binaryStringToBytes, consumeTouchWheel } from "./terminal-touch";
 import "./style.css";
 
@@ -203,7 +204,18 @@ const PORTAL_KEY_DATABASE = "termlinks-secure-session";
 const PORTAL_KEY_STORE = "keys";
 const PORTAL_KEY_ID = "portal-e2e-key";
 const TERMINAL_TAB_ORDER_KEY = "termlinks-terminal-tab-order-v1";
+const TERMINAL_INPUT_MODE_KEY = "termlinks-terminal-input-mode-v1";
 const MAX_PERSISTED_TERMINAL_TABS = 64;
+
+function readTerminalInputMode(): TerminalInputMode {
+  try { return parseTerminalInputMode(localStorage.getItem(TERMINAL_INPUT_MODE_KEY)); }
+  catch { return "compose"; }
+}
+
+function saveTerminalInputMode(mode: TerminalInputMode): void {
+  try { localStorage.setItem(TERMINAL_INPUT_MODE_KEY, mode); }
+  catch { /* Storage can be unavailable in private browsing. */ }
+}
 
 // Remove metadata written by the unmerged browser-local history prototype.
 // Persistent history now lives only in the user's local Termlinks database.
@@ -2740,6 +2752,7 @@ function renderTerminal(id: string, workflowID?: string): void {
   rememberPortalView("terminal", id, state.selectedWorkflow);
   app.replaceChildren();
   const page = el("main", "terminal-page");
+  page.dataset.inputMode = readTerminalInputMode();
   const header = el("header", "terminal-header");
   const back = el("button", "back-button terminal-back-button", "‹");
   back.type = "button";
@@ -2756,7 +2769,11 @@ function renderTerminal(id: string, workflowID?: string): void {
   menu.type = "button";
   menu.title = "Session actions";
   menu.addEventListener("click", () => actions.classList.toggle("open"));
-  header.append(back, identity, menu);
+  const inputModeButton = el("button", "terminal-input-mode-button");
+  inputModeButton.type = "button";
+  const headerActions = el("div", "terminal-header-actions");
+  headerActions.append(inputModeButton, menu);
+  header.append(back, identity, headerActions);
 
   const actions = el("div", "actions-menu");
   const reconnect = el("button", "menu-button", "Reconnect");
@@ -2837,7 +2854,8 @@ function renderTerminal(id: string, workflowID?: string): void {
   tuiHint.hidden = true;
   tuiHint.setAttribute("aria-live", "polite");
   frame.append(mount, sync, tuiHint);
-  page.append(header, actions, connection, frame, renderTerminalTabs(session.id), renderTerminalComposer());
+  const composer = renderTerminalComposer();
+  page.append(header, actions, connection, frame, renderTerminalTabs(session.id), composer);
   app.append(page);
 
   const terminal = new Terminal({
@@ -2867,18 +2885,52 @@ function renderTerminal(id: string, workflowID?: string): void {
   state.terminalSessionID = session.id;
   state.terminalSnapshotApplied = false;
   state.fit = fit;
-  const touchScroll = enableTouchScroll(terminal, tuiHint);
+  const touchScroll = enableTouchScroll(terminal, tuiHint, () => page.dataset.inputMode === "direct");
   state.touchCleanup = touchScroll.cleanup;
   state.touchSync = touchScroll.align;
   state.layoutCleanup = installTerminalViewportSizing(page);
   fitTerminal();
   if (!window.matchMedia("(pointer: coarse)").matches) terminal.focus();
+  page.addEventListener("keydown", (event) => {
+    if (
+      page.dataset.inputMode !== "direct"
+      || event.key !== "Enter"
+      || event.isComposing
+      || !(event.target instanceof HTMLElement)
+      || !event.target.classList.contains("xterm-helper-textarea")
+    ) return;
+    // WebKit can stop xterm's hidden textarea from translating Return after
+    // a full-screen TUI redraw even though ordinary character keys continue
+    // to work. Capture the key before xterm so the physical/software Return
+    // key always becomes exactly one terminal carriage return.
+    if (!sendTerminalInput("\r")) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, { capture: true });
   terminal.onData((data) => {
     if (state.socket?.readyState === WebSocket.OPEN) state.socket.send(new TextEncoder().encode(data));
   });
   terminal.onBinary((data) => {
     if (state.socket?.readyState === WebSocket.OPEN) state.socket.send(binaryStringToBytes(data));
   });
+  const applyInputMode = (mode: TerminalInputMode, persist: boolean): void => {
+    page.dataset.inputMode = mode;
+    const direct = mode === "direct";
+    inputModeButton.textContent = direct ? "Compose" : "Direct";
+    inputModeButton.title = direct ? "Use the message composer" : "Use Termius-style direct terminal input";
+    inputModeButton.setAttribute("aria-label", inputModeButton.title);
+    inputModeButton.setAttribute("aria-pressed", String(direct));
+    if (direct && document.activeElement?.classList.contains("terminal-composer-input")) {
+      (document.activeElement as HTMLElement).blur();
+    }
+    touchScroll.refresh();
+    if (persist) saveTerminalInputMode(mode);
+    window.requestAnimationFrame(fitTerminal);
+  };
+  inputModeButton.addEventListener("click", () => {
+    applyInputMode(nextTerminalInputMode(parseTerminalInputMode(page.dataset.inputMode)), true);
+  });
+  applyInputMode(parseTerminalInputMode(page.dataset.inputMode), false);
   connectTerminal(session);
   const resize = new ResizeObserver(fitTerminal);
   resize.observe(frame);
@@ -3221,12 +3273,16 @@ function installTerminalViewportSizing(page: HTMLElement): () => void {
   };
 }
 
-function enableTouchScroll(terminal: Terminal, tuiHint?: HTMLElement): { cleanup: () => void; align: () => void } {
+function enableTouchScroll(
+  terminal: Terminal,
+  tuiHint?: HTMLElement,
+  isDirectMode: () => boolean = () => false,
+): { cleanup: () => void; align: () => void; refresh: () => void } {
   const root = terminal.element;
   const screen = root?.querySelector<HTMLElement>(".xterm-screen");
   const hasTouchInput = navigator.maxTouchPoints > 0 || window.matchMedia("(pointer: coarse)").matches;
   if (!root || !screen || !hasTouchInput) {
-    return { cleanup: () => undefined, align: () => undefined };
+    return { cleanup: () => undefined, align: () => undefined, refresh: () => undefined };
   }
 
   const spacer = el("div", "terminal-native-scroll-spacer");
@@ -3239,11 +3295,17 @@ function enableTouchScroll(terminal: Terminal, tuiHint?: HTMLElement): { cleanup
   let ignoreProgrammaticScroll = false;
   let touchIdentifier: number | undefined;
   let previousTouchY = 0;
+  let startingTouchY = 0;
+  let touchStartedAt = 0;
+  let touchMoved = false;
   let touchRemainder = 0;
 
   const resetTouch = (): void => {
     touchIdentifier = undefined;
     previousTouchY = 0;
+    startingTouchY = 0;
+    touchStartedAt = 0;
+    touchMoved = false;
     touchRemainder = 0;
   };
   const isAlternateScreen = (): boolean => terminal.buffer.active.type === "alternate";
@@ -3257,7 +3319,8 @@ function enableTouchScroll(terminal: Terminal, tuiHint?: HTMLElement): { cleanup
   const syncInputMode = (): void => {
     const alternate = isAlternateScreen();
     root.classList.toggle("tui-touch-terminal", alternate);
-    if (tuiHint) tuiHint.hidden = !alternate;
+    root.classList.toggle("direct-touch-terminal", isDirectMode());
+    if (tuiHint) tuiHint.hidden = !alternate || isDirectMode();
     resetTouch();
     if (alternate) {
       spacer.style.height = "0";
@@ -3307,17 +3370,22 @@ function enableTouchScroll(terminal: Terminal, tuiHint?: HTMLElement): { cleanup
   };
 
   const onTUITouchStart = (event: TouchEvent): void => {
-    if (!isAlternateScreen() || event.touches.length !== 1) return;
+    if ((!isAlternateScreen() && !isDirectMode()) || event.touches.length !== 1) return;
     const touch = event.touches[0];
     if (!touch) return;
     touchIdentifier = touch.identifier;
     previousTouchY = touch.clientY;
+    startingTouchY = touch.clientY;
+    touchStartedAt = performance.now();
+    touchMoved = false;
     touchRemainder = 0;
   };
   const onTUITouchMove = (event: TouchEvent): void => {
-    if (touchIdentifier === undefined || !isAlternateScreen()) return;
+    if (touchIdentifier === undefined) return;
     const touch = findTouch(event.touches, touchIdentifier);
     if (!touch) return;
+    if (Math.abs(touch.clientY - startingTouchY) > 7) touchMoved = true;
+    if (!isAlternateScreen()) return;
     const threshold = Math.max(12, Math.min(28, rowHeight() * 1.1));
     const consumed = consumeTouchWheel(previousTouchY, touch.clientY, touchRemainder, threshold);
     previousTouchY = touch.clientY;
@@ -3341,7 +3409,9 @@ function enableTouchScroll(terminal: Terminal, tuiHint?: HTMLElement): { cleanup
   const onTUITouchEnd = (event: TouchEvent): void => {
     if (touchIdentifier === undefined) return;
     if (findTouch(event.touches, touchIdentifier)) return;
+    const focusDirectInput = isDirectMode() && !touchMoved && performance.now() - touchStartedAt < 500;
     resetTouch();
+    if (focusDirectInput) terminal.focus();
   };
 
   root.addEventListener("scroll", onNativeScroll, { passive: true });
@@ -3357,6 +3427,7 @@ function enableTouchScroll(terminal: Terminal, tuiHint?: HTMLElement): { cleanup
   syncInputMode();
   scheduleSync();
   return {
+    refresh: syncInputMode,
     align: () => {
       // Changing terminal rows can make WebKit emit delayed scroll events for
       // the old geometry. Ignore them until the next real finger gesture.
@@ -3417,6 +3488,7 @@ function renderTerminalComposer(): HTMLElement {
   const status = el("div", "terminal-composer-meta");
   status.append(
     el("span", "terminal-composer-hint", "Enter to send · Shift+Enter for a new line"),
+    el("span", "terminal-direct-hint", "Tap terminal to type · swipe to navigate"),
     el("span", "terminal-composer-state", "Connecting…"),
   );
 
@@ -3530,15 +3602,16 @@ function renderTerminalComposer(): HTMLElement {
 
 function renderExtraKeys(focusTarget?: HTMLElement): HTMLElement {
   const bar = el("div", "extra-keys");
-  const keys: Array<[string, string]> = [
+  const keys: Array<[string, string, string?]> = [
     ["\r", "Enter"], ["\u001b", "Esc"], ["\t", "Tab"], ["\u0003", "Ctrl C"], ["\u0004", "Ctrl D"],
-    ["\u001b[5~", "PgUp"], ["\u001b[6~", "PgDn"],
+    ["\u001b[5~", "PgUp", "terminal-page-navigation-key"], ["\u001b[6~", "PgDn", "terminal-page-navigation-key"],
     ["\u001b[A", "↑"], ["\u001b[B", "↓"], ["\u001b[D", "←"], ["\u001b[C", "→"],
   ];
-  for (const [value, label] of keys) {
+  for (const [value, label, className] of keys) {
     const button = el("button", "key-button", label);
     button.type = "button";
     button.classList.add("terminal-control-key");
+    if (className) button.classList.add(className);
     button.disabled = true;
     button.addEventListener("pointerdown", (event) => event.preventDefault());
     button.addEventListener("click", () => {

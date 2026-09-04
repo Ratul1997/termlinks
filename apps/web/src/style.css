@@ -352,7 +352,7 @@ button { color: inherit; }
   overflow: hidden; color: #d7dee9; background: var(--terminal-bg);
 }
 .terminal-header {
-  min-height: 64px; display: grid; grid-template-columns: 40px minmax(0, 1fr) 40px; align-items: center; gap: 8px;
+  min-height: 64px; display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; gap: 8px;
   padding: max(7px, env(safe-area-inset-top)) 10px 7px; border-bottom: 1px solid var(--terminal-line);
   background: rgba(13, 20, 28, .96); box-shadow: 0 8px 24px rgba(0, 0, 0, .18); backdrop-filter: blur(14px);
 }
@@ -363,6 +363,12 @@ button { color: inherit; }
 }
 .terminal-back-button { display: grid; place-items: center; padding-bottom: 4px; font-size: 30px; }
 .terminal-menu-button { font-size: 13px; letter-spacing: 2px !important; }
+.terminal-header-actions { display: flex; align-items: center; gap: 6px; }
+.terminal-input-mode-button {
+  min-width: 58px; height: 38px; padding: 0 9px; border: 1px solid #2d4657; border-radius: 11px;
+  color: #9eddf5; background: #10202b; font: 700 9px/1 ui-monospace, monospace; letter-spacing: .02em;
+}
+.terminal-input-mode-button[aria-pressed="true"] { color: #071019; border-color: var(--terminal-accent); background: var(--terminal-accent); }
 .terminal-identity { min-width: 0; text-align: left; }
 .terminal-title-row { display: flex; min-width: 0; align-items: center; gap: 8px; }
 .terminal-name, .terminal-subtitle { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -427,6 +433,7 @@ button { color: inherit; }
   font: 700 8px/1 ui-monospace, monospace; letter-spacing: .05em; pointer-events: none;
 }
 .terminal-tui-hint[hidden] { display: none; }
+.terminal-page[data-input-mode="direct"] .terminal-tui-hint { display: none; }
 .terminal-mount .xterm.native-touch-terminal > .xterm-scrollable-element {
   /* xterm wraps the rendered screen in this element. Pin the wrapper itself;
      pinning only .xterm-screen lets WebKit scroll its parent away to black. */
@@ -555,8 +562,14 @@ button { color: inherit; }
   color: #697987; font: 9px/1.2 ui-monospace, monospace;
 }
 .terminal-composer-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.terminal-direct-hint { display: none; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .terminal-composer-state { flex: 0 0 auto; color: #7b8995; }
 .terminal-composer[data-connected="true"] .terminal-composer-state { color: #78cce9; }
+.terminal-page[data-input-mode="direct"] .terminal-composer-panel,
+.terminal-page[data-input-mode="direct"] .terminal-page-navigation-key,
+.terminal-page[data-input-mode="direct"] .terminal-composer-hint { display: none; }
+.terminal-page[data-input-mode="direct"] .terminal-direct-hint { display: block; }
+.terminal-page[data-input-mode="direct"] .terminal-composer { padding-top: 2px; }
 
 .desktop-page {
   width: 100%; height: 100dvh; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto auto;

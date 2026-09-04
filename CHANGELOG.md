@@ -4,6 +4,18 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-09-05
+
+### Added
+
+- An opt-in **Direct** terminal mode gives phones a Termius-style raw-key workflow: tap the terminal to open the software keyboard, type directly into the PTY, and swipe the terminal to navigate the active shell or full-screen application.
+- The selected Compose/Direct mode is remembered by each browser or installed PWA and can be changed from every terminal header without restarting or reconnecting the session.
+
+### Fixed
+
+- Direct mode captures the mobile Return key before WebKit/xterm translation so one press reliably sends one terminal carriage return after full-screen TUI redraws.
+- Direct mode removes the composer and Page Up/Page Down affordances while keeping the normal terminal accessory keys, long-press text selection, shell-history momentum, and alternate-screen swipe routing.
+
 ## [0.8.4] - 2026-09-05
 
 ### Fixed
@@ -55,7 +67,8 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 - Private SQLite workflow and terminal-history state.
 - Browser-created terminal continuity with native terminal attachment.
 
-[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.4...HEAD
+[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.5...HEAD
+[0.8.5]: https://github.com/Ratul1997/termlinks/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/Ratul1997/termlinks/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/Ratul1997/termlinks/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/Ratul1997/termlinks/compare/v0.8.1...v0.8.2
