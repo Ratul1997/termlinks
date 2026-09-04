@@ -4,6 +4,16 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 
 ## [Unreleased]
 
+## [0.8.14] - 2026-09-05
+
+### Fixed
+
+- Hiding a managed macOS viewer now lets its dedicated shell finish detaching before closing the exact Terminal window, preventing an empty viewer window from being left behind.
+
+### Changed
+
+- `termlinks update` now activates an updated daemon automatically when it is idle. If managed terminals are running, it records a private pending update instead of destroying them; run the command again after they finish or explicitly use `--restart-daemon` to stop them and activate immediately. The connector still restarts automatically.
+
 ## [0.8.13] - 2026-09-05
 
 ### Fixed
@@ -119,7 +129,8 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 - Private SQLite workflow and terminal-history state.
 - Browser-created terminal continuity with native terminal attachment.
 
-[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.13...HEAD
+[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.14...HEAD
+[0.8.14]: https://github.com/Ratul1997/termlinks/compare/v0.8.13...v0.8.14
 [0.8.13]: https://github.com/Ratul1997/termlinks/compare/v0.8.12...v0.8.13
 [0.8.12]: https://github.com/Ratul1997/termlinks/compare/v0.8.11...v0.8.12
 [0.8.11]: https://github.com/Ratul1997/termlinks/compare/v0.8.10...v0.8.11

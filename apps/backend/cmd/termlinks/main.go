@@ -36,7 +36,7 @@ import (
 	"termlinks/backend/internal/windowcapture"
 )
 
-const version = "0.8.13"
+const version = "0.8.14"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -139,11 +139,13 @@ func runUpdate(args []string) error {
 	flags := flag.NewFlagSet("update", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	localOnly := flags.Bool("local-only", false, "skip optional Cloudflare Pages deployment")
+	restartDaemonNow := flags.Bool("restart-daemon", false, "restart even when this stops active managed terminals")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
-		return errors.New("usage: termlinks update [--local-only]")
+		return errors.New("usage: termlinks update [--local-only] [--restart-daemon]")
 	}
 	connectorWasRunning := false
-	if paths, err := config.ResolvePaths(); err == nil {
+	paths, pathsErr := config.ResolvePaths()
+	if pathsErr == nil {
 		if pid, running := cloudProcess(paths); running && isTermlinksConnector(pid) {
 			connectorWasRunning = true
 		}
@@ -160,6 +162,19 @@ func runUpdate(args []string) error {
 	} else {
 		fmt.Printf("Termlinks %s is already the newest release.\n", result.From)
 	}
+	if pathsErr != nil {
+		return fmt.Errorf("local update finished, but daemon state could not be resolved: %w", pathsErr)
+	}
+	if result.Updated {
+		if err := markDaemonUpdatePending(paths, result.To); err != nil {
+			return fmt.Errorf("update installed, but the daemon update could not be recorded: %w", err)
+		}
+	}
+	if result.Updated || daemonUpdatePending(paths) {
+		if err := applyDaemonUpdate(paths, *restartDaemonNow); err != nil {
+			return fmt.Errorf("update installed, but daemon activation failed: %w", err)
+		}
+	}
 	if result.Updated && connectorWasRunning {
 		fmt.Println("Restarting the cloud connector; active terminal sessions will stay running...")
 		if err := stopCloud(); err != nil {
@@ -168,9 +183,6 @@ func runUpdate(args []string) error {
 		if err := startCloud(); err != nil {
 			return fmt.Errorf("update installed, but cloud connector restart failed: %w", err)
 		}
-	}
-	if result.Updated {
-		fmt.Println("Active terminal sessions and the running daemon were not restarted.")
 	}
 	if *localOnly {
 		fmt.Println("Cloudflare Pages deployment skipped (--local-only).")
@@ -204,6 +216,81 @@ func runUpdate(args []string) error {
 	if err := cloudflarepages.Deploy(deployContext, config, os.Stdout, os.Stderr); err != nil {
 		return fmt.Errorf("local update finished, but Cloudflare Pages deployment failed: %w", err)
 	}
+	return nil
+}
+
+func markDaemonUpdatePending(paths config.Paths, targetVersion string) error {
+	if err := os.WriteFile(paths.DaemonUpdate, []byte(strings.TrimSpace(targetVersion)+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(paths.DaemonUpdate, 0o600)
+}
+
+func daemonUpdatePending(paths config.Paths) bool {
+	data, err := os.ReadFile(paths.DaemonUpdate)
+	return err == nil && strings.TrimSpace(string(data)) != ""
+}
+
+func applyDaemonUpdate(paths config.Paths, force bool) error {
+	local := client.New(paths.Socket)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	healthy := local.Healthy(ctx)
+	cancel()
+	if !healthy {
+		_ = os.Remove(paths.DaemonUpdate)
+		fmt.Println("The daemon is stopped; the new version will be used on its next start.")
+		return nil
+	}
+
+	ctx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
+	items, err := local.List(ctx)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("inspect active terminal sessions: %w", err)
+	}
+	running := 0
+	for _, item := range items {
+		if item.Running {
+			running++
+		}
+	}
+	if running > 0 && !force {
+		fmt.Printf("Daemon update pending: %d managed terminal session(s) are still running. Run `termlinks update` again after they finish, or use `termlinks update --restart-daemon` to stop them now.\n", running)
+		return nil
+	}
+	if running > 0 {
+		fmt.Printf("Restarting the daemon now; %d active managed terminal session(s) will stop...\n", running)
+	} else {
+		fmt.Println("Restarting the idle daemon to activate the update...")
+	}
+	pid, alive := daemonProcess(paths)
+	if !alive || !isTermlinksDaemon(pid) {
+		fmt.Println("Daemon update remains pending because this running daemon predates managed restarts. Restart it once after your active terminals finish; future `termlinks update` runs can activate daemon updates automatically.")
+		return nil
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	if err := process.Signal(syscall.SIGTERM); err != nil {
+		return err
+	}
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		if _, alive := daemonProcess(paths); !alive {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if _, alive := daemonProcess(paths); alive {
+		return errors.New("daemon did not stop within 10 seconds")
+	}
+	if _, err := readyDaemon(); err != nil {
+		return err
+	}
+	if err := os.Remove(paths.DaemonUpdate); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	fmt.Println("Daemon update activated.")
 	return nil
 }
 
@@ -596,6 +683,46 @@ func isTermlinksConnector(pid int) bool {
 	return strings.Contains(command, "termlinks") && strings.Contains(command, "cloud connect")
 }
 
+func daemonProcess(paths config.Paths) (int, bool) {
+	data, err := os.ReadFile(paths.DaemonPID)
+	if err != nil {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid < 2 {
+		return 0, false
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil || process.Signal(syscall.Signal(0)) != nil {
+		return pid, false
+	}
+	return pid, true
+}
+
+func isTermlinksDaemon(pid int) bool {
+	output, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	if err != nil {
+		return false
+	}
+	command := string(output)
+	return strings.Contains(command, "termlinks") && (strings.Contains(command, " daemon") || strings.Contains(command, " serve"))
+}
+
+func recordDaemonPID(paths config.Paths) error {
+	if err := os.WriteFile(paths.DaemonPID, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write daemon PID: %w", err)
+	}
+	return os.Chmod(paths.DaemonPID, 0o600)
+}
+
+func clearOwnedDaemonPID(paths config.Paths) {
+	data, err := os.ReadFile(paths.DaemonPID)
+	if err != nil || strings.TrimSpace(string(data)) != strconv.Itoa(os.Getpid()) {
+		return
+	}
+	_ = os.Remove(paths.DaemonPID)
+}
+
 func runCommand(args []string) error {
 	flags := flag.NewFlagSet("run", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -763,6 +890,13 @@ func runDaemon(args []string) error {
 		return fmt.Errorf("listen on %s: %w", *listen, err)
 	}
 	defer tcpListener.Close()
+	if err := recordDaemonPID(paths); err != nil {
+		return err
+	}
+	defer clearOwnedDaemonPID(paths)
+	if data, err := os.ReadFile(paths.DaemonUpdate); err == nil && strings.TrimSpace(string(data)) == version {
+		_ = os.Remove(paths.DaemonUpdate)
+	}
 
 	controlServer := newHTTPServer(handlers.ControlHandler())
 	webServer := newHTTPServer(handlers.WebHandler())
@@ -1203,7 +1337,8 @@ Usage:
   termlinks stop <id>               Gracefully stop a session
   termlinks token                   Print the private portal login token
   termlinks doctor                  Show safe local diagnostics
-  termlinks update [--local-only]   Update locally and optionally deploy configured Pages
+  termlinks update [--local-only] [--restart-daemon]
+                                    Update the binary, daemon, connector, and configured Pages
   termlinks cloud configure ...     Configure the Cloudflare relay
   termlinks cloud start             Connect this computer to the cloud portal
   termlinks cloud status            Show cloud connector status

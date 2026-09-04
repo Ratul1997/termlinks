@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Manager struct {
@@ -43,9 +44,15 @@ func (m *Manager) Open(sessionID string) error {
 	case "darwin":
 		attach := darwinAttachCommand(executable, m.stateDir, sessionID)
 		script := `on run argv
+set terminalWasRunning to application "Terminal" is running
 tell application "Terminal"
+  if terminalWasRunning then
+    do script (item 1 of argv)
+  else
+    reopen
+    do script (item 1 of argv) in front window
+  end if
   activate
-  do script (item 1 of argv)
   return id of front window
 end tell
 end run`
@@ -105,12 +112,17 @@ func (m *Manager) Close(sessionID string) error {
 	if !ok {
 		return nil
 	}
+	// The viewer websocket closes before its dedicated shell has necessarily
+	// processed the disconnect. Closing Terminal during that small interval can
+	// leave a confirmation sheet or an empty window behind. Give the shell time
+	// to execute the trailing `exit 0`, then close only the recorded window.
+	time.Sleep(350 * time.Millisecond)
 	script := `on run argv
 tell application "Terminal"
   set viewerID to item 1 of argv as integer
   repeat with viewerWindow in windows
     if id of viewerWindow is viewerID then
-      close viewerWindow
+      close viewerWindow saving no
       return
     end if
   end repeat

@@ -25,6 +25,8 @@ type Paths struct {
 	Token             string
 	Settings          string
 	DaemonLog         string
+	DaemonPID         string
+	DaemonUpdate      string
 	Cloud             string
 	CloudPID          string
 	CloudLog          string
@@ -65,6 +67,8 @@ func ResolvePaths() (Paths, error) {
 		Token:             filepath.Join(dir, "auth.token"),
 		Settings:          filepath.Join(dir, "settings.json"),
 		DaemonLog:         filepath.Join(dir, "daemon.log"),
+		DaemonPID:         filepath.Join(dir, "daemon.pid"),
+		DaemonUpdate:      filepath.Join(dir, "daemon-update-pending"),
 		Cloud:             filepath.Join(dir, "cloud.json"),
 		CloudPID:          filepath.Join(dir, "cloud.pid"),
 		CloudLog:          filepath.Join(dir, "cloud.log"),

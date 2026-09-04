@@ -1,12 +1,22 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
+	"termlinks/backend/internal/auth"
 	"termlinks/backend/internal/client"
 	"termlinks/backend/internal/config"
+	"termlinks/backend/internal/server"
 	"termlinks/backend/internal/session"
 )
 
@@ -142,6 +152,92 @@ func TestProcessExitCodeClampsUnrepresentableStatuses(t *testing.T) {
 		if got := processExitCode(input); got != want {
 			t.Errorf("processExitCode(%d) = %d, want %d", input, got, want)
 		}
+	}
+}
+
+func TestDaemonUpdateMarkerIsPrivateAndPersistent(t *testing.T) {
+	paths := config.Paths{DaemonUpdate: t.TempDir() + "/daemon-update-pending"}
+	if err := markDaemonUpdatePending(paths, "0.9.0"); err != nil {
+		t.Fatal(err)
+	}
+	if !daemonUpdatePending(paths) {
+		t.Fatal("daemon update marker was not detected")
+	}
+	info, err := os.Stat(paths.DaemonUpdate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("daemon update marker mode = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestDaemonPIDFileIsPrivateAndRemovedOnlyByOwner(t *testing.T) {
+	paths := config.Paths{DaemonPID: t.TempDir() + "/daemon.pid"}
+	if err := recordDaemonPID(paths); err != nil {
+		t.Fatal(err)
+	}
+	pid, alive := daemonProcess(paths)
+	if !alive || pid != os.Getpid() {
+		t.Fatalf("daemon PID = %d alive=%v, want current process", pid, alive)
+	}
+	info, err := os.Stat(paths.DaemonPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("daemon PID mode = %o, want 600", info.Mode().Perm())
+	}
+	clearOwnedDaemonPID(paths)
+	if _, err := os.Stat(paths.DaemonPID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("owned daemon PID file was not removed: %v", err)
+	}
+}
+
+func TestDaemonUpdateDefersWithoutStoppingActiveTerminal(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "tl-update-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	paths := config.Paths{
+		Socket:       filepath.Join(dir, "control.sock"),
+		DaemonUpdate: filepath.Join(dir, "daemon-update-pending"),
+	}
+	manager := session.NewManager()
+	current, err := manager.Start(session.StartOptions{
+		Name: "important work", Command: []string{"/bin/sh"}, Cwd: dir, Environment: os.Environ(), Cols: 80, Rows: 24,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = current.Stop() })
+	handler, err := server.New(manager, auth.New("unused-test-token"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", paths.Socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlServer := &http.Server{Handler: handler.ControlHandler()}
+	go func() { _ = controlServer.Serve(listener) }()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = controlServer.Shutdown(ctx)
+	})
+	if err := markDaemonUpdatePending(paths, "0.9.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyDaemonUpdate(paths, false); err != nil {
+		t.Fatal(err)
+	}
+	if !current.Info().Running {
+		t.Fatal("safe daemon update stopped an active terminal")
+	}
+	if !daemonUpdatePending(paths) {
+		t.Fatal("deferred daemon update marker was removed")
 	}
 }
 
