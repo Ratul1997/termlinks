@@ -1,7 +1,7 @@
 import { build } from "esbuild";
 import { resolve } from "node:path";
 
-for (const entry of ["terminal-history.test.ts", "terminal-reconnect.test.ts", "terminal-touch.test.ts", "terminal-input-mode.test.ts"]) {
+for (const entry of ["terminal-history.test.ts", "terminal-reconnect.test.ts", "terminal-touch.test.ts", "terminal-input-mode.test.ts", "terminal-reply-gate.test.ts"]) {
   const bundled = await build({
     entryPoints: [resolve(import.meta.dirname, `../src/${entry}`)],
     bundle: true,

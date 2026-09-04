@@ -15,6 +15,7 @@ import {
 } from "./terminal-history";
 import { TerminalStreamReconciler, terminalStreamControl } from "./terminal-reconnect";
 import { nextTerminalInputMode, parseTerminalInputMode, type TerminalInputMode } from "./terminal-input-mode";
+import { TerminalReplyGate } from "./terminal-reply-gate";
 import { binaryStringToBytes, consumeTouchWheel } from "./terminal-touch";
 import "./style.css";
 
@@ -172,6 +173,7 @@ const state: {
   terminal?: Terminal;
   terminalSessionID?: string;
   terminalSnapshotApplied: boolean;
+  terminalReplyGate?: TerminalReplyGate;
   fit?: FitAddon;
   touchCleanup?: () => void;
   touchSync?: () => void;
@@ -2884,6 +2886,8 @@ function renderTerminal(id: string, workflowID?: string): void {
   state.terminal = terminal;
   state.terminalSessionID = session.id;
   state.terminalSnapshotApplied = false;
+  const terminalReplyGate = new TerminalReplyGate();
+  state.terminalReplyGate = terminalReplyGate;
   state.fit = fit;
   const touchScroll = enableTouchScroll(terminal, tuiHint, () => page.dataset.inputMode === "direct");
   state.touchCleanup = touchScroll.cleanup;
@@ -2908,10 +2912,12 @@ function renderTerminal(id: string, workflowID?: string): void {
     event.stopImmediatePropagation();
   }, { capture: true });
   terminal.onData((data) => {
-    if (state.socket?.readyState === WebSocket.OPEN) state.socket.send(new TextEncoder().encode(data));
+    const reply = terminalReplyGate.receive(new TextEncoder().encode(data));
+    if (reply && state.socket?.readyState === WebSocket.OPEN) state.socket.send(reply);
   });
   terminal.onBinary((data) => {
-    if (state.socket?.readyState === WebSocket.OPEN) state.socket.send(binaryStringToBytes(data));
+    const reply = terminalReplyGate.receive(binaryStringToBytes(data));
+    if (reply && state.socket?.readyState === WebSocket.OPEN) state.socket.send(reply);
   });
   const applyInputMode = (mode: TerminalInputMode, persist: boolean): void => {
     page.dataset.inputMode = mode;
@@ -3713,6 +3719,8 @@ function connectTerminal(session: Session, automatic = false): void {
   const applySnapshot = (snapshot: Uint8Array): void => {
     if (state.socket !== socket || !state.terminal) return;
     const terminal = state.terminal;
+    const replyGate = state.terminalReplyGate;
+    const replyGeneration = replyGate?.beginSnapshot();
     const buffer = terminal.buffer.active;
     const wasAtBottom = buffer.viewportY >= buffer.baseY;
     const distanceFromBottom = Math.max(0, buffer.baseY - buffer.viewportY);
@@ -3722,6 +3730,10 @@ function connectTerminal(session: Session, automatic = false): void {
       if (wasAtBottom) terminal.scrollToBottom();
       else terminal.scrollToLine(Math.max(0, terminal.buffer.active.baseY - distanceFromBottom));
       state.touchSync?.();
+      if (replyGeneration !== undefined) {
+        const reply = replyGate?.finishSnapshot(replyGeneration);
+        if (reply && socket.readyState === WebSocket.OPEN) socket.send(reply);
+      }
       markReady();
     };
     if (snapshot.byteLength === 0) applied();
@@ -3925,6 +3937,8 @@ function closeConnection(): void {
   state.terminal = undefined;
   state.terminalSessionID = undefined;
   state.terminalSnapshotApplied = false;
+  state.terminalReplyGate?.reset();
+  state.terminalReplyGate = undefined;
   state.fit = undefined;
 }
 

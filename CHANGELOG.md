@@ -4,6 +4,12 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-09-05
+
+### Fixed
+
+- Reopening a retained full-screen terminal no longer replays every historical cursor/device query back into the application. Termlinks suppresses the snapshot response storm and forwards only the final bounded protocol reply, so large Claude Code and other TUI sessions accept touch and keyboard input immediately after reconnecting.
+
 ## [0.8.5] - 2026-09-05
 
 ### Added
@@ -67,7 +73,8 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 - Private SQLite workflow and terminal-history state.
 - Browser-created terminal continuity with native terminal attachment.
 
-[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.5...HEAD
+[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.6...HEAD
+[0.8.6]: https://github.com/Ratul1997/termlinks/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/Ratul1997/termlinks/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/Ratul1997/termlinks/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/Ratul1997/termlinks/compare/v0.8.2...v0.8.3
