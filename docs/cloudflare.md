@@ -108,7 +108,7 @@ termlinks cloud stop
 
 ### One-command local and Pages updates
 
-After the first deployment has created the Pages project and configured `RELAY_ORIGIN`, an installed Termlinks release can update itself and that Pages portal together. Create a narrowly scoped Cloudflare API token with Pages edit access, keep it in a private local secret store or shell profile, and expose these Termlinks-specific variables to the command:
+After the first deployment has created the Pages project and configured `RELAY_ORIGIN`, an installed Termlinks release can update itself and that Pages portal together. Create a narrowly scoped Cloudflare API token with Pages edit access, keep it in a private local secret store or shell profile, and expose these Termlinks-specific variables once. The Pages project may use any valid Cloudflare Pages name; set `TERMLINKS_CLOUDFLARE_PAGES_PROJECT` when it is not `termlinks`:
 
 ```sh
 export TERMLINKS_CLOUDFLARE_API_TOKEN='<private-api-token>'
@@ -118,7 +118,7 @@ export TERMLINKS_CLOUDFLARE_PAGES_BRANCH=main
 termlinks update
 ```
 
-The first two variables are required to enable automatic Pages deployment. The project and branch are optional and default to `termlinks` and `main`. Termlinks stages the portal and its Pages Function from assets embedded in the installed executable, then invokes an installed Wrangler or pinned `npx wrangler@4.129.0`. Secrets are supplied only in that child process's environment and are never put in command arguments. The command does not deploy the Worker, modify `RELAY_ORIGIN`, rotate secrets, restart the daemon, or stop active PTYs.
+The first two variables are required to enable automatic Pages deployment. The project and branch are optional and default to `termlinks` and `main`. Once those exports are loaded by the shell, each routine local-and-portal update is one command: `termlinks update`. Termlinks stages the portal and its Pages Function from assets embedded in the installed executable, then invokes an installed Wrangler or pinned `npx wrangler@4.129.0`. Secrets are supplied only in that child process's environment and are never put in command arguments. The command does not deploy the Worker, modify `RELAY_ORIGIN`, rotate secrets, restart the daemon, or stop active PTYs.
 
 If the variables are absent, `termlinks update` performs only the local binary update. Use the following explicit override on a configured machine:
 

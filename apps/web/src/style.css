@@ -414,6 +414,19 @@ button { color: inherit; }
   overflow-y: auto; overscroll-behavior-y: contain; touch-action: pan-y;
   -webkit-overflow-scrolling: touch; -webkit-user-select: text; user-select: text;
 }
+.terminal-mount .xterm.native-touch-terminal.tui-touch-terminal {
+  overflow-y: hidden; touch-action: none;
+}
+.terminal-mount .xterm.native-touch-terminal.tui-touch-terminal > .xterm-scrollable-element,
+.terminal-mount .xterm.native-touch-terminal.tui-touch-terminal .xterm-screen {
+  touch-action: none;
+}
+.terminal-tui-hint {
+  position: absolute; z-index: 4; right: 11px; bottom: 8px; padding: 5px 7px;
+  border: 1px solid #294454; border-radius: 6px; color: #83cbe9; background: rgba(9, 18, 24, .9);
+  font: 700 8px/1 ui-monospace, monospace; letter-spacing: .05em; pointer-events: none;
+}
+.terminal-tui-hint[hidden] { display: none; }
 .terminal-mount .xterm.native-touch-terminal > .xterm-scrollable-element {
   /* xterm wraps the rendered screen in this element. Pin the wrapper itself;
      pinning only .xterm-screen lets WebKit scroll its parent away to black. */

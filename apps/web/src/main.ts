@@ -14,6 +14,7 @@ import {
   type SavedTerminal,
 } from "./terminal-history";
 import { TerminalStreamReconciler, terminalStreamControl } from "./terminal-reconnect";
+import { binaryStringToBytes, consumeTouchWheel } from "./terminal-touch";
 import "./style.css";
 
 type Session = {
@@ -2832,7 +2833,10 @@ function renderTerminal(id: string, workflowID?: string): void {
   sync.setAttribute("role", "status");
   sync.setAttribute("aria-live", "polite");
   sync.append(el("span", "terminal-sync-dot"), el("span", "terminal-sync-label", "Reconnecting…"));
-  frame.append(mount, sync);
+  const tuiHint = el("div", "terminal-tui-hint", "TUI · swipe controls app");
+  tuiHint.hidden = true;
+  tuiHint.setAttribute("aria-live", "polite");
+  frame.append(mount, sync, tuiHint);
   page.append(header, actions, connection, frame, renderTerminalTabs(session.id), renderTerminalComposer());
   app.append(page);
 
@@ -2863,7 +2867,7 @@ function renderTerminal(id: string, workflowID?: string): void {
   state.terminalSessionID = session.id;
   state.terminalSnapshotApplied = false;
   state.fit = fit;
-  const touchScroll = enableTouchScroll(terminal);
+  const touchScroll = enableTouchScroll(terminal, tuiHint);
   state.touchCleanup = touchScroll.cleanup;
   state.touchSync = touchScroll.align;
   state.layoutCleanup = installTerminalViewportSizing(page);
@@ -2871,6 +2875,9 @@ function renderTerminal(id: string, workflowID?: string): void {
   if (!window.matchMedia("(pointer: coarse)").matches) terminal.focus();
   terminal.onData((data) => {
     if (state.socket?.readyState === WebSocket.OPEN) state.socket.send(new TextEncoder().encode(data));
+  });
+  terminal.onBinary((data) => {
+    if (state.socket?.readyState === WebSocket.OPEN) state.socket.send(binaryStringToBytes(data));
   });
   connectTerminal(session);
   const resize = new ResizeObserver(fitTerminal);
@@ -3214,7 +3221,7 @@ function installTerminalViewportSizing(page: HTMLElement): () => void {
   };
 }
 
-function enableTouchScroll(terminal: Terminal): { cleanup: () => void; align: () => void } {
+function enableTouchScroll(terminal: Terminal, tuiHint?: HTMLElement): { cleanup: () => void; align: () => void } {
   const root = terminal.element;
   const screen = root?.querySelector<HTMLElement>(".xterm-screen");
   const hasTouchInput = navigator.maxTouchPoints > 0 || window.matchMedia("(pointer: coarse)").matches;
@@ -3230,6 +3237,35 @@ function enableTouchScroll(terminal: Terminal): { cleanup: () => void; align: ()
   let syncFrame = 0;
   let disposed = false;
   let ignoreProgrammaticScroll = false;
+  let touchIdentifier: number | undefined;
+  let previousTouchY = 0;
+  let touchRemainder = 0;
+
+  const resetTouch = (): void => {
+    touchIdentifier = undefined;
+    previousTouchY = 0;
+    touchRemainder = 0;
+  };
+  const isAlternateScreen = (): boolean => terminal.buffer.active.type === "alternate";
+  const findTouch = (touches: TouchList, identifier: number): Touch | undefined => {
+    for (let index = 0; index < touches.length; index += 1) {
+      const touch = touches.item(index);
+      if (touch?.identifier === identifier) return touch;
+    }
+    return undefined;
+  };
+  const syncInputMode = (): void => {
+    const alternate = isAlternateScreen();
+    root.classList.toggle("tui-touch-terminal", alternate);
+    if (tuiHint) tuiHint.hidden = !alternate;
+    resetTouch();
+    if (alternate) {
+      spacer.style.height = "0";
+      root.scrollTop = 0;
+    } else {
+      syncNativeScroller(true);
+    }
+  };
 
   const rowHeight = (): number => screen.clientHeight / terminal.rows;
   const syncNativeScroller = (force = false): void => {
@@ -3270,11 +3306,55 @@ function enableTouchScroll(terminal: Terminal): { cleanup: () => void; align: ()
     ignoreProgrammaticScroll = false;
   };
 
+  const onTUITouchStart = (event: TouchEvent): void => {
+    if (!isAlternateScreen() || event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    if (!touch) return;
+    touchIdentifier = touch.identifier;
+    previousTouchY = touch.clientY;
+    touchRemainder = 0;
+  };
+  const onTUITouchMove = (event: TouchEvent): void => {
+    if (touchIdentifier === undefined || !isAlternateScreen()) return;
+    const touch = findTouch(event.touches, touchIdentifier);
+    if (!touch) return;
+    const threshold = Math.max(12, Math.min(28, rowHeight() * 1.1));
+    const consumed = consumeTouchWheel(previousTouchY, touch.clientY, touchRemainder, threshold);
+    previousTouchY = touch.clientY;
+    touchRemainder = consumed.remainder;
+    if (consumed.directions.length === 0) return;
+    event.preventDefault();
+    const bounds = screen.getBoundingClientRect();
+    const clientX = Math.max(bounds.left + 1, Math.min(bounds.right - 1, touch.clientX));
+    const clientY = Math.max(bounds.top + 1, Math.min(bounds.bottom - 1, touch.clientY));
+    for (const direction of consumed.directions) {
+      root.dispatchEvent(new WheelEvent("wheel", {
+        bubbles: true,
+        cancelable: true,
+        clientX,
+        clientY,
+        deltaMode: WheelEvent.DOM_DELTA_LINE,
+        deltaY: direction,
+      }));
+    }
+  };
+  const onTUITouchEnd = (event: TouchEvent): void => {
+    if (touchIdentifier === undefined) return;
+    if (findTouch(event.touches, touchIdentifier)) return;
+    resetTouch();
+  };
+
   root.addEventListener("scroll", onNativeScroll, { passive: true });
   root.addEventListener("touchstart", onTouchStart, { passive: true });
+  root.addEventListener("touchstart", onTUITouchStart, { passive: true });
+  root.addEventListener("touchmove", onTUITouchMove, { passive: false });
+  root.addEventListener("touchend", onTUITouchEnd, { passive: true });
+  root.addEventListener("touchcancel", onTUITouchEnd, { passive: true });
   const renderSubscription = terminal.onRender(scheduleSync);
   const scrollSubscription = terminal.onScroll(scheduleSync);
   const resizeSubscription = terminal.onResize(scheduleSync);
+  const bufferSubscription = terminal.buffer.onBufferChange(syncInputMode);
+  syncInputMode();
   scheduleSync();
   return {
     align: () => {
@@ -3291,9 +3371,16 @@ function enableTouchScroll(terminal: Terminal): { cleanup: () => void; align: ()
       renderSubscription.dispose();
       scrollSubscription.dispose();
       resizeSubscription.dispose();
+      bufferSubscription.dispose();
       root.removeEventListener("scroll", onNativeScroll);
       root.removeEventListener("touchstart", onTouchStart);
+      root.removeEventListener("touchstart", onTUITouchStart);
+      root.removeEventListener("touchmove", onTUITouchMove);
+      root.removeEventListener("touchend", onTUITouchEnd);
+      root.removeEventListener("touchcancel", onTUITouchEnd);
       root.classList.remove("native-touch-terminal");
+      root.classList.remove("tui-touch-terminal");
+      if (tuiHint) tuiHint.hidden = true;
       spacer.remove();
     },
   };
@@ -3445,6 +3532,7 @@ function renderExtraKeys(focusTarget?: HTMLElement): HTMLElement {
   const bar = el("div", "extra-keys");
   const keys: Array<[string, string]> = [
     ["\r", "Enter"], ["\u001b", "Esc"], ["\t", "Tab"], ["\u0003", "Ctrl C"], ["\u0004", "Ctrl D"],
+    ["\u001b[5~", "PgUp"], ["\u001b[6~", "PgDn"],
     ["\u001b[A", "↑"], ["\u001b[B", "↓"], ["\u001b[D", "←"], ["\u001b[C", "→"],
   ];
   for (const [value, label] of keys) {

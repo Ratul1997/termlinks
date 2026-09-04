@@ -157,7 +157,7 @@ termlinks version
 termlinks help
 ```
 
-Update an installed copy to the newest compatible release:
+After the one-time setup below, update the local executable and—when configured—the hosted Cloudflare Pages portal with one command:
 
 ```sh
 termlinks update
@@ -165,7 +165,7 @@ termlinks update
 
 That one command checks the official GitHub Releases feed, selects the build for the computer's operating system and CPU, verifies the published SHA-256 checksum, verifies the downloaded executable's reported version, and replaces the current executable atomically. If the cloud connector was online, Termlinks restarts only that connector. It deliberately does **not** restart the daemon or active terminal sessions, so work in progress stays alive; the running daemon adopts the new executable the next time it is safely restarted.
 
-If the two Termlinks-specific Cloudflare variables below are present, the same command also deploys the newly bundled portal and Pages Function to that Pages project. If they are absent, the update remains completely local. Use `termlinks update --local-only` to suppress deployment for one run even when they are configured.
+If the two required Termlinks-specific Cloudflare variables below are present, the same command also deploys the newly bundled portal and Pages Function. A custom Pages project name is supported through the optional project variable; developers are not required to call their project `termlinks`. Put the exports in a private shell profile once, then every routine update is simply `termlinks update`. If the variables are absent, the command remains completely local. Use `termlinks update --local-only` to suppress deployment for one run even when they are configured.
 
 ```sh
 export TERMLINKS_CLOUDFLARE_API_TOKEN='<private-api-token>'
@@ -175,7 +175,7 @@ export TERMLINKS_CLOUDFLARE_PAGES_BRANCH='main'                # optional; defau
 termlinks update
 ```
 
-Store these exports in a private shell/profile or operating-system secret manager, never in the repository. The API token needs permission to edit Cloudflare Pages for that account, and the Pages project plus its `RELAY_ORIGIN` setting must already exist. Termlinks uses an installed `wrangler` command when available, otherwise pinned `npx wrangler@4.129.0`; it passes credentials only through the child process environment, not command arguments. This updates Pages only—the relay Worker and its connector secret are deliberately not redeployed or changed.
+Store these exports in a private shell profile or operating-system secret manager, never in the repository. Reload that profile (or open a new terminal) before the first update. The API token needs permission to edit Cloudflare Pages for that account, and the Pages project plus its `RELAY_ORIGIN` setting must already exist. Termlinks uses an installed `wrangler` command when available, otherwise pinned `npx wrangler@4.129.0`; it passes credentials only through the child process environment, not command arguments. This routine command updates the local executable and Pages portal. The relay Worker and its connector secret are deliberately not redeployed or changed, because replacing either automatically could disconnect the computer.
 
 The command updates the exact executable that invoked it, whether it is `~/.local/bin/termlinks`, `/usr/local/bin/termlinks`, or a standalone copy. The containing directory must be writable by the current user. An administrator-owned installation may require running the same command with appropriate privileges. Source-only or unsupported-platform installations can still update with `git pull && make install`.
 
@@ -423,7 +423,8 @@ After login, the portal dashboard automatically shows every managed terminal and
 - The dashboard is the app-style **Home** screen. Its safe-area-aware bottom navigation keeps **Home**, **AI Work**, **Desktop**, and **New** available with one thumb; the active destination is highlighted. Terminal screens retain their separate tmux-style running-session rail, and remote desktop keeps its distraction-free full-screen controls.
 - Select **New terminal** to create one normal interactive shell. Termlinks immediately attaches the portal and opens a native Terminal window on the computer to the same PTY. Its optional starting directory may be `~`, `~/path`, or an absolute path.
 - Inside that shell, type `cd`, `ls`, `codex`, `npm run dev`, or any other command exactly as in a desktop terminal.
-- Terminal history uses native touch momentum on mobile and short smooth scrolling for mouse wheels and trackpads.
+- In a normal shell, terminal history uses native touch momentum on mobile and short smooth scrolling for mouse wheels and trackpads.
+- When a program switches to the terminal's alternate screen—for example Claude Code, Codex, Vim, htop, less, or lazygit—the portal shows **TUI · swipe controls app**. A one-finger vertical swipe is then sent to the running program as terminal wheel input instead of moving shell scrollback. The same behavior works with applications that use SGR or legacy mouse tracking; keyboard-driven programs can use the **PgUp** and **PgDn** controls. Whether old content remains available is ultimately decided by that full-screen program.
 - Use the compact hybrid composer below the terminal to type or paste commands and agent messages. Press **Enter** or the arrow button to send through the stable xterm paste-and-Enter path. Tap the composer to open the keyboard again. Press **Shift+Enter** to add another line before sending. Multiline content uses xterm's bracketed-paste behavior when the active terminal program supports it.
 - Use the bottom terminal bar like tmux or browser tabs: swipe anywhere across the rail for direct momentum scrolling, then tap a named tab to switch. A quick swipe starting on the six-dot grip scrolls normally; press and hold that grip first, then drag left or right to reposition the tab. The order is remembered separately by that browser/PWA. Keyboard users can focus a tab and press **Alt+Left/Right**. Tap **☷** for the full session dashboard or **+** to open the New terminal form. Switching or reordering tabs never restarts the daemon-owned command.
 - The terminal workspace uses a Termius-inspired dark navy shell with compact session metadata, numbered tmux-style tabs, a persistent E2E/local badge, and a blue command dock. This is Termlinks' own interface and does not copy Termius branding or assets.
