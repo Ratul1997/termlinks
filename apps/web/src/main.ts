@@ -31,6 +31,7 @@ type Session = {
   signal?: string;
   rows: number;
   cols: number;
+  viewer?: "hidden" | "opening" | "visible" | "unsupported";
 };
 
 type LocalAgent = {
@@ -168,6 +169,7 @@ const state: {
   sessions: Session[];
   savedTerminals: SavedTerminal[];
   terminalHistoryAvailable: boolean;
+  viewerControlAvailable: boolean;
   selected?: string;
   socket?: TerminalLink;
   terminal?: Terminal;
@@ -190,7 +192,7 @@ const state: {
   view: PortalView;
   selectedWorkflow?: string;
 } = {
-  authenticated: false, sessions: [], savedTerminals: [], terminalHistoryAvailable: true, terminalSnapshotApplied: false,
+  authenticated: false, sessions: [], savedTerminals: [], terminalHistoryAvailable: true, viewerControlAvailable: false, terminalSnapshotApplied: false,
   terminalReconnectAttempts: 0, closedSessions: new Set(),
   view: lastPortalView.view, selected: lastPortalView.selected, selectedWorkflow: lastPortalView.selectedWorkflow,
 };
@@ -1292,7 +1294,8 @@ function renderLogin(message = ""): void {
 }
 
 async function loadSessions(): Promise<void> {
-  const response = await api<{ sessions: Session[] }>("/api/sessions");
+  const response = await api<{ sessions: Session[]; viewerControl?: boolean }>("/api/sessions");
+  state.viewerControlAvailable = response.viewerControl === true;
   state.sessions = response.sessions.filter((session) => session.running && !state.closedSessions.has(session.id));
   await loadTerminalHistory();
 }
@@ -2331,7 +2334,9 @@ function renderCreatePanel(close: () => void): HTMLElement {
   const intro = el("div", "create-intro");
   intro.append(
     el("h2", "create-title", "Open a new shell"),
-    el("p", "create-copy", "This creates one shared shell, opens it here, and opens a native terminal window on your computer. Work from either screen and return to the same state."),
+    el("p", "create-copy", state.viewerControlAvailable
+      ? "This creates a persistent shell and opens it here without adding a window on your computer. You can open that exact session on the computer whenever you need it."
+      : "Your running local service is older, so this shell will also open on the computer. Existing sessions are safe; restart Termlinks only after finishing them to enable headless creation."),
   );
   const form = el("form", "create-form");
   form.autocomplete = "off";
@@ -2360,7 +2365,8 @@ function renderCreatePanel(close: () => void): HTMLElement {
   const cancel = el("button", "secondary-button", "Cancel");
   cancel.type = "button";
   cancel.addEventListener("click", close);
-  const submit = el("button", "create-submit", "Open on phone + computer");
+  const createLabel = state.viewerControlAvailable ? "Create and open here" : "Create here + computer";
+  const submit = el("button", "create-submit", createLabel);
   submit.type = "submit";
   actions.append(cancel, submit);
   form.append(nameField, cwdField, error, actions);
@@ -2378,7 +2384,7 @@ function renderCreatePanel(close: () => void): HTMLElement {
     } catch (caught) {
       error.textContent = caught instanceof Error ? caught.message : "Could not create the terminal";
       submit.disabled = false;
-      submit.textContent = "Open on phone + computer";
+      submit.textContent = createLabel;
     }
   });
   panel.append(intro, form);
@@ -2488,7 +2494,7 @@ function renderStartHint(): HTMLElement {
     el("p", "hint-copy", state.terminalHistoryAvailable
       ? "Leaving this page only disconnects the viewer. A terminal moves to Recent history after it exits or you stop it. History and favorites stay privately on this computer."
       : "Running terminals are safe and still available. Restart Termlinks after finishing active work to enable private history and favorites."),
-    el("code", "hint-command", state.terminalHistoryAvailable ? "termlinks list  ·  termlinks stop <id>" : "termlinks update  ·  termlinks restart"),
+    el("code", "hint-command", state.terminalHistoryAvailable ? "termlinks list  ·  show/hide <id>  ·  stop <id>" : "termlinks update  ·  termlinks restart"),
   );
   hint.append(icon, copy);
   return hint;
@@ -2570,7 +2576,8 @@ function renderRunningSessionCard(session: Session): HTMLElement {
   const folder = el("span", "project-label", projectLabel(session.cwd));
   folder.title = session.cwd;
   identity.append(el("span", "session-dot live"), folder, el("h2", "session-name", session.name));
-  const badge = el("span", "status-badge running", "RUNNING");
+  const viewerBadge = session.viewer === "visible" ? "ON COMPUTER" : session.viewer === "opening" ? "OPENING" : session.viewer === "hidden" ? "HEADLESS" : "RUNNING";
+  const badge = el("span", `status-badge running viewer-${session.viewer ?? "legacy"}`, viewerBadge);
   row.append(identity, badge);
   const command = el("code", "session-command", `$ ${session.command.join(" ")}`);
   const meta = el("div", "session-meta");
@@ -2580,7 +2587,7 @@ function renderRunningSessionCard(session: Session): HTMLElement {
   open.append(row, command, meta);
 
   const controls = el("div", "card-controls");
-  const openAction = el("button", "card-action", "Open terminal");
+  const openAction = el("button", "card-action", "Open here");
   openAction.type = "button";
   openAction.addEventListener("click", () => renderTerminal(session.id));
   const renameAction = el("button", "card-action", "Rename");
@@ -2605,7 +2612,7 @@ function renderRunningSessionCard(session: Session): HTMLElement {
   const stopAction = el("button", "card-action danger", "Stop & close");
   stopAction.type = "button";
   stopAction.addEventListener("click", () => stopFromDashboard(session, stopAction));
-  controls.append(openAction, renameAction, duplicateAction, favoriteAction, stopAction);
+  controls.append(openAction, createNativeViewerButton(session, "card-action"), renameAction, duplicateAction, favoriteAction, stopAction);
   card.append(open, controls);
   return card;
 }
@@ -2632,7 +2639,7 @@ function renderSavedTerminalCard(saved: SavedTerminal): HTMLElement {
   open.append(row, command, meta);
 
   const controls = el("div", "card-controls");
-  const openAction = el("button", "card-action", running ? "Open terminal" : "Open new shell");
+  const openAction = el("button", "card-action", running ? "Open here" : state.viewerControlAvailable ? "Open new shell" : "Open new shell + computer");
   openAction.type = "button";
   openAction.addEventListener("click", () => { void openSavedTerminal(saved, openAction); });
   const renameAction = el("button", "card-action", "Rename");
@@ -2686,6 +2693,64 @@ function refreshDashboardCards(): void {
   if (!container) return;
   renderSessionCards(container);
   updateSessionSummary();
+}
+
+function nativeViewerButtonText(session: Session): string {
+  switch (session.viewer) {
+  case "visible": return "Hide on computer";
+  case "opening": return "Cancel opening";
+  case "hidden": return "Open on computer";
+  case "unsupported": return "Desktop viewer unavailable";
+  default: return "Update local app";
+  }
+}
+
+function createNativeViewerButton(session: Session, className: string): HTMLButtonElement {
+  const button = el("button", className, nativeViewerButtonText(session));
+  button.type = "button";
+  button.disabled = session.viewer === undefined || session.viewer === "unsupported" || !session.running;
+  if (session.viewer === undefined) button.title = "Run termlinks update, then restart the daemon after active sessions finish";
+  if (session.viewer === "unsupported") button.title = "Native terminal viewers are disabled or unsupported on this computer";
+  button.addEventListener("click", () => { void toggleNativeViewer(session, button); });
+  return button;
+}
+
+async function toggleNativeViewer(session: Session, button: HTMLButtonElement): Promise<void> {
+  const action = session.viewer === "visible" || session.viewer === "opening" ? "hide" : "show";
+  button.disabled = true;
+  button.textContent = action === "show" ? "Opening…" : "Hiding…";
+  try {
+    const result = await api<{ viewer: Session["viewer"] }>(`/api/sessions/${encodeURIComponent(session.id)}/viewer/${action}`, { method: "POST" });
+    session.viewer = result.viewer;
+    button.textContent = nativeViewerButtonText(session);
+    button.disabled = session.viewer === "unsupported";
+    if (document.querySelector("#session-list")) refreshDashboardCards();
+    if (action === "show" && session.viewer === "opening") void refreshNativeViewerStatus(session, button);
+  } catch (caught) {
+    button.disabled = false;
+    button.textContent = nativeViewerButtonText(session);
+    window.alert(caught instanceof Error ? caught.message : "Could not change the desktop viewer");
+  }
+}
+
+async function refreshNativeViewerStatus(session: Session, button: HTMLButtonElement): Promise<void> {
+  for (let attempt = 0; attempt < 15 && session.viewer === "opening"; attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 700));
+    try {
+      const response = await api<{ sessions: Session[] }>("/api/sessions");
+      const fresh = response.sessions.find((item) => item.id === session.id);
+      if (!fresh) return;
+      session.viewer = fresh.viewer;
+      state.sessions = state.sessions.map((item) => item.id === fresh.id ? { ...item, viewer: fresh.viewer } : item);
+      if (document.body.contains(button)) {
+        button.textContent = nativeViewerButtonText(session);
+        button.disabled = session.viewer === undefined || session.viewer === "unsupported";
+      }
+      if (document.querySelector("#session-list")) refreshDashboardCards();
+    } catch {
+      return;
+    }
+  }
 }
 
 async function stopFromDashboard(session: Session, button: HTMLButtonElement): Promise<void> {
@@ -2770,6 +2835,7 @@ function renderTerminal(id: string, workflowID?: string): void {
   const menu = el("button", "icon-button terminal-menu-button", "•••");
   menu.type = "button";
   menu.title = "Session actions";
+  menu.setAttribute("aria-label", "Session actions");
   menu.addEventListener("click", () => actions.classList.toggle("open"));
   const inputModeButton = el("button", "terminal-input-mode-button");
   inputModeButton.type = "button";
@@ -2814,7 +2880,7 @@ function renderTerminal(id: string, workflowID?: string): void {
       })
       .catch((caught) => setConnectionState(caught instanceof Error ? caught.message : "Could not update favorite", "warning"));
   });
-  const duplicate = el("button", "menu-button", "Open copy shell");
+	const duplicate = el("button", "menu-button", "Open copy shell");
   duplicate.type = "button";
   duplicate.addEventListener("click", () => {
     actions.classList.remove("open");
@@ -2835,7 +2901,9 @@ function renderTerminal(id: string, workflowID?: string): void {
       setConnectionState(caught instanceof Error ? caught.message : "Could not stop", "offline");
     }
   });
-  actions.append(reconnect, rename, favorite, duplicate, terminalText, stop);
+  const nativeViewer = createNativeViewerButton(session, "menu-button");
+  nativeViewer.addEventListener("click", () => actions.classList.remove("open"));
+  actions.append(reconnect, nativeViewer, rename, favorite, duplicate, terminalText, stop);
 
   const connection = el("div", "connection-bar");
   connection.id = "connection-state";

@@ -84,6 +84,25 @@ func (c *Client) Stop(ctx context.Context, id string) error {
 	return c.doJSON(request, nil)
 }
 
+func (c *Client) Show(ctx context.Context, id string) (string, error) {
+	return c.changeViewer(ctx, id, "show")
+}
+
+func (c *Client) Hide(ctx context.Context, id string) (string, error) {
+	return c.changeViewer(ctx, id, "hide")
+}
+
+func (c *Client) changeViewer(ctx context.Context, id, action string) (string, error) {
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://termlinks.local/v1/sessions/"+url.PathEscape(id)+"/"+action, nil)
+	var output struct {
+		Viewer string `json:"viewer"`
+	}
+	if err := c.doJSON(request, &output); err != nil {
+		return "", err
+	}
+	return output.Viewer, nil
+}
+
 // AttachResult describes how an attached session finished. AlreadyExited marks
 // a session that was over before the attach started, which is a normal state
 // rather than a failure of the attach itself.
@@ -102,6 +121,17 @@ func (r AttachResult) Describe() string {
 }
 
 func (c *Client) Attach(ctx context.Context, id string) (AttachResult, error) {
+	return c.attach(ctx, id, "attach")
+}
+
+// AttachViewer is reserved for a native terminal window opened by the daemon.
+// Its separate endpoint lets the daemon hide only managed viewers without
+// disturbing browser clients or ordinary local attachments.
+func (c *Client) AttachViewer(ctx context.Context, id string) (AttachResult, error) {
+	return c.attach(ctx, id, "viewer")
+}
+
+func (c *Client) attach(ctx context.Context, id, endpoint string) (AttachResult, error) {
 	netDialer := &net.Dialer{Timeout: 3 * time.Second}
 	dialer := websocket.Dialer{
 		NetDialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -109,7 +139,7 @@ func (c *Client) Attach(ctx context.Context, id string) (AttachResult, error) {
 		},
 		HandshakeTimeout: 3 * time.Second,
 	}
-	connection, response, err := dialer.DialContext(ctx, "ws://termlinks.local/v1/sessions/"+url.PathEscape(id)+"/attach", nil)
+	connection, response, err := dialer.DialContext(ctx, "ws://termlinks.local/v1/sessions/"+url.PathEscape(id)+"/"+endpoint, nil)
 	if err != nil {
 		if response != nil {
 			return AttachResult{ExitCode: 1}, fmt.Errorf("attach failed with HTTP %d", response.StatusCode)

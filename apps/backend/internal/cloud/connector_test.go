@@ -33,6 +33,8 @@ func TestAllowedRoutes(t *testing.T) {
 		{"POST", "/api/sessions"},
 		{"PATCH", "/api/sessions/" + sessionID},
 		{"POST", "/api/sessions/" + sessionID + "/stop"},
+		{"POST", "/api/sessions/" + sessionID + "/viewer/show"},
+		{"POST", "/api/sessions/" + sessionID + "/viewer/hide"},
 		{"GET", "/api/terminal-history"},
 		{"POST", "/api/terminal-history/session/" + sessionID + "/favorite"},
 		{"PATCH", "/api/terminal-history/" + sessionID},
@@ -63,6 +65,8 @@ func TestAllowedRoutes(t *testing.T) {
 		{"DELETE", "/api/terminal-history/not-an-id"},
 		{"POST", "/api/terminal-history/" + sessionID + "/wrong"},
 		{"POST", "/api/sessions/not-an-id/stop"},
+		{"POST", "/api/sessions/not-an-id/viewer/show"},
+		{"POST", "/api/sessions/" + sessionID + "/viewer/wrong"},
 		{"GET", "/api/workflows/../../etc/passwd"},
 		{"POST", "/api/workflows/" + workflowID + "/stages/not-an-id/input"},
 		{"DELETE", "/api/workflows/" + workflowID},
@@ -124,14 +128,14 @@ func TestEncryptedPacketRoundTripAndChannelBinding(t *testing.T) {
 	}
 }
 
-func TestEncryptedPortalForwardsShellCreationToDaemonWebAPI(t *testing.T) {
+func TestEncryptedPortalCreatesShellHeadlesslyThroughDaemonWebAPI(t *testing.T) {
 	const portalToken = "abcdefghijklmnopqrstuvwxyz1234567890"
 	manager := session.NewManager()
 	opened := make(chan string, 1)
-	handler, err := server.New(manager, auth.New(portalToken), slog.New(slog.NewTextHandler(io.Discard, nil)), func(id string) error {
+	handler, err := server.New(manager, auth.New(portalToken), slog.New(slog.NewTextHandler(io.Discard, nil)), server.NativeViewer{Open: func(id string) error {
 		opened <- id
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,11 +197,11 @@ func TestEncryptedPortalForwardsShellCreationToDaemonWebAPI(t *testing.T) {
 	}
 	select {
 	case openedID := <-opened:
-		if openedID != created.ID {
-			t.Fatalf("daemon opened visible terminal for %q, want %q", openedID, created.ID)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("cloud creation bypassed the daemon's visible-terminal policy")
+		t.Fatalf("cloud creation unexpectedly opened a native viewer for %q", openedID)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if created.Viewer != "hidden" {
+		t.Fatalf("created viewer status = %q, want hidden", created.Viewer)
 	}
 	t.Cleanup(func() { _ = current.Stop() })
 }

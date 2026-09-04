@@ -18,13 +18,13 @@ import (
 	"termlinks/backend/internal/terminalhistory"
 )
 
-func TestTerminalHistoryAPIStaysLocalAndOpensVisibleShell(t *testing.T) {
+func TestTerminalHistoryAPIStaysLocalAndOpensHeadlessShell(t *testing.T) {
 	manager := session.NewManager()
 	opened := make(chan string, 1)
-	handler, err := New(manager, auth.New("private-token"), slog.New(slog.NewTextHandler(io.Discard, nil)), func(id string) error {
+	handler, err := New(manager, auth.New("private-token"), slog.New(slog.NewTextHandler(io.Discard, nil)), NativeViewer{Open: func(id string) error {
 		opened <- id
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,11 +102,11 @@ func TestTerminalHistoryAPIStaysLocalAndOpensVisibleShell(t *testing.T) {
 	}
 	select {
 	case id := <-opened:
-		if id != created.ID {
-			t.Fatalf("visible terminal id = %q, want %q", id, created.ID)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("saved terminal did not open visibly")
+		t.Fatalf("saved terminal unexpectedly opened a native viewer for %q", id)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if created.Viewer != "hidden" {
+		t.Fatalf("reopened viewer status = %q, want hidden", created.Viewer)
 	}
 	if reopened, ok := manager.Get(created.ID); ok {
 		t.Cleanup(func() { _ = reopened.Stop() })

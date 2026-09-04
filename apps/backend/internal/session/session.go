@@ -48,6 +48,7 @@ type Info struct {
 	Signal    string     `json:"signal,omitempty"`
 	Rows      uint16     `json:"rows"`
 	Cols      uint16     `json:"cols"`
+	Viewer    string     `json:"viewer,omitempty"`
 }
 
 type Session struct {

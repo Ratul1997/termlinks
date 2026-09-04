@@ -160,6 +160,9 @@ button { color: inherit; }
 .session-name { overflow: hidden; margin: 0; font-size: 16px; text-overflow: ellipsis; white-space: nowrap; }
 .status-badge { flex: 0 0 auto; padding: 5px 7px; border-radius: 6px; font: 700 9px/1 ui-monospace, monospace; letter-spacing: .1em; }
 .status-badge.running { color: var(--green); background: var(--green-dark); }
+.status-badge.viewer-visible { color: #071009; background: var(--green); }
+.status-badge.viewer-opening { color: #f0d86e; background: #292511; }
+.status-badge.viewer-hidden { color: #9aa7a0; background: #202823; }
 .status-badge.favorite { color: #f0d86e; background: #292511; }
 .status-badge.finished { color: #87948d; background: #202823; }
 .session-command { display: block; overflow: hidden; margin: 14px 0 15px; color: #bdc9c2; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }

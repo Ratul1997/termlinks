@@ -219,13 +219,13 @@ func TestWebRejectsCrossOriginAndUnauthenticatedCreation(t *testing.T) {
 	}
 }
 
-func TestAuthenticatedWebCreationStartsInteractiveShell(t *testing.T) {
+func TestAuthenticatedWebCreationStartsHeadlessInteractiveShell(t *testing.T) {
 	manager := session.NewManager()
 	opened := make(chan string, 1)
-	handler, err := New(manager, auth.New("token"), slog.New(slog.NewTextHandler(io.Discard, nil)), func(id string) error {
+	handler, err := New(manager, auth.New("token"), slog.New(slog.NewTextHandler(io.Discard, nil)), NativeViewer{Open: func(id string) error {
 		opened <- id
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,17 +264,172 @@ func TestAuthenticatedWebCreationStartsInteractiveShell(t *testing.T) {
 	}
 	select {
 	case openedID := <-opened:
-		if openedID != created.ID {
-			t.Fatalf("visible terminal opened for %q, want %q", openedID, created.ID)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("web-created shell did not open a visible terminal")
+		t.Fatalf("web-created shell unexpectedly opened a native viewer for %q", openedID)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if created.Viewer != "hidden" {
+		t.Fatalf("created viewer status = %q, want hidden", created.Viewer)
 	}
 	current, ok := manager.Get(created.ID)
 	if !ok {
 		t.Fatal("created shell is not managed by the daemon")
 	}
 	t.Cleanup(func() { _ = current.Stop() })
+}
+
+func TestManagedNativeViewerShowHideDoesNotStopSessionOrManualAttach(t *testing.T) {
+	manager := session.NewManager()
+	launched := make(chan string, 2)
+	closed := make(chan string, 2)
+	handler, err := New(manager, auth.New("token"), slog.New(slog.NewTextHandler(io.Discard, nil)), NativeViewer{Open: func(id string) error {
+		launched <- id
+		return nil
+	}, Close: func(id string) error {
+		closed <- id
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := httptest.NewServer(handler.ControlHandler())
+	defer control.Close()
+
+	current, err := manager.Start(session.StartOptions{
+		Name: "viewer lifecycle", Command: []string{"/bin/sh", "-c", "printf 'ready\\n'; while IFS= read -r value; do printf 'got:%s\\n' \"$value\"; done"},
+		Cwd: t.TempDir(), Cols: 80, Rows: 24,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = current.Stop() })
+	id := current.Info().ID
+
+	postViewer := func(action string) (int, string) {
+		t.Helper()
+		response, err := http.Post(control.URL+"/v1/sessions/"+id+"/"+action, "application/json", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		var output struct {
+			Viewer string `json:"viewer"`
+		}
+		_ = json.NewDecoder(response.Body).Decode(&output)
+		return response.StatusCode, output.Viewer
+	}
+	if status, viewer := postViewer("show"); status != http.StatusAccepted || viewer != "opening" {
+		t.Fatalf("first show = HTTP %d %q", status, viewer)
+	}
+	if got := <-launched; got != id {
+		t.Fatalf("launched viewer %q, want %q", got, id)
+	}
+	if status, viewer := postViewer("show"); status != http.StatusAccepted || viewer != "opening" {
+		t.Fatalf("idempotent show = HTTP %d %q", status, viewer)
+	}
+	select {
+	case duplicate := <-launched:
+		t.Fatalf("show opened duplicate native viewer %q", duplicate)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	wsOrigin := "ws" + strings.TrimPrefix(control.URL, "http")
+	viewer, _, err := websocket.DefaultDialer.Dial(wsOrigin+"/v1/sessions/"+id+"/viewer", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer viewer.Close()
+	assertTerminalSnapshot(t, viewer, []byte("ready"))
+	manual, _, err := websocket.DefaultDialer.Dial(wsOrigin+"/v1/sessions/"+id+"/attach", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manual.Close()
+	assertTerminalSnapshot(t, manual, []byte("ready"))
+
+	listResponse, err := http.Get(control.URL + "/v1/sessions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed struct {
+		Sessions []session.Info `json:"sessions"`
+	}
+	if err := json.NewDecoder(listResponse.Body).Decode(&listed); err != nil {
+		listResponse.Body.Close()
+		t.Fatal(err)
+	}
+	listResponse.Body.Close()
+	if len(listed.Sessions) != 1 || listed.Sessions[0].Viewer != "visible" {
+		t.Fatalf("viewer list status = %#v", listed.Sessions)
+	}
+
+	if status, viewerStatus := postViewer("hide"); status != http.StatusOK || viewerStatus != "hidden" {
+		t.Fatalf("hide = HTTP %d %q", status, viewerStatus)
+	}
+	select {
+	case closedID := <-closed:
+		if closedID != id {
+			t.Fatalf("closed native window %q, want %q", closedID, id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("hide did not close the managed native window")
+	}
+	viewer.SetReadDeadline(time.Now().Add(time.Second))
+	if _, _, err := viewer.ReadMessage(); err == nil {
+		t.Fatal("managed viewer remained connected after hide")
+	}
+	if !current.Info().Running {
+		t.Fatal("hiding the native viewer stopped the PTY session")
+	}
+	if err := manual.WriteMessage(websocket.BinaryMessage, []byte("still-running\n")); err != nil {
+		t.Fatalf("manual attach was closed by hide: %v", err)
+	}
+	manual.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var output []byte
+	for !bytes.Contains(output, []byte("got:still-running")) {
+		kind, payload, err := manual.ReadMessage()
+		if err != nil {
+			t.Fatalf("manual attach failed after hide: %v", err)
+		}
+		if kind == websocket.BinaryMessage {
+			output = append(output, payload...)
+		}
+	}
+	select {
+	case duplicateClose := <-closed:
+		t.Fatalf("managed native window was closed twice for %q", duplicateClose)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestNativeViewerRequiresRunningSessionAndPlatformSupport(t *testing.T) {
+	handler, err := New(session.NewManager(), auth.New("token"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := httptest.NewServer(handler.ControlHandler())
+	defer control.Close()
+	response, err := http.Post(control.URL+"/v1/sessions/0123456789abcdef0123456789abcdef/show", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing session show status = %d", response.StatusCode)
+	}
+
+	current, err := handler.sessions.Start(session.StartOptions{Command: []string{"/bin/sh"}, Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = current.Stop() })
+	response, err = http.Post(control.URL+"/v1/sessions/"+current.Info().ID+"/show", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("unsupported viewer show status = %d", response.StatusCode)
+	}
 }
 
 func TestAuthenticatedWebRenameUpdatesSessionName(t *testing.T) {
@@ -404,7 +559,7 @@ func TestAIWorkflowRoutesRequireAuthenticationAndSameOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workflowManager := coordinator.NewManager(store, manager, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	workflowManager := coordinator.NewManager(store, manager, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer workflowManager.Close()
 	handler, err := New(manager, auth.New("private-token"), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {

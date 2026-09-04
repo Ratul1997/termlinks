@@ -36,7 +36,7 @@ import (
 	"termlinks/backend/internal/windowcapture"
 )
 
-const version = "0.8.7"
+const version = "0.8.8"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -52,6 +52,11 @@ func main() {
 func run(args []string) error {
 	if len(args) > 0 {
 		switch args[0] {
+		case "__viewer":
+			if len(args) != 2 {
+				return errors.New("invalid internal viewer invocation")
+			}
+			return attachViewerSession(args[1])
 		case "__agent-stdio":
 			return runAgentStdio(args[1:])
 		case "__cloudflare-pages-deploy":
@@ -65,6 +70,16 @@ func run(args []string) error {
 				return errors.New("usage: termlinks attach <session-id>")
 			}
 			return attachSession(args[1])
+		case "show":
+			if len(args) != 2 {
+				return errors.New("usage: termlinks show <session-id>")
+			}
+			return changeViewer(args[1], true)
+		case "hide":
+			if len(args) != 2 {
+				return errors.New("usage: termlinks hide <session-id>")
+			}
+			return changeViewer(args[1], false)
 		case "stop":
 			if len(args) != 2 {
 				return errors.New("usage: termlinks stop <session-id>")
@@ -668,7 +683,7 @@ func runDaemon(args []string) error {
 	port := flags.Int("port", 0, "web listen port")
 	flags.IntVar(port, "p", 0, "web listen port")
 	allowPublic := flags.Bool("allow-public-bind", false, "allow 0.0.0.0 or [::] binding")
-	headless := flags.Bool("headless", false, "do not open native terminal windows for portal-created sessions")
+	headless := flags.Bool("headless", false, "disable explicit native terminal viewer launching")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -699,11 +714,12 @@ func runDaemon(args []string) error {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	manager := session.NewManager()
-	var openVisibleTerminal func(string) error
+	var nativeViewer server.NativeViewer
 	if !*headless {
-		openVisibleTerminal = visibleterminal.Open
+		visibleTerminals := visibleterminal.New(paths.Dir)
+		nativeViewer = server.NativeViewer{Open: visibleTerminals.Open, Close: visibleTerminals.Close}
 	}
-	handlers, err := server.New(manager, auth.New(token), logger, openVisibleTerminal)
+	handlers, err := server.New(manager, auth.New(token), logger, nativeViewer)
 	if err != nil {
 		return err
 	}
@@ -711,7 +727,7 @@ func runDaemon(args []string) error {
 	if err != nil {
 		return err
 	}
-	workflowManager := coordinator.NewManager(workflowStore, manager, logger, openVisibleTerminal)
+	workflowManager := coordinator.NewManager(workflowStore, manager, logger)
 	defer workflowManager.Close()
 	handlers.SetCoordinator(workflowManager)
 	terminalHistory, err := terminalhistory.Open(paths.TerminalHistoryDB)
@@ -908,7 +924,19 @@ func listSessions(args []string) error {
 				status = fmt.Sprintf("exited (%d)", *item.ExitCode)
 			}
 		}
-		fmt.Printf("%-10s  %-18s  %-17s  %s\n", shortID(item.ID), truncate(item.Name, 18), status, strings.Join(item.Command, " "))
+		if item.Running {
+			switch item.Viewer {
+			case "visible":
+				status += " · visible"
+			case "opening":
+				status += " · opening"
+			case "hidden":
+				status += " · headless"
+			case "unsupported":
+				status += " · unavailable"
+			}
+		}
+		fmt.Printf("%-10s  %-18s  %-27s  %s\n", shortID(item.ID), truncate(item.Name, 18), status, strings.Join(item.Command, " "))
 	}
 	return nil
 }
@@ -947,6 +975,49 @@ func attachSession(id string) error {
 		return nil
 	}
 	return attachResultError(result)
+}
+
+func attachViewerSession(id string) error {
+	paths, err := readyDaemon()
+	if err != nil {
+		return err
+	}
+	result, err := client.New(paths.Socket).AttachViewer(context.Background(), id)
+	if err != nil {
+		return err
+	}
+	return attachResultError(result)
+}
+
+func changeViewer(id string, show bool) error {
+	paths, err := readyDaemon()
+	if err != nil {
+		return err
+	}
+	local := client.New(paths.Socket)
+	items, err := local.List(context.Background())
+	if err != nil {
+		return err
+	}
+	resolved, err := resolveID(items, id)
+	if err != nil {
+		return err
+	}
+	var status string
+	if show {
+		status, err = local.Show(context.Background(), resolved)
+	} else {
+		status, err = local.Hide(context.Background(), resolved)
+	}
+	if err != nil {
+		return err
+	}
+	if show {
+		fmt.Printf("Opening %s on this computer (%s)\n", shortID(resolved), status)
+	} else {
+		fmt.Printf("Hiding %s on this computer; the session is still running\n", shortID(resolved))
+	}
+	return nil
 }
 
 func stopSession(id string) error {
@@ -1127,6 +1198,8 @@ Usage:
   termlinks list                    List running sessions
   termlinks list --all              Include completed sessions
   termlinks attach <id>             Reattach locally
+  termlinks show <id>               Open this session in a native terminal
+  termlinks hide <id>               Hide its managed native terminal viewer
   termlinks stop <id>               Gracefully stop a session
   termlinks token                   Print the private portal login token
   termlinks doctor                  Show safe local diagnostics

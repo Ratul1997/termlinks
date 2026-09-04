@@ -6,7 +6,7 @@
 
 > **A private, local-first continuity layer for terminals and AI coding agents—letting you leave your computer without leaving your work.**
 
-Termlinks is an open-source, self-hosted bridge that keeps terminal work running on your computer and lets you view and control it from a phone browser. It is command-agnostic: Codex, Claude, development servers, import scripts, shells, and other terminal programs all use the same PTY bridge. A shell created from the portal also opens in a native terminal window on the computer, so both screens share the same PTY and history. Termlinks can carry an opt-in full Mac desktop or one selected macOS window and can transfer files from the encrypted portal to the computer.
+Termlinks is an open-source, self-hosted bridge that keeps terminal work running on your computer and lets you view and control it from a phone browser. It is command-agnostic: Codex, Claude, development servers, import scripts, shells, and other terminal programs all use the same PTY bridge. Portal-created shells and AI stages stay headless by default, avoiding unwanted desktop windows; **Open on computer** attaches a native terminal to that exact live PTY only when requested. Termlinks can also carry an opt-in full Mac desktop or one selected macOS window and transfer files from the encrypted portal to the computer.
 
 No Termlinks-hosted account or service is required. Run it only on the local computer, reach it through SSH or a private VPN, expose it through an HTTPS tunnel provider, or deploy the included Cloudflare Pages + Workers relay. Cloudflare is the documented default public option, not a requirement.
 
@@ -20,7 +20,7 @@ Termlinks is a **developer preview** intended for one trusted owner and trusted 
 | --- | --- | --- | --- |
 | Managed terminal CLI, daemon, and browser portal | Supported and CI-tested | Supported and CI-tested | Not implemented |
 | Official release binaries | Apple silicon and Intel | arm64 and amd64 | Not published |
-| Portal-created native terminal window | Terminal.app | Best effort through a supported terminal emulator | Not implemented |
+| On-demand native terminal viewer | Terminal.app | Best effort through a supported terminal emulator | Not implemented |
 | Hosted PWA and encrypted Cloudflare relay | Supported | Supported | Connector not implemented |
 | Full-desktop access | Local Screen Sharing/VNC required | User-supplied loopback VNC server required | Not implemented |
 | Selected-window capture and control | macOS 14+ only | Unavailable | Unavailable |
@@ -135,13 +135,20 @@ Attach a local terminal to an existing session:
 termlinks attach <session-id>
 ```
 
+Open or hide one managed native viewer without stopping the session:
+
+```sh
+termlinks show <session-id>
+termlinks hide <session-id>
+```
+
 Stop a managed session:
 
 ```sh
 termlinks stop <session-id>
 ```
 
-`termlinks list` shows running sessions. Use `termlinks list --all` to include the bounded set of completed sessions still retained for scrollback. You can use the short ID displayed in that list with `attach` or `stop`.
+`termlinks list` shows running sessions and whether their managed desktop viewer is `headless`, `opening`, or `visible`. Use `termlinks list --all` to include the bounded set of completed sessions still retained for scrollback. You can use the short ID displayed in that list with `attach`, `show`, `hide`, or `stop`.
 
 Start the portal daemon manually in the foreground:
 
@@ -221,11 +228,11 @@ Termlinks intentionally has a small configuration surface. There is no hidden ap
 | Process environment | Current environment; adds `TERM=xterm-256color` only when `TERM` is absent | Passed to locally started managed commands. Keep in mind that a child process can print environment secrets. |
 | `SHELL` | `/bin/zsh` for a command-less local launch; `/bin/sh` for a portal-created shell when `SHELL` is absent or not absolute | Selects the interactive shell. |
 | `TERMLINKS_STATE_DIR` | Operating-system user config directory plus `termlinks` | Overrides all local state paths. It must be an absolute path. Useful for isolated development/testing installations. |
-| `termlinks daemon [-p PORT] [--listen ADDR] [--headless]` | `127.0.0.1:57321` | Sets and persists the browser portal listener in `settings.json`. `-p`/`--port` replaces only the port and preserves the configured host. Loopback, RFC1918 private addresses, and Tailscale's `100.64.0.0/10` range are accepted by default. `--headless` keeps portal-created shells and AI stages inside the browser/API without opening native terminal windows; omit it for normal desktop use. |
+| `termlinks daemon [-p PORT] [--listen ADDR] [--headless]` | `127.0.0.1:57321` | Sets and persists the browser portal listener in `settings.json`. `-p`/`--port` replaces only the port and preserves the configured host. Loopback, RFC1918 private addresses, and Tailscale's `100.64.0.0/10` range are accepted by default. Portal and AI sessions are always created without a native window. `--headless` additionally disables the explicit **Open on computer** feature, for servers with no graphical desktop. |
 | `termlinks daemon --allow-public-bind` | Off | Allows an unspecified/public bind such as `0.0.0.0`. This is dangerous and does not add TLS; prefer an SSH/VPN/tunnel setup. |
 | Portal **New terminal → Name** | Empty/generated display name | Optional label, at most 80 characters. |
 | Portal **New terminal → Starting directory** | Home directory | Accepts `~`, `~/path`, or an absolute accessible directory, at most 4096 characters. Browser creation always opens the configured shell; commands are typed afterward. |
-| Portal-created native window | Enabled unless `termlinks daemon --headless` is used | The daemon—not the cloud connector—owns this policy. A visible session launches the platform terminal and runs `termlinks attach <opaque-session-id>`; its dedicated shell exits cleanly when the managed session ends so it does not leave an abandoned prompt. Local CLI-created sessions keep their existing attach/detach behavior. |
+| Portal **Open on computer** / `termlinks show ID` | Available unless `termlinks daemon --headless` is used | Opens a managed native viewer attached to the existing PTY and retained history. Repeated requests are idempotent and do not create duplicate managed windows. On macOS the daemon records the exact Terminal window it launched, so **Hide on computer** / `termlinks hide ID` closes that window regardless of the user's Terminal profile; the command, browser, and ordinary `termlinks attach` clients continue. `termlinks stop ID` is the separate destructive action. |
 
 The selected port is persisted, so later automatic daemon and cloud-connector starts reuse it. If a daemon is already running on another port, Termlinks refuses to change the listener because restarting it would terminate active PTYs. Stop that daemon first, then select the new port. `termlinks doctor` shows the effective listener, state directory, daemon status, and version without revealing tokens.
 
@@ -267,7 +274,7 @@ Choose an existing absolute project directory and mention agents in the order th
 @codex review the implementation and report remaining issues
 ```
 
-Termlinks first compiles those mentions into an explicit sequential preview and requires confirmation before it starts anything. Each confirmed stage is a real managed PTY, appears in the normal terminal list, opens in a native terminal window when the platform supports it, and can be opened live from the workflow detail screen. The next stage receives a bounded copy of earlier stage output. A stage succeeds only when its local process exits with code zero; explicit unavailable `@agent` targets fail instead of silently switching providers.
+Termlinks first compiles those mentions into an explicit sequential preview and requires confirmation before it starts anything. Each confirmed stage is a real headless managed PTY, appears in the normal terminal list, and can be opened live from the workflow detail screen or explicitly on the computer. The next stage receives a bounded copy of earlier stage output. A stage succeeds only when its local process exits with code zero; explicit unavailable `@agent` targets fail instead of silently switching providers.
 
 Current safeguards and limits:
 
@@ -421,7 +428,7 @@ Forks may change the corresponding source constants, but should reassess memory,
 After login, the portal dashboard automatically shows every managed terminal and its current state:
 
 - The dashboard is the app-style **Home** screen. Its safe-area-aware bottom navigation keeps **Home**, **AI Work**, **Desktop**, and **New** available with one thumb; the active destination is highlighted. Terminal screens retain their separate tmux-style running-session rail, and remote desktop keeps its distraction-free full-screen controls.
-- Select **New terminal** to create one normal interactive shell. Termlinks immediately attaches the portal and opens a native Terminal window on the computer to the same PTY. Its optional starting directory may be `~`, `~/path`, or an absolute path.
+- Select **New terminal** to create one normal interactive shell. Termlinks immediately attaches the portal but leaves the computer desktop undisturbed. Its optional starting directory may be `~`, `~/path`, or an absolute path.
 - Inside that shell, type `cd`, `ls`, `codex`, `npm run dev`, or any other command exactly as in a desktop terminal.
 - Each terminal has two phone input styles. **Compose** is the default: use the compact message composer to enter or paste a complete command, attach files, and send it as one ordered PTY message. Tap **Direct** in the terminal header for a Termius-style raw-key session with no composer or scroll buttons; tap the terminal to open the phone keyboard and every key—including Return—goes straight to the running PTY. The button then reads **Compose** so one tap returns to the default style. This preference is remembered by that browser/PWA and switching it never reconnects or resizes the computer's PTY.
 - In either style, a normal shell's history uses native touch momentum on mobile and short smooth scrolling for mouse wheels and trackpads. In **Direct**, tapping focuses raw input, dragging scrolls, and a long press remains available for native text selection.
@@ -435,13 +442,15 @@ After login, the portal dashboard automatically shows every managed terminal and
 - If iOS suspends the connection while opening Photos or Files, Termlinks keeps the current terminal and draft visible while the encrypted bridge reconnects. Upload waits for that bridge instead of replacing the screen with login; a successfully uploaded attachment stays in the composer, and its Send arrow becomes available again as soon as the terminal is live. Composer submit sends the text/path plus Enter as one ordered PTY message and keeps the keyboard open, avoiding the WebKit resize that could black out xterm immediately after Send.
 - On any terminal reconnect, the last rendered terminal stays readable instead of clearing to black. A small **Reconnecting…** indicator appears and input pauses while the daemon sends a complete, byte-counted scrollback snapshot. Termlinks swaps that snapshot in only after it is complete, restores the bottom/history position, applies queued live output, and then re-enables input. The PWA also recognizes the first scrollback frame from older daemons, so a hosted frontend can be upgraded without restarting active PTYs.
 - If a newly deployed AI Work page reaches an older daemon that is still preserving active PTYs, it shows a clear compatibility card and **Return to terminals** action. It also resumes into the terminal dashboard next time instead of trapping the PWA on the unavailable feature. Finish or stop important sessions before restarting the daemon to activate the newer local API.
+- During a rolling upgrade, an older daemon does not advertise native-viewer control. The new PWA disables those controls and changes the New terminal copy/button to warn that the legacy daemon will still open a computer window. This avoids promising headless creation until the daemon can be restarted safely.
 - Terminal text stays in the terminal—there is no copy popup. Press and hold rendered output to use the browser's native text selection and Copy action. **Copy visible terminal output** remains available in the terminal's `•••` menu instead of occupying the keyboard-control strip.
 - The header shows the number of running, favorite, and recent sessions. Finished and explicitly closed sessions leave Running and move into Recent using the daemon-recorded completion time.
 - Running cards show the live command, directory, runtime, and status. Saved cards deliberately omit command arguments so secrets passed on a process command line are not persisted.
 - Favorites and the ten most recent non-favorites live in the computer's private `terminal-history.db`, not in the browser or Cloudflare. This makes the same list available from an authenticated PWA, another phone, or the local portal. Removing browser data does not erase computer-side history.
-- **Open new shell** starts the normal interactive shell in the saved directory and opens the corresponding native terminal window on the computer. **New copy shell** does the same with a copy-style name. Neither action reruns an old command automatically.
+- **Open new shell** starts a headless interactive shell in the saved directory. **New copy shell** does the same with a copy-style name. Neither action reruns an old command automatically.
 - Rename and Favorite/Unfavorite changes travel through the same authenticated E2E bridge as terminal control. A running favorite is shown once under Running instead of being duplicated in the Favorites section.
-- Select **Open terminal** to view and type in that terminal.
+- Select **Open here** to view and type in that terminal in the portal.
+- Select **Open on computer** to launch one managed native viewer at the same live PTY position. The card changes to **On computer** when it attaches. Select **Hide on computer** in the card or terminal menu—or run `termlinks hide ID`—to close only that viewer while the session keeps running. `termlinks list` reports `headless`, `opening`, or `visible` for the managed desktop viewer.
 - Select **Send file** to transfer images, PDFs, archives, or other files to `~/Downloads/Termlinks Uploads` on the computer. Transfers are E2E encrypted in cloud mode, filenames are validated, and duplicate names receive ` (1)`, ` (2)`, and so on.
 - Select **Stop & close** to terminate a running command after confirmation.
 - The terminal screen also has **Stop & close session** in its `•••` menu.
@@ -457,7 +466,7 @@ For the default Cloudflare deployment:
 2. Run `termlinks cloud start` on the computer.
 3. Open your Pages URL on the phone or another computer.
 4. Enter the token printed by `termlinks token`.
-5. Select an existing session, or tap **New terminal** to create an interactive shell. A native terminal window opens on the computer and the phone attaches to the same shell.
+5. Select an existing session, or tap **New terminal** to create a headless interactive shell. Use **Open on computer** later if you want the same live session in a native terminal window.
 6. Use **Send file** on the dashboard or remote-desktop toolbar to copy a file from the phone/browser to the computer.
 
 Nothing needs to be installed on the viewing device. Giving another person the portal URL and portal token gives them the same full terminal access, so share it only with someone you completely trust. The connector secret is separate and must never be shared.

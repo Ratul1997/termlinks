@@ -106,7 +106,7 @@ func TestManagerRunsWorkflowWithoutShellInterpolation(t *testing.T) {
 	if err := store.ReplaceAgents(context.Background(), []Agent{{ID: "codex", Name: "Fake Codex", Command: fakeAgent, Available: true, Runnable: true, AuthStatus: "authenticated", Transport: "structured-cli", DetectedAt: time.Now().UTC()}}); err != nil {
 		t.Fatal(err)
 	}
-	manager := NewManager(store, session.NewManager(), slog.New(slog.NewTextHandler(os.Stderr, nil)), nil)
+	manager := NewManager(store, session.NewManager(), slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	defer manager.Close()
 	workflow, err := manager.Create(context.Background(), CreateInput{Request: "@codex print safe; touch " + marker, Cwd: root})
 	if err != nil {
@@ -168,7 +168,7 @@ func TestManagerSerializesRepositoriesAndCapsParallelWork(t *testing.T) {
 	if err := store.ReplaceAgents(context.Background(), []Agent{{ID: "codex", Name: "Fake Codex", Command: fakeAgent, Available: true, Runnable: true, AuthStatus: "authenticated", Transport: "structured-cli", DetectedAt: time.Now().UTC()}}); err != nil {
 		t.Fatal(err)
 	}
-	manager := NewManager(store, session.NewManager(), slog.New(slog.NewTextHandler(os.Stderr, nil)), nil)
+	manager := NewManager(store, session.NewManager(), slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	defer manager.Close()
 	firstRoot, secondRoot, thirdRoot := t.TempDir(), t.TempDir(), t.TempDir()
 	first, err := manager.Create(context.Background(), CreateInput{Request: "@codex first", Cwd: firstRoot})

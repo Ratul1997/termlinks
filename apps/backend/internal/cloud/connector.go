@@ -1624,6 +1624,12 @@ func allowedHTTPRoute(method, requestPath string) bool {
 		id := strings.TrimPrefix(path, "/api/sessions/")
 		return validSessionID(id)
 	}
+	if method == http.MethodPost && strings.HasPrefix(path, "/api/sessions/") {
+		parts := strings.Split(strings.TrimPrefix(path, "/api/sessions/"), "/")
+		if len(parts) == 3 && validSessionID(parts[0]) && parts[1] == "viewer" {
+			return parts[2] == "show" || parts[2] == "hide"
+		}
+	}
 	if method != http.MethodPost || !strings.HasPrefix(path, "/api/sessions/") || !strings.HasSuffix(path, "/stop") {
 		return false
 	}

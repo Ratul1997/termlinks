@@ -30,14 +30,14 @@ import (
 const cookieName = "termlinks_session"
 
 type Server struct {
-	sessions            *session.Manager
-	auth                *auth.Manager
-	logger              *slog.Logger
-	web                 http.Handler
-	openVisibleTerminal func(string) error
-	coordinator         *coordinator.Manager
-	terminalHistory     *terminalhistory.Store
-	openHistoryMu       sync.Mutex
+	sessions        *session.Manager
+	auth            *auth.Manager
+	logger          *slog.Logger
+	web             http.Handler
+	viewers         *viewerController
+	coordinator     *coordinator.Manager
+	terminalHistory *terminalhistory.Store
+	openHistoryMu   sync.Mutex
 }
 
 func (s *Server) SetCoordinator(manager *coordinator.Manager)     { s.coordinator = manager }
@@ -54,7 +54,7 @@ type terminalSnapshotControl struct {
 	Bytes *int   `json:"bytes,omitempty"`
 }
 
-func New(sessions *session.Manager, authManager *auth.Manager, logger *slog.Logger, visibleTerminal ...func(string) error) (*Server, error) {
+func New(sessions *session.Manager, authManager *auth.Manager, logger *slog.Logger, nativeViewer ...NativeViewer) (*Server, error) {
 	root, err := fs.Sub(webui.Files, "dist")
 	if err != nil {
 		return nil, fmt.Errorf("load embedded web client: %w", err)
@@ -64,9 +64,10 @@ func New(sessions *session.Manager, authManager *auth.Manager, logger *slog.Logg
 		auth:     authManager,
 		logger:   logger,
 		web:      spaHandler(root),
+		viewers:  newViewerController(NativeViewer{}),
 	}
-	if len(visibleTerminal) > 0 {
-		server.openVisibleTerminal = visibleTerminal[0]
+	if len(nativeViewer) > 0 {
+		server.viewers = newViewerController(nativeViewer[0])
 	}
 	return server, nil
 }
@@ -79,8 +80,13 @@ func (s *Server) ControlHandler() http.Handler {
 	mux.HandleFunc("GET /v1/sessions", s.listSessions)
 	mux.HandleFunc("POST /v1/sessions", s.createSession)
 	mux.HandleFunc("POST /v1/sessions/{id}/stop", s.stopSession)
+	mux.HandleFunc("POST /v1/sessions/{id}/show", s.showViewer)
+	mux.HandleFunc("POST /v1/sessions/{id}/hide", s.hideViewer)
 	mux.HandleFunc("GET /v1/sessions/{id}/attach", func(w http.ResponseWriter, r *http.Request) {
-		s.terminal(w, r, false)
+		s.terminal(w, r, false, false)
+	})
+	mux.HandleFunc("GET /v1/sessions/{id}/viewer", func(w http.ResponseWriter, r *http.Request) {
+		s.terminal(w, r, false, true)
 	})
 	return s.securityHeaders(mux)
 }
@@ -99,6 +105,8 @@ func (s *Server) WebHandler() http.Handler {
 	mux.HandleFunc("POST /api/sessions", s.requireWebAuth(s.createWebSession))
 	mux.HandleFunc("PATCH /api/sessions/{id}", s.requireWebAuth(s.renameWebSession))
 	mux.HandleFunc("POST /api/sessions/{id}/stop", s.requireWebAuth(s.stopSession))
+	mux.HandleFunc("POST /api/sessions/{id}/viewer/show", s.requireWebAuth(s.showViewer))
+	mux.HandleFunc("POST /api/sessions/{id}/viewer/hide", s.requireWebAuth(s.hideViewer))
 	mux.HandleFunc("GET /api/terminal-history", s.requireWebAuth(s.listTerminalHistory))
 	mux.HandleFunc("POST /api/terminal-history/session/{sessionID}/favorite", s.requireWebAuth(s.favoriteSession))
 	mux.HandleFunc("PATCH /api/terminal-history/{id}", s.requireWebAuth(s.updateTerminalHistory))
@@ -114,7 +122,7 @@ func (s *Server) WebHandler() http.Handler {
 	mux.HandleFunc("POST /api/workflows/{id}/cancel", s.requireWebAuth(s.cancelWorkflow))
 	mux.HandleFunc("POST /api/workflows/{id}/stages/{stageID}/input", s.requireWebAuth(s.sendWorkflowInput))
 	mux.HandleFunc("GET /ws/sessions/{id}", s.requireWebAuth(func(w http.ResponseWriter, r *http.Request) {
-		s.terminal(w, r, true)
+		s.terminal(w, r, true, false)
 	}))
 	mux.Handle("/", s.web)
 	return s.securityHeaders(mux)
@@ -345,12 +353,7 @@ func (s *Server) createWebSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if s.openVisibleTerminal != nil {
-		if err := s.openVisibleTerminal(created.Info().ID); err != nil {
-			s.logger.Warn("could not open a visible terminal window", "session", created.Info().ID, "error", err)
-		}
-	}
-	writeJSON(w, http.StatusCreated, created.Info())
+	writeJSON(w, http.StatusCreated, s.sessionInfo(created.Info()))
 }
 
 func (s *Server) renameWebSession(w http.ResponseWriter, r *http.Request) {
@@ -376,7 +379,7 @@ func (s *Server) renameWebSession(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("could not update saved terminal name", "session", renamed.ID, "error", err)
 		}
 	}
-	writeJSON(w, http.StatusOK, renamed)
+	writeJSON(w, http.StatusOK, s.sessionInfo(renamed))
 }
 
 func (s *Server) listTerminalHistory(w http.ResponseWriter, r *http.Request) {
@@ -537,7 +540,7 @@ func (s *Server) openTerminalHistory(w http.ResponseWriter, r *http.Request) {
 		linkedSessionID = entry.SourceSessionID
 	}
 	if current, ok := s.sessions.Get(linkedSessionID); ok && current.Info().Running {
-		writeJSON(w, http.StatusOK, current.Info())
+		writeJSON(w, http.StatusOK, s.sessionInfo(current.Info()))
 		return
 	}
 	options, err := (remote.StartRequest{Name: entry.Name, Cwd: entry.Cwd}).Options()
@@ -556,12 +559,7 @@ func (s *Server) openTerminalHistory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not open saved terminal")
 		return
 	}
-	if s.openVisibleTerminal != nil {
-		if err := s.openVisibleTerminal(created.Info().ID); err != nil {
-			s.logger.Warn("could not open a visible terminal window", "session", created.Info().ID, "error", err)
-		}
-	}
-	writeJSON(w, http.StatusCreated, created.Info())
+	writeJSON(w, http.StatusCreated, s.sessionInfo(created.Info()))
 }
 
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
@@ -579,12 +577,66 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, created.Info())
+	writeJSON(w, http.StatusCreated, s.sessionInfo(created.Info()))
 }
 
 func (s *Server) listSessions(w http.ResponseWriter, _ *http.Request) {
 	sessions := s.sessions.List()
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
+	for index := range sessions {
+		sessions[index] = s.sessionInfo(sessions[index])
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions, "viewerControl": true})
+}
+
+func (s *Server) sessionInfo(info session.Info) session.Info {
+	info.Viewer = s.viewers.status(info.ID)
+	return info
+}
+
+func (s *Server) showViewer(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/api/") && !sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "cross-origin request rejected")
+		return
+	}
+	current, ok := s.sessions.Get(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if !current.Info().Running {
+		writeError(w, http.StatusConflict, "session is no longer running")
+		return
+	}
+	status, err := s.viewers.show(current.Info().ID)
+	if errors.Is(err, errViewerUnsupported) {
+		writeError(w, http.StatusNotImplemented, err.Error())
+		return
+	}
+	if err != nil {
+		s.logger.Warn("could not open native terminal viewer", "session", current.Info().ID, "error", err)
+		writeError(w, http.StatusServiceUnavailable, "could not open the native terminal viewer")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"viewer": status})
+}
+
+func (s *Server) hideViewer(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/api/") && !sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "cross-origin request rejected")
+		return
+	}
+	current, ok := s.sessions.Get(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	status, err := s.viewers.hide(current.Info().ID)
+	if err != nil {
+		s.logger.Warn("could not close native terminal viewer", "session", current.Info().ID, "error", err)
+		writeError(w, http.StatusServiceUnavailable, "the viewer detached, but its native window could not be closed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"viewer": status})
 }
 
 func (s *Server) stopSession(w http.ResponseWriter, r *http.Request) {
@@ -600,6 +652,9 @@ func (s *Server) stopSession(w http.ResponseWriter, r *http.Request) {
 	if err := current.Stop(); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not stop session")
 		return
+	}
+	if _, err := s.viewers.hide(current.Info().ID); err != nil {
+		s.logger.Warn("session stopped but its native viewer window could not be closed", "session", current.Info().ID, "error", err)
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "stopping"})
 }
@@ -672,7 +727,7 @@ func (s *Server) requireWebAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (s *Server) terminal(w http.ResponseWriter, r *http.Request, browser bool) {
+func (s *Server) terminal(w http.ResponseWriter, r *http.Request, browser, managedViewer bool) {
 	if browser && !sameOrigin(r) {
 		writeError(w, http.StatusForbidden, "cross-origin websocket rejected")
 		return
@@ -695,6 +750,13 @@ func (s *Server) terminal(w http.ResponseWriter, r *http.Request, browser bool) 
 	}
 	defer connection.Close()
 	connection.SetReadLimit(64 << 10)
+	if managedViewer {
+		if !s.viewers.register(current.Info().ID, connection) {
+			_ = connection.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "native viewer was not requested"), time.Now().Add(time.Second))
+			return
+		}
+		defer s.viewers.unregister(current.Info().ID, connection)
+	}
 
 	initial, updates, cancel := current.Subscribe()
 	defer cancel()

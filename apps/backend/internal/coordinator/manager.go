@@ -19,14 +19,13 @@ import (
 const maxStoredStageOutput = 96 << 10
 
 type Manager struct {
-	store       *Store
-	sessions    *session.Manager
-	logger      *slog.Logger
-	openVisible func(string) error
-	mu          sync.Mutex
-	wg          sync.WaitGroup
-	running     map[string]*runningWorkflow
-	workspaces  map[string]string
+	store      *Store
+	sessions   *session.Manager
+	logger     *slog.Logger
+	mu         sync.Mutex
+	wg         sync.WaitGroup
+	running    map[string]*runningWorkflow
+	workspaces map[string]string
 }
 
 type runningWorkflow struct {
@@ -34,9 +33,9 @@ type runningWorkflow struct {
 	current *session.Session
 }
 
-func NewManager(store *Store, sessions *session.Manager, logger *slog.Logger, openVisible func(string) error) *Manager {
+func NewManager(store *Store, sessions *session.Manager, logger *slog.Logger) *Manager {
 	return &Manager{
-		store: store, sessions: sessions, logger: logger, openVisible: openVisible,
+		store: store, sessions: sessions, logger: logger,
 		running: make(map[string]*runningWorkflow), workspaces: make(map[string]string),
 	}
 }
@@ -302,11 +301,6 @@ func (m *Manager) runStage(ctx context.Context, workflow Workflow, stage Stage, 
 		_ = current.Stop()
 		_ = m.store.FinishStage(context.Background(), workflow.ID, stage.ID, StageFailed, "", "Could not deliver the agent prompt")
 		return "", err
-	}
-	if m.openVisible != nil {
-		if err := m.openVisible(current.Info().ID); err != nil {
-			m.logger.Warn("could not open visible AI terminal", "session", current.Info().ID, "error", err)
-		}
 	}
 	select {
 	case <-ctx.Done():

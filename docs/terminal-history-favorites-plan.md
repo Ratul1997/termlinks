@@ -28,7 +28,7 @@ Add private, computer-local saved terminal management to the web app: closed ter
   - Create a new terminal through existing `POST /api/sessions`.
   - Use the saved/running terminal's cwd and name, with duplicate names defaulting to `Original Copy`.
   - Preserve the existing browser security contract: web duplication starts the default interactive shell in the same cwd, not arbitrary command replay.
-  - Open the same PTY in a visible native terminal window on the computer.
+  - Keep the new PTY headless until the user explicitly chooses Open on computer.
   - Serialize saved-terminal open requests so two fast taps cannot create orphaned duplicate shells.
 
 ## Test Plan
