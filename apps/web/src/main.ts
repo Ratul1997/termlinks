@@ -15,6 +15,7 @@ import {
 } from "./terminal-history";
 import { TerminalStreamReconciler, terminalStreamControl } from "./terminal-reconnect";
 import { nextTerminalInputMode, parseTerminalInputMode, type TerminalInputMode } from "./terminal-input-mode";
+import { insertAttachmentPath } from "./terminal-attachments";
 import { TerminalReplyGate } from "./terminal-reply-gate";
 import { binaryStringToBytes, consumeTouchWheel } from "./terminal-touch";
 import "./style.css";
@@ -3591,8 +3592,8 @@ function renderTerminalComposer(): HTMLElement {
   const attach = el("button", "terminal-attach-button", "+");
   attach.type = "button";
   attach.disabled = true;
-  attach.setAttribute("aria-label", "Attach an image, screenshot, or PDF");
-  attach.title = "Attach image or file";
+  attach.setAttribute("aria-label", "Attach a file and insert its path");
+  attach.title = "Attach file";
   const form = el("form", "terminal-composer-form");
   form.append(attach, input, send);
   const panel = el("div", "terminal-composer-panel");
@@ -3608,12 +3609,11 @@ function renderTerminalComposer(): HTMLElement {
     send.disabled = section.dataset.connected !== "true" || input.value.length === 0;
   };
   const addPathToComposer = (path: string): void => {
-    const quoted = `'${path.replaceAll("'", `'\\''`)}'`;
     const start = input.selectionStart ?? input.value.length;
     const end = input.selectionEnd ?? start;
-    const prefix = start > 0 && !/\s$/.test(input.value.slice(0, start)) ? " " : "";
-    const suffix = end < input.value.length && !/^\s/.test(input.value.slice(end)) ? " " : "";
-    input.setRangeText(`${prefix}${quoted}${suffix}`, start, end, "end");
+    const insertion = insertAttachmentPath(input.value, path, start, end);
+    input.value = insertion.value;
+    input.setSelectionRange(insertion.caret, insertion.caret);
     input.dispatchEvent(new Event("input", { bubbles: true }));
   };
   const showAttachment = (file: File, path: string): void => {
@@ -3635,7 +3635,6 @@ function renderTerminalComposer(): HTMLElement {
     }
     const picker = document.createElement("input");
     picker.type = "file";
-    picker.accept = "image/*,application/pdf";
     picker.multiple = true;
     picker.hidden = true;
     picker.addEventListener("change", async () => {
