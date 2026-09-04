@@ -251,7 +251,7 @@ The state directory is created with mode `0700`; sensitive files are forced to `
 | `cloud.json` | Relay URL, connector token, desktop-enabled flag, and loopback VNC address. It contains a secret. |
 | `cloud.pid` | PID of the detached connector. |
 | `cloud.log` | Detached connector diagnostics. It should not contain tokens, but still treat logs as private. |
-| `workflows.db`, `workflows.db-wal`, `workflows.db-shm` | Local SQLite workflow, stage, project, event, and bounded agent-output state. Each file is forced to `0600`. |
+| `workflows.db`, `workflows.db-wal`, `workflows.db-shm` | Local SQLite team-room messages, workflow stages, projects, events, and bounded agent-output state. Each file is forced to `0600`. |
 | `terminal-history.db`, `terminal-history.db-wal`, `terminal-history.db-shm` | Local SQLite terminal names, working directories, favorites, and open/close timestamps. Command arguments, terminal input, and terminal output are never stored here. Each file is forced to `0600`. |
 | `workflow-artifacts/` | Private `0700` directory reserved for workflow-generated artifacts. |
 | `workflow-worktrees/` | Private `0700` directory reserved for isolated Git worktrees in a later workflow phase. The current release serializes work in the same repository instead. |
@@ -264,9 +264,9 @@ The login form exposes standard username/current-password metadata so Safari, Ch
 
 In the hosted E2E portal, **Keep me signed in on this device** is enabled by default. After successful authentication, Termlinks stores the derived, non-exportable AES-GCM `CryptoKey` in origin-scoped IndexedDB—not the raw token. If iOS suspends or terminates the PWA, it uses that key to reconnect automatically and restores the previously open terminal when possible. **Log out** deletes the stored key. Clearing website data also deletes it. Uncheck the option on a shared or untrusted device.
 
-### Local AI workflows (experimental)
+### Local AI team rooms (experimental)
 
-The portal's **AI work** screen coordinates AI command-line tools already installed on the computer. Discovery recognizes Codex, Claude Code, OpenCode, Gemini CLI, and Aider; the initial executable adapters are enabled for Codex and Claude Code. Other installed harnesses are shown as **adapter pending** instead of being invoked through an unverified command shape. Discovery runs only bounded version/login-status checks: it does not read, copy, or store provider API keys and does not make a paid inference request. Each tool continues to use its own local login, model, plugins, and billing configuration. For unattended execution, Termlinks explicitly gives Codex its `workspace-write` sandbox rooted at the selected project and selects Claude's guarded `auto` permission mode; it never enables either provider's dangerous sandbox/permission bypass flag.
+The portal's **AI work** screen coordinates AI command-line tools already installed on the computer as a private local team room. Discovery recognizes Codex, Claude Code, OpenCode, Gemini CLI, and Aider; the initial executable adapters are enabled for Codex and Claude Code. Other installed harnesses are shown as **adapter pending** instead of being invoked through an unverified command shape. Discovery runs only bounded version/login-status checks: it does not read, copy, or store provider API keys and does not make a paid inference request. Each tool continues to use its own local login, model, plugins, and billing configuration. For unattended execution, Termlinks explicitly gives Codex its `workspace-write` sandbox rooted at the selected project and selects Claude's guarded `auto` permission mode; it never enables either provider's dangerous sandbox/permission bypass flag.
 
 Choose an existing absolute project directory and mention agents in the order they should run:
 
@@ -276,21 +276,29 @@ Choose an existing absolute project directory and mention agents in the order th
 @codex review the implementation and report remaining issues
 ```
 
-Termlinks first compiles those mentions into an explicit sequential preview and requires confirmation before it starts anything. Each confirmed stage is a real headless managed PTY, appears in the normal terminal list, and can be opened live from the workflow detail screen or explicitly on the computer. The next stage receives a bounded copy of earlier stage output. A stage succeeds only when its local process exits with code zero; explicit unavailable `@agent` targets fail instead of silently switching providers.
+Termlinks first compiles those mentions into an explicit sequential preview and requires confirmation before it starts anything. The confirmed request becomes the room's first human message. Each agent turn is a real headless managed PTY, appears in the normal terminal list, and can be opened in the browser or explicitly shown/hidden on the computer. A successful structured agent response is posted to the room, and later agents receive a bounded transcript of the human and agent messages instead of an opaque terminal dump.
+
+The human is a participant, not an observer. From the room composer:
+
+- choose `@team` to add durable shared context without starting another inference request;
+- choose a named agent, or tap **Reply** on its message, to queue one safe follow-up turn for that local agent (and consume that provider's normal tokens); and
+- use **Terminal** / **View terminal** for the exact PTY, or **Show** / **Hide** to control its on-computer native viewer while it is live.
+
+This room shows the messages and results agents intentionally share. It does not expose private chain-of-thought. Agent-written `@mentions` make handoffs and questions visible but never schedule work by themselves; only an authenticated human message or the already-confirmed stage plan can do that. The current adapters are one-shot processes, so a direct message arriving during a turn is handled by a queued follow-up turn rather than being injected unpredictably into the active process.
 
 Current safeguards and limits:
 
 - at most eight stages per workflow, two active workflows globally, and one active workflow per canonical Git repository;
 - directories must already exist and are canonicalized before execution; Termlinks does not scan the whole disk or shell history for projects;
 - prompts are sent over the PTY rather than process arguments, so task text is not exposed through ordinary process listings;
-- requests are capped at 48 KiB and stored stage output at 96 KiB; list responses omit output;
+- requests and room messages are capped at 48 KiB, transcript context at 64 KiB, and stored stage output at 96 KiB; list responses omit transcripts and output;
 - workflow mutation routes require portal authentication and same-origin validation, and the encrypted connector exposes only an explicit route allowlist;
 - daemon restart marks an active workflow `interrupted` rather than pretending its old PTY survived; and
 - cancellation terminates the active agent and prevents queued stages from starting.
 
-This first implementation is a deterministic sequential coordinator. It does not yet create Git worktrees, auto-merge or push, retry a failed stage, run parallel reviewer groups, infer correction loops, or resume a provider session after a daemon restart. Those behaviors remain gated in [the implementation plan](docs/ai-workflows-plan.md), and no automatic merge/push is planned without explicit authority.
+This implementation remains a deterministic sequential coordinator. The room is a durable coordination and supervision layer, not a free-running autonomous swarm. It does not yet create Git worktrees, auto-merge or push, retry a failed stage automatically, run parallel reviewer groups, infer correction loops, or resume a provider session after a daemon restart. Those behaviors remain gated in [the implementation plan](docs/ai-workflows-plan.md), and no automatic merge/push is planned without explicit authority.
 
-Workflow prompts, selected project paths, status, and bounded outputs are private local data but are not independently encrypted inside SQLite. Use FileVault, BitLocker, or LUKS for encryption at rest. When the Cloudflare portal is used, workflow API payloads travel inside the existing AES-256-GCM application-layer encrypted bridge.
+Team-room messages, workflow prompts, selected project paths, status, and bounded outputs are private local data but are not independently encrypted inside SQLite. Use FileVault, BitLocker, or LUKS for encryption at rest. When the Cloudflare portal is used, room and workflow API payloads travel inside the existing AES-256-GCM application-layer encrypted bridge.
 
 ### Direct portal authentication and network behavior
 

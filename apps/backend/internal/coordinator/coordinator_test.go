@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"termlinks/backend/internal/session"
 )
@@ -61,6 +62,55 @@ func TestStoreIsPrivateAndRecoversInterruptedWorkflow(t *testing.T) {
 	}
 	if len(listed) != 1 || len(listed[0].Stages) != 1 {
 		t.Fatalf("listed workflows = %#v", listed)
+	}
+	if listed[0].MessageCount != 1 || listed[0].LastMessage == nil || listed[0].LastMessage.SenderType != MessageSenderHuman {
+		t.Fatalf("initial team-room summary = %#v", listed[0])
+	}
+}
+
+func TestRoomMessagesAreLocalDurableAndRepliesStayInRoom(t *testing.T) {
+	root := t.TempDir()
+	store, err := OpenStore(filepath.Join(root, "workflows.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	first := Workflow{ID: strings.Repeat("a", 24), Request: "build the feature", Cwd: root, Status: WorkflowQueued, CreatedAt: now, UpdatedAt: now,
+		Stages: []Stage{{ID: strings.Repeat("b", 24), Position: 0, AgentID: "codex", Title: "plan", Prompt: "plan", Status: StageQueued}}}
+	second := Workflow{ID: strings.Repeat("c", 24), Request: "other room", Cwd: root, Status: WorkflowQueued, CreatedAt: now, UpdatedAt: now,
+		Stages: []Stage{{ID: strings.Repeat("d", 24), Position: 0, AgentID: "claude", Title: "review", Prompt: "review", Status: StageQueued}}}
+	if err := store.CreateWorkflow(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateWorkflow(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := store.Messages(context.Background(), first.ID, 10)
+	if err != nil || len(messages) != 1 || messages[0].Body != first.Request || messages[0].Kind != MessageKindTask {
+		t.Fatalf("initial messages = %#v, %v", messages, err)
+	}
+	replyID := messages[0].ID
+	reply, err := store.AddMessage(context.Background(), RoomMessage{WorkflowID: first.ID, SenderID: "codex", SenderType: MessageSenderAgent,
+		Recipient: MessageRecipientHuman, Kind: MessageKindQuestion, Body: "Need a decision", ReplyTo: &replyID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.ID <= replyID || reply.ReplyTo == nil || *reply.ReplyTo != replyID {
+		t.Fatalf("reply = %#v", reply)
+	}
+	otherMessages, err := store.Messages(context.Background(), second.ID, 10)
+	if err != nil || len(otherMessages) != 1 {
+		t.Fatalf("other room messages = %#v, %v", otherMessages, err)
+	}
+	crossRoomReply := otherMessages[0].ID
+	if _, err := store.AddMessage(context.Background(), RoomMessage{WorkflowID: first.ID, SenderID: MessageSenderHuman, SenderType: MessageSenderHuman,
+		Recipient: MessageRecipientTeam, Kind: MessageKindMessage, Body: "wrong thread", ReplyTo: &crossRoomReply}); err == nil || !strings.Contains(err.Error(), "another team room") {
+		t.Fatalf("cross-room reply error = %v", err)
+	}
+	loaded, err := store.Workflow(context.Background(), first.ID)
+	if err != nil || loaded.MessageCount != 2 || len(loaded.Messages) != 2 || loaded.LastMessage == nil || loaded.LastMessage.ID != reply.ID {
+		t.Fatalf("loaded room = %#v, %v", loaded, err)
 	}
 }
 
@@ -134,6 +184,103 @@ func TestManagerRunsWorkflowWithoutShellInterpolation(t *testing.T) {
 	}
 	if len(workflow.Stages) != 1 || !strings.Contains(workflow.Stages[0].Output, "touch") {
 		t.Fatalf("agent did not receive literal prompt: %#v", workflow.Stages)
+	}
+}
+
+func TestHumanTeamMessageQueuesAVisibleFollowUpTurn(t *testing.T) {
+	root := t.TempDir()
+	store, err := OpenStore(filepath.Join(root, "workflows.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeAgent := filepath.Join(root, "fake-codex")
+	if err := os.WriteFile(fakeAgent, []byte("#!/bin/sh\ncat\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceAgents(context.Background(), []Agent{{ID: "codex", Name: "Fake Codex", Command: fakeAgent, Available: true, Runnable: true, AuthStatus: "authenticated", Transport: "structured-cli", DetectedAt: time.Now().UTC()}}); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(store, session.NewManager(), slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	defer manager.Close()
+	workflow, err := manager.Create(context.Background(), CreateInput{Request: "@codex answer first", Cwd: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForWorkflowStatus(t, manager, workflow.ID, WorkflowCompleted, 1)
+	teamMessage, err := manager.SendMessage(context.Background(), workflow.ID, MessageInput{Body: "Shared note for every teammate", To: "@team"})
+	if err != nil || teamMessage.Recipient != MessageRecipientTeam {
+		t.Fatalf("team message = %#v, %v", teamMessage, err)
+	}
+	afterTeamMessage, err := manager.Get(context.Background(), workflow.ID)
+	if err != nil || len(afterTeamMessage.Stages) != 1 || afterTeamMessage.Status != WorkflowCompleted {
+		t.Fatalf("team message unexpectedly scheduled work: %#v, %v", afterTeamMessage, err)
+	}
+	message, err := manager.SendMessage(context.Background(), workflow.ID, MessageInput{Body: "Please reconsider the edge case", To: "@codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.SenderType != MessageSenderHuman || message.Recipient != "codex" {
+		t.Fatalf("human message = %#v", message)
+	}
+	updated := waitForWorkflowStatus(t, manager, workflow.ID, WorkflowCompleted, 2)
+	if len(updated.Stages) != 2 || !strings.Contains(updated.Stages[1].Output, "Please reconsider the edge case") {
+		t.Fatalf("follow-up stages = %#v", updated.Stages)
+	}
+	if updated.MessageCount < 7 {
+		t.Fatalf("message count = %d, want task/status/agent/team/human/status/agent", updated.MessageCount)
+	}
+	if _, err := manager.SendMessage(context.Background(), workflow.ID, MessageInput{Body: "hello", To: "@claude"}); err == nil || !strings.Contains(err.Error(), "not a participant") {
+		t.Fatalf("unknown participant error = %v", err)
+	}
+}
+
+func TestAgentRoomMessageExtractsStructuredProviderOutput(t *testing.T) {
+	codex := "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Plan is ready for @claude\"}}\n"
+	if got := agentRoomMessage(codex); got != "Plan is ready for @claude" {
+		t.Fatalf("Codex room message = %q", got)
+	}
+	claude := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Should we rotate it, @human?\"}]}}\n"
+	if got := agentRoomMessage(claude); got != "Should we rotate it, @human?" {
+		t.Fatalf("Claude room message = %q", got)
+	}
+	workflow := Workflow{Stages: []Stage{{AgentID: "codex"}, {AgentID: "claude"}}}
+	if recipient, kind := agentMessageTarget(workflow, "Please review this @claude"); recipient != "claude" || kind != MessageKindHandoff {
+		t.Fatalf("handoff target = %q/%q", recipient, kind)
+	}
+	if recipient, kind := agentMessageTarget(workflow, "I need @human to decide"); recipient != MessageRecipientHuman || kind != MessageKindMessage {
+		t.Fatalf("human statement target = %q/%q", recipient, kind)
+	}
+	if recipient, kind := agentMessageTarget(workflow, "Can @human decide this?"); recipient != MessageRecipientHuman || kind != MessageKindQuestion {
+		t.Fatalf("human target = %q/%q", recipient, kind)
+	}
+	if recipient, kind := agentMessageTarget(workflow, "@human Done. @claude Please review it."); recipient != "claude" || kind != MessageKindHandoff {
+		t.Fatalf("multi-party handoff target = %q/%q", recipient, kind)
+	}
+	longUnicode := strings.Repeat("🙂", 20<<10)
+	truncated := truncateRoomMessage(longUnicode)
+	if !utf8.ValidString(truncated) || !strings.HasSuffix(truncated, "[Message truncated by Termlinks.]") {
+		t.Fatalf("truncated Unicode message is invalid: valid=%v suffix=%v", utf8.ValidString(truncated), strings.HasSuffix(truncated, "[Message truncated by Termlinks.]"))
+	}
+}
+
+func waitForWorkflowStatus(t *testing.T, manager *Manager, workflowID, status string, minimumStages int) Workflow {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		workflow, err := manager.Get(context.Background(), workflowID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if workflow.Status == status && len(workflow.Stages) >= minimumStages {
+			return workflow
+		}
+		if workflow.Status == WorkflowFailed {
+			t.Fatalf("workflow failed: %#v", workflow.Stages)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("workflow status = %s with %d stages, want %s with at least %d", workflow.Status, len(workflow.Stages), status, minimumStages)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

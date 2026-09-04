@@ -1,7 +1,7 @@
 # Termlinks AI Workflows: product and implementation plan
 
-Status: implementation contract. The initial secure sequential vertical slice is
-implemented; later phases below remain intentionally gated.
+Status: implementation contract. The secure sequential vertical slice and local
+team-room messaging are implemented; later phases below remain intentionally gated.
 
 ## 1. Decision
 
@@ -404,24 +404,26 @@ fragment.
 
 ## 13. User inspection and intervention
 
-The mobile **Work** surface shows parent workflows. A workflow screen shows the
-dependency stages, exact agent, current activity, pending input, artifacts,
-changed files, tests, and status.
+The mobile **Work** surface shows parent team rooms. The implemented room screen
+shows the human and agent participants, durable shared messages, exact agent
+turn status, replies, and links to the corresponding terminal. Planned artifact,
+diff, permission, and test summaries remain later-phase work.
 
-Every worker screen provides:
+The current room provides:
 
-- readable conversation/activity view;
-- expandable raw terminal or structured tool events;
-- changed-file and diff summary;
-- pending permission/input request;
-- direct follow-up composer scoped to that exact worker;
-- pause, cancel, retry, and open-native controls; and
-- advanced `Take terminal control` for PTY-backed workers.
+- a readable human/agent conversation;
+- a shared `@team` composer that adds context without scheduling inference;
+- direct `@agent` messages and replies that queue safe follow-up turns;
+- exact raw terminal links for agent messages; and
+- on-demand native Show/Hide controls for live PTYs.
 
-Structured user input is preferred. It is stored as a workflow event and may
-invalidate dependent stages. If the user changes a completed plan after
-implementation started, the coordinator marks downstream stages stale and
-shows the affected work before rerunning it.
+Changed-file/diff summaries, structured permission requests, pause/retry, and a
+controller lease for taking over a live PTY remain planned work.
+
+Structured user input is preferred. It is stored as a local room message. A
+direct message to an agent becomes or joins a queued follow-up turn; a shared
+message is supplied to later scheduled turns. Dependency invalidation and stale
+downstream-stage propagation are not implemented yet.
 
 Raw terminal control uses an expiring single-controller lease. Other devices
 remain viewers. Returning control to the agent creates a recorded event and the
@@ -570,9 +572,10 @@ Acceptance:
 
 ### Phase 2: durable single-worker workflows
 
-Status: partially implemented. Local SQLite state, PTY-backed stages,
-list/detail UI, direct input, cancellation, and truthful restart interruption
-are present. Pause/retry, idempotency keys, and provider-native resume remain.
+Status: partially implemented. Local SQLite state, PTY-backed stages, team-room
+list/detail UI, durable human replies, safe follow-up turns, cancellation, and
+truthful restart interruption are present. Pause/retry, idempotency keys, and
+provider-native resume remain.
 
 Deliver:
 
@@ -593,9 +596,9 @@ Acceptance:
 ### Phase 3: directed dependent workflows
 
 Status: partially implemented. The deterministic mention parser, sequential
-dependency scheduling, and bounded prior-stage context are present. Editable
-preview, typed artifacts, stale propagation, and waiting-for-user semantics
-remain.
+dependency scheduling, bounded room transcript, agent handoff/question display,
+and explicit human follow-up are present. Editable preview, typed artifacts,
+stale propagation, and true pause-for-user semantics remain.
 
 Deliver:
 

@@ -1599,6 +1599,9 @@ func allowedHTTPRoute(method, requestPath string) bool {
 		if len(parts) == 2 && method == http.MethodPost && parts[1] == "cancel" {
 			return validCoordinatorID(parts[0])
 		}
+		if len(parts) == 2 && method == http.MethodPost && parts[1] == "messages" {
+			return validCoordinatorID(parts[0])
+		}
 		if len(parts) == 4 && method == http.MethodPost && parts[1] == "stages" && parts[3] == "input" {
 			return validCoordinatorID(parts[0]) && validCoordinatorID(parts[2])
 		}

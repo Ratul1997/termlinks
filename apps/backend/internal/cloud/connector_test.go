@@ -47,6 +47,7 @@ func TestAllowedRoutes(t *testing.T) {
 		{"GET", "/api/workflows"},
 		{"POST", "/api/workflows"},
 		{"GET", "/api/workflows/" + workflowID},
+		{"POST", "/api/workflows/" + workflowID + "/messages"},
 		{"POST", "/api/workflows/" + workflowID + "/cancel"},
 		{"POST", "/api/workflows/" + workflowID + "/stages/" + stageID + "/input"},
 	}
@@ -69,6 +70,7 @@ func TestAllowedRoutes(t *testing.T) {
 		{"POST", "/api/sessions/" + sessionID + "/viewer/wrong"},
 		{"GET", "/api/workflows/../../etc/passwd"},
 		{"POST", "/api/workflows/" + workflowID + "/stages/not-an-id/input"},
+		{"POST", "/api/workflows/not-an-id/messages"},
 		{"DELETE", "/api/workflows/" + workflowID},
 	} {
 		if allowedHTTPRoute(test.method, test.path) {

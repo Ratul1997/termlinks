@@ -119,6 +119,7 @@ func (s *Server) WebHandler() http.Handler {
 	mux.HandleFunc("GET /api/workflows", s.requireWebAuth(s.listWorkflows))
 	mux.HandleFunc("POST /api/workflows", s.requireWebAuth(s.createWorkflow))
 	mux.HandleFunc("GET /api/workflows/{id}", s.requireWebAuth(s.getWorkflow))
+	mux.HandleFunc("POST /api/workflows/{id}/messages", s.requireWebAuth(s.sendWorkflowMessage))
 	mux.HandleFunc("POST /api/workflows/{id}/cancel", s.requireWebAuth(s.cancelWorkflow))
 	mux.HandleFunc("POST /api/workflows/{id}/stages/{stageID}/input", s.requireWebAuth(s.sendWorkflowInput))
 	mux.HandleFunc("GET /ws/sessions/{id}", s.requireWebAuth(func(w http.ResponseWriter, r *http.Request) {
@@ -239,6 +240,35 @@ func (s *Server) getWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, workflow)
+}
+
+func (s *Server) sendWorkflowMessage(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "cross-origin request rejected")
+		return
+	}
+	if !s.requireCoordinator(w) {
+		return
+	}
+	workflowID := r.PathValue("id")
+	if !validCoordinatorID(workflowID) {
+		writeError(w, http.StatusBadRequest, "invalid workflow ID")
+		return
+	}
+	var input coordinator.MessageInput
+	if !decodeCoordinatorJSON(w, r, &input) {
+		return
+	}
+	message, err := s.coordinator.SendMessage(r.Context(), workflowID, input)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.coordinatorError(w, err)
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, message)
 }
 
 func (s *Server) cancelWorkflow(w http.ResponseWriter, r *http.Request) {

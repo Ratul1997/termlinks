@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -597,6 +598,33 @@ func TestAIWorkflowRoutesRequireAuthenticationAndSameOrigin(t *testing.T) {
 	response.Body.Close()
 	if response.StatusCode != http.StatusForbidden {
 		t.Fatalf("cross-origin workflow status = %d", response.StatusCode)
+	}
+
+	now := time.Now().UTC()
+	roomID := strings.Repeat("a", 24)
+	stageID := strings.Repeat("b", 24)
+	if err := store.CreateWorkflow(context.Background(), coordinator.Workflow{
+		ID: roomID, Request: "team room", Cwd: root, Status: coordinator.WorkflowCompleted, CreatedAt: now, UpdatedAt: now,
+		Stages: []coordinator.Stage{{ID: stageID, Position: 0, AgentID: "codex", Title: "plan", Prompt: "plan", Status: coordinator.StageCompleted}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request, _ = http.NewRequest(http.MethodPost, web.URL+"/api/workflows/"+roomID+"/messages", bytes.NewBufferString(`{"body":"Hello team","to":"team"}`))
+	request.Header.Set("Origin", web.URL)
+	request.Header.Set("Content-Type", "application/json")
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusCreated {
+		data, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		t.Fatalf("team message status = %d: %s", response.StatusCode, data)
+	}
+	response.Body.Close()
+	loadedRoom, err := workflowManager.Get(context.Background(), roomID)
+	if err != nil || loadedRoom.MessageCount != 2 || loadedRoom.LastMessage == nil || loadedRoom.LastMessage.Body != "Hello team" {
+		t.Fatalf("persisted team room = %#v, %v", loadedRoom, err)
 	}
 
 	request, _ = http.NewRequest(http.MethodGet, web.URL+"/api/workflows/../../etc/passwd", nil)

@@ -18,6 +18,21 @@ const (
 	StageInterrupted = "interrupted"
 )
 
+const (
+	MessageSenderHuman  = "human"
+	MessageSenderAgent  = "agent"
+	MessageSenderSystem = "system"
+
+	MessageKindTask     = "task"
+	MessageKindMessage  = "message"
+	MessageKindHandoff  = "handoff"
+	MessageKindQuestion = "question"
+	MessageKindStatus   = "status"
+
+	MessageRecipientTeam  = "team"
+	MessageRecipientHuman = "human"
+)
+
 type Agent struct {
 	ID         string    `json:"id"`
 	Name       string    `json:"name"`
@@ -46,13 +61,29 @@ type Stage struct {
 }
 
 type Workflow struct {
-	ID        string    `json:"id"`
-	Request   string    `json:"request"`
-	Cwd       string    `json:"cwd"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
-	Stages    []Stage   `json:"stages"`
+	ID           string        `json:"id"`
+	Request      string        `json:"request"`
+	Cwd          string        `json:"cwd"`
+	Status       string        `json:"status"`
+	CreatedAt    time.Time     `json:"createdAt"`
+	UpdatedAt    time.Time     `json:"updatedAt"`
+	Stages       []Stage       `json:"stages"`
+	Messages     []RoomMessage `json:"messages,omitempty"`
+	MessageCount int           `json:"messageCount"`
+	LastMessage  *RoomMessage  `json:"lastMessage,omitempty"`
+}
+
+type RoomMessage struct {
+	ID         int64     `json:"id"`
+	WorkflowID string    `json:"workflowId"`
+	StageID    string    `json:"stageId,omitempty"`
+	SenderID   string    `json:"senderId"`
+	SenderType string    `json:"senderType"`
+	Recipient  string    `json:"recipient"`
+	Kind       string    `json:"kind"`
+	Body       string    `json:"body"`
+	ReplyTo    *int64    `json:"replyTo,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
 }
 
 type Event struct {
@@ -73,6 +104,12 @@ type Draft struct {
 type CreateInput struct {
 	Request string `json:"request"`
 	Cwd     string `json:"cwd"`
+}
+
+type MessageInput struct {
+	Body    string `json:"body"`
+	To      string `json:"to"`
+	ReplyTo *int64 `json:"replyTo,omitempty"`
 }
 
 type WorkspaceSuggestion struct {

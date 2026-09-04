@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 type Store struct {
 	db   *sql.DB
@@ -92,8 +92,21 @@ func (s *Store) initialize(ctx context.Context) error {
 			id INTEGER PRIMARY KEY AUTOINCREMENT, workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
 			stage_id TEXT NOT NULL DEFAULT '', type TEXT NOT NULL, message TEXT NOT NULL, created_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS room_messages (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+			stage_id TEXT NOT NULL DEFAULT '',
+			sender_id TEXT NOT NULL,
+			sender_type TEXT NOT NULL,
+			recipient TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			body TEXT NOT NULL,
+			reply_to INTEGER REFERENCES room_messages(id) ON DELETE SET NULL,
+			created_at TEXT NOT NULL
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_workflows_updated ON workflows(updated_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_events_workflow ON events(workflow_id, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_room_messages_workflow ON room_messages(workflow_id, id)`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
@@ -184,6 +197,10 @@ func (s *Store) CreateWorkflow(ctx context.Context, workflow Workflow) error {
 	if _, err = tx.ExecContext(ctx, `INSERT INTO events(workflow_id,type,message,created_at) VALUES(?,?,?,?)`, workflow.ID, "workflow.created", "Workflow queued", encodeTime(workflow.CreatedAt)); err != nil {
 		return err
 	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO room_messages(workflow_id,sender_id,sender_type,recipient,kind,body,created_at) VALUES(?,?,?,?,?,?,?)`,
+		workflow.ID, MessageSenderHuman, MessageSenderHuman, MessageRecipientTeam, MessageKindTask, workflow.Request, encodeTime(workflow.CreatedAt)); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -217,6 +234,9 @@ func (s *Store) ListWorkflows(ctx context.Context, limit int) ([]Workflow, error
 			return nil, err
 		}
 		workflows[index].Stages = stages
+		if err := s.loadMessageSummary(ctx, &workflows[index]); err != nil {
+			return nil, err
+		}
 	}
 	return workflows, nil
 }
@@ -228,7 +248,33 @@ func (s *Store) Workflow(ctx context.Context, id string) (Workflow, error) {
 		return Workflow{}, err
 	}
 	workflow.Stages, err = s.stages(ctx, id)
-	return workflow, err
+	if err != nil {
+		return Workflow{}, err
+	}
+	workflow.Messages, err = s.Messages(ctx, id, 500)
+	if err != nil {
+		return Workflow{}, err
+	}
+	if err := s.loadMessageSummary(ctx, &workflow); err != nil {
+		return Workflow{}, err
+	}
+	return workflow, nil
+}
+
+func (s *Store) loadMessageSummary(ctx context.Context, workflow *Workflow) error {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM room_messages WHERE workflow_id=?`, workflow.ID).Scan(&workflow.MessageCount); err != nil {
+		return err
+	}
+	row := s.db.QueryRowContext(ctx, `SELECT id,workflow_id,stage_id,sender_id,sender_type,recipient,kind,body,reply_to,created_at FROM room_messages WHERE workflow_id=? ORDER BY id DESC LIMIT 1`, workflow.ID)
+	message, err := scanRoomMessage(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	workflow.LastMessage = &message
+	return nil
 }
 
 type rowScanner interface{ Scan(...any) error }
@@ -351,6 +397,114 @@ func (s *Store) Events(ctx context.Context, workflowID string, after int64) ([]E
 		events = append(events, event)
 	}
 	return events, rows.Err()
+}
+
+func (s *Store) AddMessage(ctx context.Context, message RoomMessage) (RoomMessage, error) {
+	return s.addMessageWithStage(ctx, message, nil)
+}
+
+func (s *Store) AddMessageWithStage(ctx context.Context, message RoomMessage, stage Stage) (RoomMessage, error) {
+	return s.addMessageWithStage(ctx, message, &stage)
+}
+
+func (s *Store) addMessageWithStage(ctx context.Context, message RoomMessage, stage *Stage) (RoomMessage, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return RoomMessage{}, err
+	}
+	defer tx.Rollback()
+	if message.CreatedAt.IsZero() {
+		message.CreatedAt = time.Now().UTC()
+	}
+	if message.ReplyTo != nil {
+		var replyWorkflow string
+		if err := tx.QueryRowContext(ctx, `SELECT workflow_id FROM room_messages WHERE id=?`, *message.ReplyTo).Scan(&replyWorkflow); err != nil {
+			return RoomMessage{}, err
+		}
+		if replyWorkflow != message.WorkflowID {
+			return RoomMessage{}, errors.New("reply belongs to another team room")
+		}
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO room_messages(workflow_id,stage_id,sender_id,sender_type,recipient,kind,body,reply_to,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		message.WorkflowID, message.StageID, message.SenderID, message.SenderType, message.Recipient, message.Kind, message.Body, message.ReplyTo, encodeTime(message.CreatedAt))
+	if err != nil {
+		return RoomMessage{}, err
+	}
+	message.ID, err = result.LastInsertId()
+	if err != nil {
+		return RoomMessage{}, err
+	}
+	if stage != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(position), -1) + 1 FROM stages WHERE workflow_id=?`, message.WorkflowID).Scan(&stage.Position); err != nil {
+			return RoomMessage{}, err
+		}
+		stage.WorkflowID = message.WorkflowID
+		stage.Status = StageQueued
+		if _, err := tx.ExecContext(ctx, `INSERT INTO stages(id,workflow_id,position,agent_id,title,prompt,status) VALUES(?,?,?,?,?,?,?)`,
+			stage.ID, message.WorkflowID, stage.Position, stage.AgentID, stage.Title, stage.Prompt, stage.Status); err != nil {
+			return RoomMessage{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO events(workflow_id,stage_id,type,message,created_at) VALUES(?,?,?,?,?)`,
+			message.WorkflowID, stage.ID, "stage.queued", "Agent follow-up queued", encodeTime(message.CreatedAt)); err != nil {
+			return RoomMessage{}, err
+		}
+	}
+	var updated sql.Result
+	if stage != nil {
+		updated, err = tx.ExecContext(ctx, `UPDATE workflows SET status=CASE WHEN status IN (?,?,?,?) THEN ? ELSE status END,updated_at=? WHERE id=?`,
+			WorkflowCompleted, WorkflowFailed, WorkflowCancelled, WorkflowInterrupted, WorkflowQueued, encodeTime(message.CreatedAt), message.WorkflowID)
+	} else {
+		updated, err = tx.ExecContext(ctx, `UPDATE workflows SET updated_at=? WHERE id=?`, encodeTime(message.CreatedAt), message.WorkflowID)
+	}
+	if err != nil {
+		return RoomMessage{}, err
+	}
+	if changed, _ := updated.RowsAffected(); changed == 0 {
+		return RoomMessage{}, sql.ErrNoRows
+	}
+	if err := tx.Commit(); err != nil {
+		return RoomMessage{}, err
+	}
+	return message, nil
+}
+
+func (s *Store) Messages(ctx context.Context, workflowID string, limit int) ([]RoomMessage, error) {
+	if limit < 1 || limit > 500 {
+		limit = 500
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,workflow_id,stage_id,sender_id,sender_type,recipient,kind,body,reply_to,created_at FROM (
+		SELECT id,workflow_id,stage_id,sender_id,sender_type,recipient,kind,body,reply_to,created_at
+		FROM room_messages WHERE workflow_id=? ORDER BY id DESC LIMIT ?
+	) ORDER BY id`, workflowID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	messages := make([]RoomMessage, 0)
+	for rows.Next() {
+		message, err := scanRoomMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, message)
+	}
+	return messages, rows.Err()
+}
+
+func scanRoomMessage(row rowScanner) (RoomMessage, error) {
+	var message RoomMessage
+	var replyTo sql.NullInt64
+	var created string
+	if err := row.Scan(&message.ID, &message.WorkflowID, &message.StageID, &message.SenderID, &message.SenderType,
+		&message.Recipient, &message.Kind, &message.Body, &replyTo, &created); err != nil {
+		return RoomMessage{}, err
+	}
+	if replyTo.Valid {
+		value := replyTo.Int64
+		message.ReplyTo = &value
+	}
+	message.CreatedAt, _ = decodeTime(created)
+	return message, nil
 }
 
 func (s *Store) WorkspaceSuggestions(ctx context.Context, limit int) ([]WorkspaceSuggestion, error) {

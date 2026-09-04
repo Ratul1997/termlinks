@@ -63,6 +63,19 @@ type WorkflowStage = {
   endedAt?: string;
 };
 
+type RoomMessage = {
+  id: number;
+  workflowId: string;
+  stageId?: string;
+  senderId: string;
+  senderType: "human" | "agent" | "system";
+  recipient: string;
+  kind: "task" | "message" | "handoff" | "question" | "status";
+  body: string;
+  replyTo?: number;
+  createdAt: string;
+};
+
 type AIWorkflow = {
   id: string;
   request: string;
@@ -71,6 +84,9 @@ type AIWorkflow = {
   createdAt: string;
   updatedAt: string;
   stages: WorkflowStage[];
+  messages?: RoomMessage[];
+  messageCount: number;
+  lastMessage?: RoomMessage;
 };
 
 type WorkflowDraft = { request: string; cwd: string; stages: WorkflowStage[] };
@@ -1409,9 +1425,9 @@ async function renderWorkflows(message = ""): Promise<void> {
 
   const heading = el("div", "workflow-heading");
   heading.append(
-    el("p", "eyebrow", "LOCAL AI COORDINATOR"),
-    el("h1", "dashboard-title", "Direct the agents on your computer"),
-    el("p", "workflow-lead", "Mention installed agents in order. Termlinks opens each agent in a real managed terminal and carries the result into the next stage."),
+    el("p", "eyebrow", "PRIVATE LOCAL TEAM"),
+    el("h1", "dashboard-title", "Your agents, in one room"),
+    el("p", "workflow-lead", "Start a room, watch agents discuss the work, and join whenever a decision needs you. Every agent turn runs in a real headless terminal on this computer."),
   );
   const notice = el("p", "workflow-notice", message);
   notice.hidden = !message;
@@ -1464,16 +1480,17 @@ async function renderWorkflows(message = ""): Promise<void> {
 
 function renderWorkflowComposer(): HTMLElement {
   const panel = el("section", "workflow-composer");
+  panel.append(el("strong", "workflow-composer-title", "Start a team room"), el("p", "workflow-composer-copy", "Mention teammates in the order they should take a turn."));
   const agentRow = el("div", "workflow-agent-row");
   agentRow.dataset.role = "agents";
   agentRow.append(el("span", "agent-chip muted", "Detecting local agents…"));
   const form = el("form", "workflow-form");
   const request = el("textarea", "workflow-request");
   request.name = "request";
-  request.rows = 4;
+  request.rows = 3;
   request.maxLength = 48 << 10;
-  request.placeholder = "@codex inspect and plan\n@claude implement the plan\n@codex review the result";
-  request.setAttribute("aria-label", "Workflow instructions");
+  request.placeholder = "@codex plan the feature\n@claude implement the plan\n@codex review the result";
+  request.setAttribute("aria-label", "Team room instructions");
   const row = el("div", "workflow-form-row");
   const cwd = el("input", "workflow-cwd");
   cwd.name = "cwd";
@@ -1484,10 +1501,10 @@ function renderWorkflowComposer(): HTMLElement {
   cwd.setAttribute("aria-label", "Project directory");
   const projects = el("datalist");
   projects.id = "workflow-projects";
-  const submit = el("button", "workflow-start", "Start workflow →");
+  const submit = el("button", "workflow-start", "Create room →");
   submit.type = "submit";
   row.append(cwd, projects, submit);
-  const hint = el("p", "workflow-form-hint", "Runs only on this computer. Explicit @agent mentions never fall back silently.");
+  const hint = el("p", "workflow-form-hint", "Local-only state · headless terminals · explicit agents never fall back silently");
   const error = el("p", "form-error");
   error.setAttribute("role", "alert");
   const preview = el("div", "workflow-preview");
@@ -1496,7 +1513,7 @@ function renderWorkflowComposer(): HTMLElement {
     form.dataset.reviewed = "false";
     preview.hidden = true;
     preview.replaceChildren();
-    submit.textContent = "Review plan →";
+    submit.textContent = "Review team →";
   };
   request.addEventListener("input", resetPreview);
   cwd.addEventListener("input", resetPreview);
@@ -1509,14 +1526,14 @@ function renderWorkflowComposer(): HTMLElement {
     try {
       if (form.dataset.reviewed !== "true") {
         const draft = await api<WorkflowDraft>("/api/workflows/compile", { method: "POST", body: JSON.stringify({ request: request.value.trim(), cwd: cwd.value.trim() }) });
-        preview.replaceChildren(el("strong", "workflow-preview-title", "Review before starting"));
+        preview.replaceChildren(el("strong", "workflow-preview-title", "Teammates and first turns"));
         for (const [index, stage] of draft.stages.entries()) {
           preview.append(el("div", "workflow-preview-stage", `${index + 1}. @${stage.agentId} — ${stage.prompt}`));
         }
         preview.hidden = false;
         form.dataset.reviewed = "true";
         submit.disabled = false;
-        submit.textContent = "Confirm & start →";
+        submit.textContent = "Open room →";
         return;
       }
       const created = await api<AIWorkflow>("/api/workflows", { method: "POST", body: JSON.stringify({ request: request.value.trim(), cwd: cwd.value.trim() }) });
@@ -1524,7 +1541,7 @@ function renderWorkflowComposer(): HTMLElement {
     } catch (caught) {
       error.textContent = caught instanceof Error ? caught.message : "Could not start the workflow";
       submit.disabled = false;
-      submit.textContent = "Start workflow →";
+      submit.textContent = "Create room →";
     }
   });
   panel.append(agentRow, form);
@@ -1582,22 +1599,25 @@ function renderWorkflowCards(container: HTMLElement, workflows: AIWorkflow[]): v
   container.replaceChildren();
   if (workflows.length === 0) {
     const empty = el("div", "empty-state");
-    empty.append(el("span", "empty-prompt", "✦"), el("h2", "empty-title", "No AI work yet"), el("p", "empty-copy", "Create a directed workflow above. Its terminals remain available beside your normal sessions."));
+    empty.append(el("span", "empty-prompt", "✦"), el("h2", "empty-title", "No team rooms yet"), el("p", "empty-copy", "Start a private room above. Agent terminals stay headless until you choose to open one."));
     container.append(empty);
     return;
   }
   for (const workflow of workflows) {
-    const card = el("button", "workflow-card");
+    const card = el("button", "workflow-card team-room-card");
     card.type = "button";
     card.addEventListener("click", () => { void renderWorkflowDetail(workflow.id); });
     const top = el("span", "workflow-card-top");
-    top.append(el("strong", "workflow-card-title", workflow.request), el("span", `workflow-status ${workflow.status}`, workflow.status.toUpperCase()));
-    const pipeline = el("span", "workflow-pipeline");
-    workflow.stages.forEach((stage, index) => {
-      if (index) pipeline.append(el("span", "pipeline-arrow", "→"));
-      pipeline.append(el("span", `pipeline-agent ${stage.status}`, `@${stage.agentId}`));
-    });
-    card.append(top, pipeline, el("span", "workflow-card-path", compactPath(workflow.cwd)));
+    top.append(el("strong", "workflow-card-title", workflow.request), el("span", `workflow-status ${workflow.status}`, roomStatusLabel(workflow)));
+    const teammates = el("span", "team-room-members");
+    for (const agentID of workflowAgentIDs(workflow)) {
+      const latest = latestAgentStage(workflow, agentID);
+      teammates.append(el("span", `team-room-avatar ${latest?.status || "queued"}`, agentInitials(agentID)));
+    }
+    const last = workflow.lastMessage;
+    const preview = el("span", "team-room-preview", last ? `${messageSenderLabel(last)}: ${singleLine(last.body)}` : "Room created");
+    const meta = el("span", "team-room-meta", `${workflow.messageCount || 1} messages · ${compactPath(workflow.cwd)}`);
+    card.append(top, teammates, preview, meta);
     container.append(card);
   }
 }
@@ -1617,96 +1637,297 @@ async function renderWorkflowDetail(id: string): Promise<void> {
   state.selectedWorkflow = id;
   rememberPortalView("workflow", undefined, id);
   app.replaceChildren();
-  const page = el("main", "dashboard workflow-page");
-  const header = el("header", "topbar workflow-detail-topbar");
-  const back = el("button", "ghost-button", "‹ AI workflows");
+  const page = el("main", "dashboard workflow-page team-room-page");
+  const header = el("header", "topbar workflow-detail-topbar team-room-topbar");
+  const back = el("button", "ghost-button", "‹ Rooms");
   back.type = "button";
   back.addEventListener("click", () => { void renderWorkflows(); });
-  header.append(el("div", "brand", "✦ Agent work"), back);
-  const mount = el("section", "workflow-detail");
-  mount.append(el("p", "workflow-loading", "Loading workflow…"));
-  page.append(header, mount, renderAppNavigation("ai"));
+  const roomIdentity = el("div", "team-room-identity");
+  roomIdentity.append(el("strong", "team-room-title", "Team room"), el("span", "team-room-subtitle", "Loading local conversation…"));
+  const roomState = el("span", "workflow-status queued", "CONNECTING");
+  header.append(back, roomIdentity, roomState);
+  const participants = el("section", "team-participants");
+  participants.setAttribute("aria-label", "Agent teammates");
+  const feed = el("section", "team-message-feed");
+  feed.setAttribute("aria-label", "Team discussion");
+  feed.append(el("p", "workflow-loading", "Loading the local team room…"));
+  const composerMount = el("div", "team-composer-mount");
+  page.append(header, participants, feed, composerMount, renderAppNavigation("ai"));
   app.append(page);
   let remainsActive = false;
+  let composer: HTMLElement | undefined;
   const refresh = async (): Promise<void> => {
-    if (!document.body.contains(mount)) { stopPolling(); return; }
+    if (!document.body.contains(feed)) { stopPolling(); return; }
     try {
-      const workflow = await api<AIWorkflow>(`/api/workflows/${encodeURIComponent(id)}`);
-      renderWorkflowDetailContent(mount, workflow);
+      const [workflow] = await Promise.all([
+        api<AIWorkflow>(`/api/workflows/${encodeURIComponent(id)}`),
+        loadSessions(),
+      ]);
+      roomIdentity.replaceChildren(el("strong", "team-room-title", roomTitle(workflow.request)), el("span", "team-room-subtitle", compactPath(workflow.cwd)));
+      roomState.className = `workflow-status ${workflow.status}`;
+      roomState.textContent = roomStatusLabel(workflow);
+      if (!composer) {
+        composer = renderTeamComposer(workflow, refresh);
+        composerMount.replaceChildren(composer);
+      }
+      renderTeamParticipants(participants, workflow, refresh);
+      renderTeamMessages(feed, workflow, composer);
       remainsActive = workflow.status === "queued" || workflow.status === "running";
-      if (!remainsActive) stopPolling();
+      if (remainsActive && !state.polling) state.polling = window.setInterval(() => { void refresh(); }, 1500);
+      if (!remainsActive && state.polling) stopPolling();
     } catch (caught) {
-      mount.replaceChildren(el("p", "form-error", caught instanceof Error ? caught.message : "Could not load workflow"));
+      feed.replaceChildren(el("p", "form-error", caught instanceof Error ? caught.message : "Could not load team room"));
       stopPolling();
     }
   };
   await refresh();
-  if (document.body.contains(mount) && remainsActive && !state.polling) state.polling = window.setInterval(() => { void refresh(); }, 1500);
+  if (document.body.contains(feed) && remainsActive && !state.polling) state.polling = window.setInterval(() => { void refresh(); }, 1500);
 }
 
-function renderWorkflowDetailContent(container: HTMLElement, workflow: AIWorkflow): void {
+function renderTeamParticipants(container: HTMLElement, workflow: AIWorkflow, refresh: () => Promise<void>): void {
+  const signature = workflow.stages.map((stage) => `${stage.id}:${stage.status}:${stage.sessionId || ""}:${state.sessions.find((session) => session.id === stage.sessionId)?.viewer || ""}`).join("|");
+  if (container.dataset.signature === signature) return;
+  container.dataset.signature = signature;
   container.replaceChildren();
-  const heading = el("div", "workflow-detail-heading");
-  const title = el("div");
-  title.append(el("p", "eyebrow", compactPath(workflow.cwd)), el("h1", "workflow-detail-title", workflow.request));
-  heading.append(title, el("span", `workflow-status ${workflow.status}`, workflow.status.toUpperCase()));
-  container.append(heading);
-  const timeline = el("div", "workflow-timeline");
-  for (const stage of workflow.stages) {
-    const card = el("article", `workflow-stage ${stage.status}`);
-    const top = el("div", "workflow-stage-top");
-    top.append(el("strong", "workflow-stage-agent", `@${stage.agentId}`), el("span", "workflow-stage-status", stage.status));
-    card.append(top, el("p", "workflow-stage-prompt", stage.prompt));
-    if (stage.error) card.append(el("p", "workflow-stage-error", stage.error));
-    if (stage.output) {
-      const details = el("details", "workflow-output");
-      details.append(el("summary", undefined, "Saved agent output"), el("pre", undefined, stage.output));
-      card.append(details);
+  const human = el("article", "team-participant human");
+  human.append(el("span", "team-participant-avatar", "YOU"), el("span", "team-participant-copy", "You\nIn the room"));
+  container.append(human);
+  for (const agentID of workflowAgentIDs(workflow)) {
+    const stage = latestAgentStage(workflow, agentID);
+    const card = el("article", `team-participant ${stage?.status || "queued"}`);
+    const identity = el("div", "team-participant-identity");
+    identity.append(el("span", "team-participant-avatar", agentInitials(agentID)), el("span", "team-participant-copy", `@${agentID}\n${agentPresence(stage)}`));
+    card.append(identity);
+    const actions = el("div", "team-participant-actions");
+    const terminal = el("button", "team-terminal-button", "Terminal");
+    terminal.type = "button";
+    terminal.disabled = !stage?.sessionId;
+    terminal.addEventListener("click", () => { if (stage?.sessionId) void openWorkflowTerminal(workflow.id, stage.sessionId); });
+    actions.append(terminal);
+    if (stage?.sessionId) {
+      const liveSession = state.sessions.find((session) => session.id === stage.sessionId);
+      const visible = liveSession?.viewer === "visible" || liveSession?.viewer === "opening";
+      const desktop = el("button", "team-desktop-button", visible ? "Hide" : "Show");
+      desktop.type = "button";
+      desktop.disabled = !liveSession?.running || liveSession?.viewer === "unsupported";
+      desktop.addEventListener("click", async () => {
+        desktop.disabled = true;
+        try {
+          await api(`/api/sessions/${encodeURIComponent(stage.sessionId!)}/viewer/${visible ? "hide" : "show"}`, { method: "POST" });
+          await refresh();
+        } catch (caught) {
+          desktop.textContent = caught instanceof Error ? caught.message : "Failed";
+        }
+      });
+      actions.append(desktop);
     }
-    if (stage.sessionId && stage.status === "running") {
-      const actions = el("div", "workflow-stage-actions");
-      const open = el("button", "card-action", "Open live terminal");
-      open.type = "button";
-      open.addEventListener("click", () => { void openWorkflowTerminal(workflow.id, stage.sessionId!); });
-      actions.append(open);
-      actions.append(renderWorkflowInput(workflow.id, stage.id));
-      card.append(actions);
-    }
-    timeline.append(card);
-  }
-  container.append(timeline);
-  if (workflow.status === "queued" || workflow.status === "running") {
-    const cancel = el("button", "workflow-cancel", "Cancel workflow");
-    cancel.type = "button";
-    cancel.addEventListener("click", async () => {
-      if (!window.confirm("Cancel this workflow and stop its active agent terminal?")) return;
-      cancel.disabled = true;
-      try { await api(`/api/workflows/${encodeURIComponent(workflow.id)}/cancel`, { method: "POST" }); }
-      catch (caught) { cancel.textContent = caught instanceof Error ? caught.message : "Cancellation failed"; }
-    });
-    container.append(cancel);
+    card.append(actions);
+    container.append(card);
   }
 }
 
-function renderWorkflowInput(workflowID: string, stageID: string): HTMLElement {
-  const form = el("form", "workflow-input");
-  const input = el("input", "workflow-input-field");
-  input.placeholder = "Send input to this agent…";
-  input.maxLength = 48 << 10;
-  const send = el("button", "card-action", "Send");
+function renderTeamMessages(container: HTMLElement, workflow: AIWorkflow, composer?: HTMLElement): void {
+  const messages = workflow.messages || [];
+  const stageSignature = workflow.stages.map((stage) => `${stage.id}:${stage.sessionId || ""}`).join("|");
+  const signature = `${messages.length}:${messages.at(-1)?.id || 0}:${stageSignature}`;
+  if (container.dataset.signature === signature) return;
+  const wasEmpty = container.querySelector(".team-message") === null;
+  const nearBottom = window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 140;
+  container.dataset.signature = signature;
+  container.replaceChildren();
+  if (messages.length === 0) {
+    container.append(el("p", "workflow-loading", "The room is ready. Messages will appear here."));
+    return;
+  }
+  const byID = new Map(messages.map((message) => [message.id, message]));
+  for (const message of messages) {
+    if (message.senderType === "system") {
+      container.append(el("div", "team-system-message", message.body));
+      continue;
+    }
+    const bubble = el("article", `team-message ${message.senderType} ${message.kind}`);
+    const head = el("div", "team-message-head");
+    head.append(el("strong", "team-message-sender", messageSenderLabel(message)), el("span", "team-message-target", `to @${message.recipient}`), el("time", "team-message-time", relativeTime(message.createdAt)));
+    bubble.append(head);
+    if (message.replyTo) {
+      const parent = byID.get(message.replyTo);
+      if (parent) bubble.append(el("div", "team-message-reply", `Replying to ${messageSenderLabel(parent)} · ${singleLine(parent.body)}`));
+    }
+    bubble.append(el("pre", "team-message-body", message.body));
+    const actions = el("div", "team-message-actions");
+    const reply = el("button", "team-message-reply-button", "Reply");
+    reply.type = "button";
+    reply.addEventListener("click", () => {
+      if (!composer) return;
+      setTeamComposerReply(composer, message);
+    });
+    actions.append(reply);
+    const stage = workflow.stages.find((candidate) => candidate.id === message.stageId);
+    if (stage?.sessionId) {
+      const terminal = el("button", "team-message-terminal-button", "View terminal");
+      terminal.type = "button";
+      terminal.addEventListener("click", () => { void openWorkflowTerminal(workflow.id, stage.sessionId!); });
+      actions.append(terminal);
+    }
+    bubble.append(actions);
+    container.append(bubble);
+  }
+  if (wasEmpty || nearBottom) {
+    window.requestAnimationFrame(() => window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "auto" }));
+  }
+}
+
+function renderTeamComposer(workflow: AIWorkflow, refresh: () => Promise<void>): HTMLElement {
+  const panel = el("section", "team-composer");
+  panel.dataset.to = "team";
+  const reply = el("div", "team-composer-reply");
+  reply.hidden = true;
+  const targets = el("div", "team-composer-targets");
+  const addTarget = (recipient: string, label: string): void => {
+    const button = el("button", "team-target-chip", label);
+    button.type = "button";
+    button.dataset.recipient = recipient;
+    button.addEventListener("click", () => selectTeamTarget(panel, recipient));
+    targets.append(button);
+  };
+  addTarget("team", "@team");
+  for (const agentID of workflowAgentIDs(workflow)) addTarget(agentID, `@${agentID}`);
+  const form = el("form", "team-message-form");
+  const textarea = el("textarea", "team-message-input");
+  textarea.rows = 3;
+  textarea.maxLength = 48 << 10;
+  textarea.placeholder = "Join the discussion…";
+  textarea.setAttribute("aria-label", "Message the team room");
+  const send = el("button", "team-message-send", "Send");
   send.type = "submit";
-  form.append(input, send);
+  const error = el("p", "form-error team-composer-error");
+  error.setAttribute("role", "alert");
+  form.append(textarea, send);
+  panel.append(reply, targets, form, el("p", "team-composer-hint", "A direct message starts a safe agent turn and uses provider tokens. @team only adds context for later turns."), error);
+  selectTeamTarget(panel, panel.dataset.to);
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (!input.value) return;
+    const body = textarea.value.trim();
+    if (!body) return;
     send.disabled = true;
+    error.textContent = "";
     try {
-      await api(`/api/workflows/${encodeURIComponent(workflowID)}/stages/${encodeURIComponent(stageID)}/input`, { method: "POST", body: JSON.stringify({ input: input.value }) });
-      input.value = "";
-    } catch (caught) { input.value = caught instanceof Error ? caught.message : "Input failed"; }
-    finally { send.disabled = false; }
+      const replyTo = Number(panel.dataset.replyTo || 0) || undefined;
+      await api(`/api/workflows/${encodeURIComponent(workflow.id)}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ body, to: panel.dataset.to || "team", ...(replyTo ? { replyTo } : {}) }),
+      });
+      textarea.value = "";
+      panel.dataset.replyTo = "";
+      reply.hidden = true;
+      reply.replaceChildren();
+      await refresh();
+    } catch (caught) {
+      error.textContent = caught instanceof Error ? caught.message : "Could not send the message";
+    } finally {
+      send.disabled = false;
+    }
   });
-  return form;
+  textarea.addEventListener("keydown", (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") form.requestSubmit();
+  });
+  return panel;
+}
+
+function setTeamComposerReply(composer: HTMLElement, message: RoomMessage): void {
+  composer.dataset.replyTo = String(message.id);
+  const recipient = message.senderType === "agent" ? message.senderId : message.recipient;
+  selectTeamTarget(composer, recipient === "human" ? "team" : recipient);
+  const preview = composer.querySelector<HTMLElement>(".team-composer-reply");
+  const clear = el("button", "team-composer-reply-clear", "×");
+  clear.type = "button";
+  clear.setAttribute("aria-label", "Cancel reply");
+  clear.addEventListener("click", () => {
+    composer.dataset.replyTo = "";
+    selectTeamTarget(composer, "team");
+    if (preview) {
+      preview.hidden = true;
+      preview.replaceChildren();
+    }
+  });
+  preview?.replaceChildren(el("span", undefined, `Replying to ${messageSenderLabel(message)}`), el("span", undefined, singleLine(message.body)), clear);
+  if (preview) preview.hidden = false;
+  composer.querySelector<HTMLTextAreaElement>(".team-message-input")?.focus({ preventScroll: true });
+}
+
+function selectTeamTarget(composer: HTMLElement, recipient = "team"): void {
+  composer.dataset.to = recipient;
+  for (const chip of composer.querySelectorAll<HTMLButtonElement>(".team-target-chip")) {
+    chip.classList.toggle("active", chip.dataset.recipient === recipient);
+    chip.setAttribute("aria-pressed", String(chip.dataset.recipient === recipient));
+  }
+}
+
+function workflowAgentIDs(workflow: AIWorkflow): string[] {
+  return Array.from(new Set(workflow.stages.map((stage) => stage.agentId)));
+}
+
+function latestAgentStage(workflow: AIWorkflow, agentID: string): WorkflowStage | undefined {
+  return [...workflow.stages].reverse().find((stage) => stage.agentId === agentID);
+}
+
+function agentPresence(stage?: WorkflowStage): string {
+  switch (stage?.status) {
+    case "running": return "Working now";
+    case "queued": return "Waiting for turn";
+    case "completed": return "Turn complete";
+    case "failed": return "Needs attention";
+    case "cancelled": return "Stopped";
+    case "interrupted": return "Disconnected";
+    default: return "Available";
+  }
+}
+
+function roomStatusLabel(workflow: AIWorkflow): string {
+  const messages = workflow.messages || (workflow.lastMessage ? [workflow.lastMessage] : []);
+  const latestHumanMessage = [...messages].reverse().find((message) => message.senderType === "human")?.id || 0;
+  const latestHumanQuestion = [...messages].reverse().find((message) => message.kind === "question" && message.recipient === "human" && message.body.includes("?"))?.id || 0;
+  const needsHuman = latestHumanQuestion > latestHumanMessage;
+  if (needsHuman) return "NEEDS YOU";
+  switch (workflow.status) {
+    case "running": return "LIVE";
+    case "queued": return "QUEUED";
+    case "completed": return "DONE";
+    case "failed": return "BLOCKED";
+    case "cancelled": return "STOPPED";
+    case "interrupted": return "INTERRUPTED";
+    default: return workflow.status.toUpperCase();
+  }
+}
+
+function roomTitle(request: string): string {
+  const value = singleLine(request.replace(/@[a-z][a-z0-9_-]*/gi, "").trim());
+  return value.length > 54 ? value.slice(0, 51) + "…" : value || "AI team room";
+}
+
+function agentInitials(agentID: string): string {
+  return agentID.slice(0, 2).toUpperCase();
+}
+
+function messageSenderLabel(message: RoomMessage): string {
+  return message.senderType === "human" ? "You" : `@${message.senderId}`;
+}
+
+function singleLine(value: string): string {
+  const line = value.replace(/\s+/g, " ").trim();
+  return line.length > 110 ? line.slice(0, 107) + "…" : line;
+}
+
+function relativeTime(value: string): string {
+  const time = new Date(value).getTime();
+  if (!Number.isFinite(time)) return "now";
+  const seconds = Math.max(0, Math.floor((Date.now() - time) / 1000));
+  if (seconds < 60) return "now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
 }
 
 async function openWorkflowTerminal(workflowID: string, sessionID: string): Promise<void> {

@@ -4,6 +4,19 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 
 ## [Unreleased]
 
+## [0.8.15] - 2026-09-05
+
+### Added
+
+- AI Work is now a private local team room: the human task, agent results, handoffs, questions, replies, and status updates form one durable messenger-style conversation.
+- Humans can post shared `@team` context without starting more inference, or message a named participant to queue a safe follow-up turn in that agent's real headless terminal.
+- Every later agent turn receives a bounded transcript of the room, while participant cards and individual messages link back to the exact managed terminal and its explicit Show/Hide controls.
+
+### Security
+
+- Agent-written mentions are display-only handoff metadata and cannot create work, run commands, or expand coordinator authority.
+- Team-room messages remain in the private local SQLite database, are size-bounded and sanitized, and use the existing authenticated, same-origin, encrypted relay route.
+
 ## [0.8.14] - 2026-09-05
 
 ### Fixed
@@ -129,7 +142,8 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 - Private SQLite workflow and terminal-history state.
 - Browser-created terminal continuity with native terminal attachment.
 
-[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.14...HEAD
+[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.15...HEAD
+[0.8.15]: https://github.com/Ratul1997/termlinks/compare/v0.8.14...v0.8.15
 [0.8.14]: https://github.com/Ratul1997/termlinks/compare/v0.8.13...v0.8.14
 [0.8.13]: https://github.com/Ratul1997/termlinks/compare/v0.8.12...v0.8.13
 [0.8.12]: https://github.com/Ratul1997/termlinks/compare/v0.8.11...v0.8.12
