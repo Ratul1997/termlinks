@@ -4,6 +4,12 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 
 ## [Unreleased]
 
+## [0.8.12] - 2026-09-05
+
+### Changed
+
+- Version 2 now exposes xterm's real editable keyboard target directly over the active cursor row on touch devices, allowing iOS's native press-and-hold **Paste** menu inside the terminal. The separate Paste accessory key was removed; other rows remain available for native selection and Copy.
+
 ## [0.8.11] - 2026-09-05
 
 ### Added
@@ -107,7 +113,8 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 - Private SQLite workflow and terminal-history state.
 - Browser-created terminal continuity with native terminal attachment.
 
-[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.11...HEAD
+[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.12...HEAD
+[0.8.12]: https://github.com/Ratul1997/termlinks/compare/v0.8.11...v0.8.12
 [0.8.11]: https://github.com/Ratul1997/termlinks/compare/v0.8.10...v0.8.11
 [0.8.10]: https://github.com/Ratul1997/termlinks/compare/v0.8.9...v0.8.10
 [0.8.9]: https://github.com/Ratul1997/termlinks/compare/v0.8.8...v0.8.9

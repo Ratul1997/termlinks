@@ -16,7 +16,7 @@ import {
 import { TerminalStreamReconciler, terminalStreamControl } from "./terminal-reconnect";
 import { nextTerminalInputMode, parseTerminalInputMode, type TerminalInputMode } from "./terminal-input-mode";
 import { directAttachmentInput, insertAttachmentPath } from "./terminal-attachments";
-import { insertClipboardText, terminalPasteInput } from "./terminal-clipboard";
+import { terminalPasteInput } from "./terminal-clipboard";
 import { TerminalReplyGate } from "./terminal-reply-gate";
 import { binaryStringToBytes, consumeTouchWheel } from "./terminal-touch";
 import "./style.css";
@@ -3615,7 +3615,7 @@ function renderTerminalComposer(): HTMLElement {
   const status = el("div", "terminal-composer-meta");
   status.append(
     el("span", "terminal-composer-hint", "Enter to send · Shift+Enter for a new line"),
-    el("span", "terminal-direct-hint", "Hold text to copy · Paste inserts here"),
+    el("span", "terminal-direct-hint", "Hold cursor line to paste · hold output to copy"),
     el("span", "terminal-composer-state", "Connecting…"),
   );
   let uploadInProgress = false;
@@ -3752,46 +3752,6 @@ function renderExtraKeys(focusTarget?: HTMLElement): HTMLElement {
     });
     bar.append(button);
   }
-  const paste = el("button", "key-button terminal-paste-key", "Paste");
-  paste.type = "button";
-  paste.classList.add("terminal-control-key");
-  paste.disabled = true;
-  paste.title = "Paste clipboard at the current cursor without pressing Enter";
-  paste.addEventListener("pointerdown", (event) => event.preventDefault());
-  paste.addEventListener("click", async () => {
-    try {
-      const value = await navigator.clipboard.readText();
-      if (!value) {
-        setTerminalInputStatus("Clipboard is empty");
-        return;
-      }
-      const page = paste.closest<HTMLElement>(".terminal-page");
-      if (page?.dataset.inputMode === "direct") {
-        const pasted = terminalPasteInput(value, state.terminal?.modes.bracketedPasteMode ?? false);
-        if (!sendTerminalInput(pasted)) throw new Error("Paste unavailable · reconnecting");
-        setTerminalInputStatus("Pasted · press Enter to send");
-        state.terminal?.focus();
-        return;
-      }
-      if (!(focusTarget instanceof HTMLTextAreaElement)) return;
-      const insertion = insertClipboardText(
-        focusTarget.value,
-        value,
-        focusTarget.selectionStart ?? focusTarget.value.length,
-        focusTarget.selectionEnd ?? focusTarget.value.length,
-      );
-      focusTarget.value = insertion.value;
-      focusTarget.setSelectionRange(insertion.caret, insertion.caret);
-      focusTarget.dispatchEvent(new Event("input", { bubbles: true }));
-      focusTarget.focus({ preventScroll: true });
-      setTerminalInputStatus("Pasted · ready to send");
-    } catch {
-      if (paste.closest<HTMLElement>(".terminal-page")?.dataset.inputMode === "direct") state.terminal?.focus();
-      else focusTarget?.focus({ preventScroll: true });
-      setTerminalInputStatus("Use the system Paste command");
-    }
-  });
-  bar.prepend(paste);
   return bar;
 }
 
