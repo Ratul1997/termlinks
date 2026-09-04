@@ -16,6 +16,7 @@ import {
 import { TerminalStreamReconciler, terminalStreamControl } from "./terminal-reconnect";
 import { nextTerminalInputMode, parseTerminalInputMode, type TerminalInputMode } from "./terminal-input-mode";
 import { directAttachmentInput, insertAttachmentPath } from "./terminal-attachments";
+import { insertClipboardText, terminalPasteInput } from "./terminal-clipboard";
 import { TerminalReplyGate } from "./terminal-reply-gate";
 import { binaryStringToBytes, consumeTouchWheel } from "./terminal-touch";
 import "./style.css";
@@ -2984,6 +2985,20 @@ function renderTerminal(id: string, workflowID?: string): void {
     event.preventDefault();
     event.stopImmediatePropagation();
   }, { capture: true });
+  page.addEventListener("paste", (event) => {
+    if (
+      page.dataset.inputMode !== "direct"
+      || !(event.target instanceof Node)
+      || !mount.contains(event.target)
+    ) return;
+    const value = event.clipboardData?.getData("text/plain") ?? "";
+    if (!value) return;
+    const pasted = terminalPasteInput(value, terminal.modes.bracketedPasteMode);
+    if (!sendTerminalInput(pasted)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    setTerminalInputStatus("Pasted · press Enter to send");
+  }, { capture: true });
   terminal.onData((data) => {
     const reply = terminalReplyGate.receive(new TextEncoder().encode(data));
     if (reply && state.socket?.readyState === WebSocket.OPEN) state.socket.send(reply);
@@ -3600,7 +3615,7 @@ function renderTerminalComposer(): HTMLElement {
   const status = el("div", "terminal-composer-meta");
   status.append(
     el("span", "terminal-composer-hint", "Enter to send · Shift+Enter for a new line"),
-    el("span", "terminal-direct-hint", "Tap terminal to type · swipe to navigate"),
+    el("span", "terminal-direct-hint", "Hold text to copy · Paste inserts here"),
     el("span", "terminal-composer-state", "Connecting…"),
   );
   let uploadInProgress = false;
@@ -3680,10 +3695,7 @@ function renderTerminalComposer(): HTMLElement {
     // Send the composer value and Enter as one ordered PTY message. Calling
     // xterm.paste() and then sending Enter separately can race a just-resumed
     // encrypted link, clearing the composer after only one half was delivered.
-    const normalized = value.replace(/\r?\n/g, "\r");
-    const pasted = state.terminal?.modes.bracketedPasteMode
-      ? `\u001b[200~${normalized}\u001b[201~`
-      : normalized;
+    const pasted = terminalPasteInput(value, state.terminal?.modes.bracketedPasteMode ?? false);
     if (!sendTerminalInput(`${pasted}\r`)) {
       const statusText = status.querySelector<HTMLElement>(".terminal-composer-state");
       if (statusText) statusText.textContent = "Not sent · reconnecting";
@@ -3740,6 +3752,46 @@ function renderExtraKeys(focusTarget?: HTMLElement): HTMLElement {
     });
     bar.append(button);
   }
+  const paste = el("button", "key-button terminal-paste-key", "Paste");
+  paste.type = "button";
+  paste.classList.add("terminal-control-key");
+  paste.disabled = true;
+  paste.title = "Paste clipboard at the current cursor without pressing Enter";
+  paste.addEventListener("pointerdown", (event) => event.preventDefault());
+  paste.addEventListener("click", async () => {
+    try {
+      const value = await navigator.clipboard.readText();
+      if (!value) {
+        setTerminalInputStatus("Clipboard is empty");
+        return;
+      }
+      const page = paste.closest<HTMLElement>(".terminal-page");
+      if (page?.dataset.inputMode === "direct") {
+        const pasted = terminalPasteInput(value, state.terminal?.modes.bracketedPasteMode ?? false);
+        if (!sendTerminalInput(pasted)) throw new Error("Paste unavailable · reconnecting");
+        setTerminalInputStatus("Pasted · press Enter to send");
+        state.terminal?.focus();
+        return;
+      }
+      if (!(focusTarget instanceof HTMLTextAreaElement)) return;
+      const insertion = insertClipboardText(
+        focusTarget.value,
+        value,
+        focusTarget.selectionStart ?? focusTarget.value.length,
+        focusTarget.selectionEnd ?? focusTarget.value.length,
+      );
+      focusTarget.value = insertion.value;
+      focusTarget.setSelectionRange(insertion.caret, insertion.caret);
+      focusTarget.dispatchEvent(new Event("input", { bubbles: true }));
+      focusTarget.focus({ preventScroll: true });
+      setTerminalInputStatus("Pasted · ready to send");
+    } catch {
+      if (paste.closest<HTMLElement>(".terminal-page")?.dataset.inputMode === "direct") state.terminal?.focus();
+      else focusTarget?.focus({ preventScroll: true });
+      setTerminalInputStatus("Use the system Paste command");
+    }
+  });
+  bar.prepend(paste);
   return bar;
 }
 
@@ -3749,17 +3801,21 @@ function sendTerminalInput(value: string): boolean {
   return true;
 }
 
-async function copyVisibleTerminalOutput(): Promise<void> {
-  const terminal = state.terminal;
-  if (!terminal) return;
-  const copied = await copyToDeviceClipboard(terminalVisibleText(terminal));
+function setTerminalInputStatus(message: string): void {
   const status = document.querySelector<HTMLElement>(".terminal-composer-state");
   if (!status) return;
-  const message = copied ? "Screen copied" : "Hold terminal text to select";
   status.textContent = message;
   window.setTimeout(() => {
     if (status.textContent === message) status.textContent = state.socket?.readyState === WebSocket.OPEN ? "Ready" : "Input unavailable";
   }, 1800);
+}
+
+async function copyVisibleTerminalOutput(): Promise<void> {
+  const terminal = state.terminal;
+  if (!terminal) return;
+  const copied = await copyToDeviceClipboard(terminalVisibleText(terminal));
+  const message = copied ? "Screen copied" : "Hold terminal text to select";
+  setTerminalInputStatus(message);
 }
 
 function terminalBufferText(terminal: Terminal, first = 0, last = terminal.buffer.active.length): string {

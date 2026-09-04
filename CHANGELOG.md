@@ -4,6 +4,12 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 
 ## [Unreleased]
 
+## [0.8.11] - 2026-09-05
+
+### Added
+
+- Terminal clipboard behavior is available in both interfaces: Version 1 pastes at the composer selection, while Version 2 accepts native paste events and a visible **Paste** key that inserts directly at the PTY cursor without adding Enter. Long-press selection and desktop copy shortcuts continue to copy terminal output.
+
 ## [0.8.10] - 2026-09-05
 
 ### Changed
@@ -101,7 +107,8 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 - Private SQLite workflow and terminal-history state.
 - Browser-created terminal continuity with native terminal attachment.
 
-[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.10...HEAD
+[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.11...HEAD
+[0.8.11]: https://github.com/Ratul1997/termlinks/compare/v0.8.10...v0.8.11
 [0.8.10]: https://github.com/Ratul1997/termlinks/compare/v0.8.9...v0.8.10
 [0.8.9]: https://github.com/Ratul1997/termlinks/compare/v0.8.8...v0.8.9
 [0.8.8]: https://github.com/Ratul1997/termlinks/compare/v0.8.7...v0.8.8
