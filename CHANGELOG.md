@@ -4,6 +4,12 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-09-05
+
+### Fixed
+
+- Alternate-screen applications such as Claude Code now receive one-finger navigation through a pinned native momentum surface. The first swipe is captured consistently, browser inertia continues after release, and the visible terminal remains stationary instead of flashing or scrolling into an empty area.
+
 ## [0.8.6] - 2026-09-05
 
 ### Fixed
@@ -73,7 +79,8 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 - Private SQLite workflow and terminal-history state.
 - Browser-created terminal continuity with native terminal attachment.
 
-[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.6...HEAD
+[Unreleased]: https://github.com/Ratul1997/termlinks/compare/v0.8.7...HEAD
+[0.8.7]: https://github.com/Ratul1997/termlinks/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/Ratul1997/termlinks/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/Ratul1997/termlinks/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/Ratul1997/termlinks/compare/v0.8.3...v0.8.4

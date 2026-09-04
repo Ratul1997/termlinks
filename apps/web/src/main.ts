@@ -3300,19 +3300,29 @@ function enableTouchScroll(
   let disposed = false;
   let ignoreProgrammaticScroll = false;
   let touchIdentifier: number | undefined;
-  let previousTouchY = 0;
   let startingTouchY = 0;
   let touchStartedAt = 0;
   let touchMoved = false;
   let touchRemainder = 0;
+  let tuiScrollAnchor = 0;
+  let tuiRecenterTimer = 0;
+
+  // Full-screen applications own their history, so a retained xterm buffer
+  // cannot provide normal browser scrolling. Give WebKit/Chromium a large,
+  // centered native scroll surface and translate its inertial movement into
+  // bounded terminal wheel reports while the rendered screen stays pinned.
+  const TUI_SCROLL_RANGE = 100_000;
 
   const resetTouch = (): void => {
     touchIdentifier = undefined;
-    previousTouchY = 0;
     startingTouchY = 0;
     touchStartedAt = 0;
     touchMoved = false;
     touchRemainder = 0;
+  };
+  const clearTUIRecenter = (): void => {
+    if (tuiRecenterTimer) window.clearTimeout(tuiRecenterTimer);
+    tuiRecenterTimer = 0;
   };
   const isAlternateScreen = (): boolean => terminal.buffer.active.type === "alternate";
   const findTouch = (touches: TouchList, identifier: number): Touch | undefined => {
@@ -3329,14 +3339,26 @@ function enableTouchScroll(
     if (tuiHint) tuiHint.hidden = !alternate || isDirectMode();
     resetTouch();
     if (alternate) {
-      spacer.style.height = "0";
-      root.scrollTop = 0;
+      clearTUIRecenter();
+      spacer.style.height = `${TUI_SCROLL_RANGE + root.clientHeight}px`;
+      ignoreProgrammaticScroll = true;
+      tuiScrollAnchor = TUI_SCROLL_RANGE / 2;
+      root.scrollTop = tuiScrollAnchor;
     } else {
       syncNativeScroller(true);
     }
   };
 
   const rowHeight = (): number => screen.clientHeight / terminal.rows;
+  const syncTUIScroller = (recenter = false): void => {
+    spacer.style.height = `${TUI_SCROLL_RANGE + root.clientHeight}px`;
+    if (!recenter) return;
+    clearTUIRecenter();
+    ignoreProgrammaticScroll = true;
+    touchRemainder = 0;
+    tuiScrollAnchor = TUI_SCROLL_RANGE / 2;
+    root.scrollTop = tuiScrollAnchor;
+  };
   const syncNativeScroller = (force = false): void => {
     if (disposed) return;
     const height = rowHeight();
@@ -3355,7 +3377,8 @@ function enableTouchScroll(
     if (!syncFrame) {
       syncFrame = window.requestAnimationFrame(() => {
         syncFrame = 0;
-        syncNativeScroller();
+        if (isAlternateScreen()) syncTUIScroller();
+        else syncNativeScroller();
       });
     }
   };
@@ -3365,6 +3388,35 @@ function enableTouchScroll(
     if (selection && !selection.isCollapsed && selection.anchorNode && root.contains(selection.anchorNode)) return;
     const height = rowHeight();
     if (!Number.isFinite(height) || height <= 0) return;
+    if (isAlternateScreen()) {
+      const current = root.scrollTop;
+      const consumed = consumeTouchWheel(current, tuiScrollAnchor, touchRemainder, Math.max(12, Math.min(28, height * 1.1)));
+      tuiScrollAnchor = current;
+      touchRemainder = consumed.remainder;
+      const bounds = screen.getBoundingClientRect();
+      const clientX = bounds.left + (bounds.width / 2);
+      const clientY = bounds.top + (bounds.height / 2);
+      for (const direction of consumed.directions) {
+        root.dispatchEvent(new WheelEvent("wheel", {
+          bubbles: true,
+          cancelable: true,
+          clientX,
+          clientY,
+          deltaMode: WheelEvent.DOM_DELTA_LINE,
+          deltaY: direction,
+        }));
+      }
+      clearTUIRecenter();
+      tuiRecenterTimer = window.setTimeout(() => {
+        tuiRecenterTimer = 0;
+        if (!isAlternateScreen()) return;
+        ignoreProgrammaticScroll = true;
+        touchRemainder = 0;
+        tuiScrollAnchor = TUI_SCROLL_RANGE / 2;
+        root.scrollTop = tuiScrollAnchor;
+      }, 180);
+      return;
+    }
     const buffer = terminal.buffer.active;
     const line = Math.max(0, Math.min(buffer.length - terminal.rows, Math.round(root.scrollTop / height)));
     if (line !== buffer.viewportY) terminal.scrollToLine(line);
@@ -3373,6 +3425,11 @@ function enableTouchScroll(
     // From this point, scroll events belong to the user's finger rather than
     // a resize or xterm-driven position correction.
     ignoreProgrammaticScroll = false;
+    clearTUIRecenter();
+    if (isAlternateScreen()) {
+      tuiScrollAnchor = root.scrollTop;
+      touchRemainder = 0;
+    }
   };
 
   const onTUITouchStart = (event: TouchEvent): void => {
@@ -3380,7 +3437,6 @@ function enableTouchScroll(
     const touch = event.touches[0];
     if (!touch) return;
     touchIdentifier = touch.identifier;
-    previousTouchY = touch.clientY;
     startingTouchY = touch.clientY;
     touchStartedAt = performance.now();
     touchMoved = false;
@@ -3391,26 +3447,6 @@ function enableTouchScroll(
     const touch = findTouch(event.touches, touchIdentifier);
     if (!touch) return;
     if (Math.abs(touch.clientY - startingTouchY) > 7) touchMoved = true;
-    if (!isAlternateScreen()) return;
-    const threshold = Math.max(12, Math.min(28, rowHeight() * 1.1));
-    const consumed = consumeTouchWheel(previousTouchY, touch.clientY, touchRemainder, threshold);
-    previousTouchY = touch.clientY;
-    touchRemainder = consumed.remainder;
-    if (consumed.directions.length === 0) return;
-    event.preventDefault();
-    const bounds = screen.getBoundingClientRect();
-    const clientX = Math.max(bounds.left + 1, Math.min(bounds.right - 1, touch.clientX));
-    const clientY = Math.max(bounds.top + 1, Math.min(bounds.bottom - 1, touch.clientY));
-    for (const direction of consumed.directions) {
-      root.dispatchEvent(new WheelEvent("wheel", {
-        bubbles: true,
-        cancelable: true,
-        clientX,
-        clientY,
-        deltaMode: WheelEvent.DOM_DELTA_LINE,
-        deltaY: direction,
-      }));
-    }
   };
   const onTUITouchEnd = (event: TouchEvent): void => {
     if (touchIdentifier === undefined) return;
@@ -3440,11 +3476,13 @@ function enableTouchScroll(
       ignoreProgrammaticScroll = true;
       if (syncFrame) window.cancelAnimationFrame(syncFrame);
       syncFrame = 0;
-      syncNativeScroller(true);
+      if (isAlternateScreen()) syncTUIScroller(true);
+      else syncNativeScroller(true);
     },
     cleanup: () => {
       disposed = true;
       if (syncFrame) window.cancelAnimationFrame(syncFrame);
+      clearTUIRecenter();
       renderSubscription.dispose();
       scrollSubscription.dispose();
       resizeSubscription.dispose();

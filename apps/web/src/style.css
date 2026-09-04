@@ -421,11 +421,11 @@ button { color: inherit; }
   -webkit-overflow-scrolling: touch; -webkit-user-select: text; user-select: text;
 }
 .terminal-mount .xterm.native-touch-terminal.tui-touch-terminal {
-  overflow-y: hidden; touch-action: none;
+  overflow-y: auto; touch-action: pan-y;
 }
 .terminal-mount .xterm.native-touch-terminal.tui-touch-terminal > .xterm-scrollable-element,
 .terminal-mount .xterm.native-touch-terminal.tui-touch-terminal .xterm-screen {
-  touch-action: none;
+  touch-action: pan-y;
 }
 .terminal-tui-hint {
   position: absolute; z-index: 4; right: 11px; bottom: 8px; padding: 5px 7px;
