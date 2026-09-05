@@ -552,19 +552,22 @@ button { color: inherit; }
   color: #edf8ff; background: #285f80;
 }
 /* xterm receives mobile keyboard input through a one-cell textarea hidden
-   behind the renderer. While Version 2 has focus, turn that same textarea
+   behind the renderer. In Version 2, turn that same textarea
    into a transparent touch target across the live cursor row. This gives
    iOS a real editable control for its native press-and-hold Paste menu while
    leaving every other terminal row available for native text selection. */
-.terminal-page[data-input-mode="direct"] .xterm.native-touch-terminal.direct-touch-terminal.focus .xterm-helpers {
+.terminal-page[data-input-mode="direct"] .xterm.native-touch-terminal.direct-touch-terminal .xterm-helpers {
   width: 100%; height: 100%; pointer-events: none;
 }
-.terminal-page[data-input-mode="direct"] .xterm.native-touch-terminal.direct-touch-terminal.focus .xterm-helper-textarea {
+.terminal-page[data-input-mode="direct"] .xterm.native-touch-terminal.direct-touch-terminal .xterm-helper-textarea {
   z-index: 5 !important; left: 0 !important; width: 100% !important; min-width: 100% !important;
-  height: 32px !important; transform: translateY(-7px); padding: 0; border: 0; resize: none;
-  opacity: .01 !important; color: transparent !important; background: transparent !important;
+  height: var(--terminal-cursor-hit-height, 17px) !important; font-size: 16px !important; padding: 0; border: 0; resize: none;
+  opacity: 1 !important; color: transparent !important; background: transparent !important;
   -webkit-text-fill-color: transparent; caret-color: transparent; touch-action: pan-y; pointer-events: auto;
   -webkit-user-select: text !important; user-select: text !important; -webkit-touch-callout: default;
+}
+.terminal-page[data-input-mode="direct"] .xterm.native-touch-terminal:not(.cursor-in-viewport) .xterm-helper-textarea {
+  pointer-events: none; opacity: 0 !important;
 }
 .terminal-native-scroll-spacer { width: 1px; min-height: 0; pointer-events: none; }
 .terminal-mount .xterm-viewport {

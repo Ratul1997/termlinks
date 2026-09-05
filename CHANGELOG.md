@@ -4,6 +4,12 @@ All notable user-visible changes are recorded here. Termlinks uses semantic vers
 
 ## [Unreleased]
 
+### Fixed
+
+- Mobile/narrow terminal output uses native text selection without xterm cancelling the browser's mouse selection gesture.
+- Version 2 exposes its editable cursor row before focus, uses a 16px input font to avoid iOS focus zoom, and removes that hit target from historical output when the cursor is offscreen.
+- Native wheel scrolling no longer competes with xterm's inner scroller. Alternate-screen scrolling recenters only near the runway edges and never while a finger or selection is active.
+
 ## [0.8.15] - 2026-09-05
 
 ### Added
